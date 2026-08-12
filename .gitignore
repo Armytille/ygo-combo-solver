@@ -1,0 +1,12 @@
+# Sorties de build
+bin/
+obj/
+build/
+
+# Replays produits par --outdir
+solutions/
+
+# Logs et fichiers de travail
+*.log
+
+__pycache__/
