@@ -1577,3 +1577,96 @@ décisions AVEC les trois rips). Non converti ≠ réfuté : les refermetures é
 garde promettait un contre DISPONIBLE à 33/33 fenêtres ; le test adverse prouve un contre
 QUI MARCHE ET REFERME sur 16 fenêtres, du milieu de ligne à la fin — et chiffre son prix
 (board complet : +2-3 actions ; voie Zalen : +1 brûlée, Junk Signal en moins sur le board).
+
+### 9.12 Session 6 : la borne instrumentée se révèle vacueuse, le prior par coup est réfuté — et l'escalade descend à 259
+
+**La mission** : le rendement d'abord (chantiers 1-3 : borne B&B instrumentée, partagée,
+calibrée ; chantier 5 : prior par rejeu de solutions visé sur les rips), le débit ensuite
+(LuaJIT en chantier isolé si tenté). Santé verte AVANT et APRÈS chaque changement de moteur
+(0 retry, 290 digests distincts / 0 fusion, référence retrouvée à 0 écart, A/B nouveauté
+sans perte — l'écart de couverture IDLECMD #240 est préexistant, identique session 5).
+
+**Chantier 1 — l'instrumentation, une matinée de code, LE résultat de la session.** Les
+compteurs `burn_cuts`/`goal_hits` existaient sans un printf ; ils sortent désormais dans
+les trois rapports (phase tirages : ligne `anytime`, finisseur : bilan agrégé, LDS :
+colonne `atteinte(s)`), plus le pic de brûlées des lignes SANS board cible (une solution
+s'arrête au tour 1 sans capture — son pic calibre pourtant la marge). Ce que les compteurs
+révèlent aussitôt, sur 7 runs d'escalade de 600 s (26-33 M états chacun, graine 777) :
+**la borne B&B ne coupe JAMAIS en phase tirages — 0 coupure, 0 atteinte, à toute marge de
+4 à 255.** Deux causes lisibles : aucun tirage pleine ligne n'atteint le but sur ce flux
+(les conversions viennent du finisseur, on le savait) ; et aucun état de tirage ne dépasse
+23 brûlées au tour 1 (0 coupure même à borne 19+4=23). Les pics mesurés ferment la
+question : référence 23 (marge 4), ligne 55 actions pic 23, ligne 56 actions pic 22 —
+**l'espace des lignes gagnantes vit sous le pic de la référence, la borne brûlées est
+structurellement inactive sur ce problème.** Elle ne mord que dans le finisseur (préfixes
+déjà chargés à ~19-22 brûlées), et seulement à marge 4 : 201 coupures.
+
+**Chantier 2 — le partage de la borne entre workers : NEUTRE, mécanisme expliqué.**
+`SearchConfig::shared_burn` (atomique, CAS min à la publication dans GoalCheck, charge
+relaxed au test — négligeable devant les deux Count() du test), câblé phase tirages et
+finisseur, `--no-burn-share` pour l'A/B. Verdict : rien à partager — aucun but ne tombe en
+phase tirages, et le finisseur hérite déjà de la meilleure borne via `best_known_burn`.
+Défaut ON (gratuit, seul actif si un but tombait en cours de phase), documenté neutre.
+
+**Chantier 3 — `--burn-slack` 4/6/8/255 à budget égal : 6/8/255 indiscernables (0 coupure
+partout), 4 seul actif (201 coupures au finisseur) sans avantage** (3 conversions contre
+4-5, mélange de coûts le plus pauvre — du bruit, ses propres lignes piquent à 22-23 donc
+la borne 23 ne les coupe pas). Défaut 6 inchangé. Le chantier est CLOS : aucune marge ne
+peut rendre du rendement quand la borne n'a rien à couper.
+
+**La mesure transversale qui recadre tous les A/B futurs : à graine FIXÉE, le bruit de
+run domine les compteurs de tirages.** Entre deux bras dont le mécanisme n'a RIEN fait
+(0 coupure des deux côtés), les tirages rippants ≥1 vont de 98 à 9 402 et la crête de 6/8
+à 8/8 — l'ordre des échanges inter-workers dépend du timing (piège 24 à l'échelle du run).
+Conséquence de discipline : seuls les faits STRUCTURELS tranchent un A/B (coupures,
+conversions, coûts écrits, ensembles de fenêtres converties) — jamais les compteurs
+d'échantillonnage.
+
+**Chantier 5 — le prior par rejeu de solutions (arXiv:2401.10431) : implémenté, mesuré
+sur les DEUX étalons, NEUTRE — l'hypothèse « déficit de poids par coup » est réfutée.**
+`--prior <fichier|dossier>` (répétable) relève les plan_key de chaque ligne du corpus par
+LiftPlan sur le duel de SON en-tête (piège 21 respecté : on ne rejoue rien sur le duel de
+départ, seules les identités sémantiques traversent), pondère par la fréquence dans le
+corpus (`--prior-weight`, défaut 2.0 pour un coup présent partout), et sert le tout en
+poids INITIAUX de politique aux tirages ET aux fenêtres `--fire`. Le relevé est bon marché
+et propre : 28 lignes de `sF_final/` en 5,2 s, 101 coups distincts, 1 seule étape non
+identifiée par ligne. Mais : étalon 1 — mêmes coûts retrouvés, conversions 5 contre 4
+(bruit), rips du même ordre ; étalon 2 (300 s/fenêtre, graine 888, `--fire-open`) —
+**ensembles de conversion IDENTIQUES avec et sans prior : 10/15 fenêtres (déc. 113-173),
+les cinq fenêtres précoces (déc. 58-103) murées des deux côtés**, mêmes manques (Crimson
+Dragon / Crystal Wing), mêmes crêtes 7-8/8. La conclusion de fond : le verrou des rips
+précoces n'est PAS un déficit de prior par coup — +2 logit sur chaque coup de rip ne
+change rien — c'est un verrou de SÉQUENCE/ressources (re-dériver ~150 décisions dans le
+bon ordre), cohérent avec « rips en fin de ligne, structurel » (§9.11). Les leviers
+restants pour ce mur : l'adaptation explicite vers les séquences du corpus (rejeu
+d'adaptation, pas seulement des poids), ou les racines croisées entre fenêtres (chantier
+6, jamais essayé). Le drapeau reste disponible (opt-in), hors de la commande recommandée.
+
+**Chantier 9 — LuaJIT : FERMÉ sur pièces, sans branche ni run.** L'étude à froid tue le
+chantier avant la batterie d'invariants : (1) le core embarque Lua 5.4.8 et l'export
+épinglé utilise la syntaxe 5.3+ (`|`, `&`, `<<`, `//`) dans les deux socles
+(`constant.lua` 25 usages, `utility.lua` 78) et **1 862 des 2 503 scripts de cartes** —
+erreurs de syntaxe pour LuaJIT (langage 5.1) dès le chargement ; (2) LuaJIT 64-bit ne
+supporte pas `lua_newstate` à allocateur custom — or TOUT le solveur repose sur le heap
+Lua dans l'arène via ce point d'accroche ; (3) le mcode et les traces JIT vivent hors de
+l'arène et retiennent des références GC vers le heap : chaque Restore() (des dizaines de
+millions par run) exigerait un flush des traces, qui détruit le gain ; (4) l'API C est
+5.4. **Le « seul 2-10× plausible » n'existe pas sous cette forme.** Le débit de fond se
+jouera côté hôte : miroir des zones depuis MSG_MOVE (chantier 8, profil d'abord), LTS à
+frontière partagée (chantier 7).
+
+**Le gain de la session est venu d'où les cinq sessions le prédisaient : l'escalade.**
+Deux des sept runs de 600 s ont battu l'acquis — 19/55/260 (slack8) et **19 brûlées / 55
+actions / 259 décisions** (slack255, `sZ6_slack255/solution_00_b19_a55.yrp`), jugée depuis
+zéro : 259/259, 0 retry, garde 35/35 fenêtres couvertes, 0 activation interdite,
+Omega@terrain 2/2, Trishula 1/1. Leurs réglages propres étant inertes (0 coupure), c'est
+la divergence de graine × l'anytime enraciné qui a trouvé — la trajectoire 272 → 263 →
+261 → **259** est une hill-climb par redémarrages, et elle n'avait PAS convergé : chaque
+relance de l'escalade sur la meilleure ligne reste le geste le plus rentable du répertoire.
+
+**Non fait, et documenté comme tel** (session 6) : le rejeu d'ADAPTATION du corpus
+(l'alternative au prior par poids, la voie restante du chantier 5) ; les racines croisées
+`--fire` (chantier 6) ; le LTS à frontière partagée (chantier 7) ; le miroir de zones
+(chantier 8, profil d'abord) ; le partage périodique de la POLITIQUE entre workers
+(chantier 4, le plus ancien non-fait) ; fermer k=5 et la relaxation SMT/ILP pour 18
+brûlées (§9.10-9.11).

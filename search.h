@@ -504,6 +504,12 @@ struct SearchConfig {
 	// Graine de la borne : meilleures brulees deja connues AVANT la recherche
 	// (solutions des phases precedentes). 0 = aucune.
 	uint32_t burn_limit = 0;
+	// Borne brulees PARTAGEE entre workers : meilleures brulees GLOBALES
+	// (UINT32_MAX = aucune). Sans elle, un worker qui trouve 19 ne coupe rien
+	// chez les quinze autres : chaque amelioration se publie (CAS min), et la
+	// coupure lit la borne globale + burn_slack a chaque test (charge relaxed,
+	// negligeable devant les deux Count() du test). Nul = borne locale seule.
+	std::atomic<uint32_t>* shared_burn = nullptr;
 
 	// --- buts ALTERNATIFS (test adverse --fire) ---
 	// Boards egalement acceptes au but : le board cible MOINS chaque
@@ -758,6 +764,9 @@ private:
 	// Brulees courantes du joueur cible (cimetiere + bannies) : le cout de
 	// tier 1, lu au but et par la borne B&B.
 	uint32_t CurrentBurned();
+	// Borne brulees effective : la locale, resserree par la borne PARTAGEE
+	// entre workers si elle existe (cfg.shared_burn, anytime seulement).
+	uint32_t EffectiveBurnCut() const;
 	// Progres vers les minimums de resolutions, plafonne : sert de gradient
 	// aux tirages (sans lui, NRPA n'a aucune raison de resoudre Omega deux
 	// fois avant de fermer le board).

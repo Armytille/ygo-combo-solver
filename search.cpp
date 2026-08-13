@@ -173,6 +173,16 @@ uint32_t Search::CurrentBurned() {
 	return duel.Count(con, LOCATION_GRAVE) + duel.Count(con, LOCATION_REMOVED);
 }
 
+uint32_t Search::EffectiveBurnCut() const {
+	uint32_t cut = burn_cut;
+	if(cfg.shared_burn && cfg.anytime && cfg.burn_slack < 255) {
+		const uint32_t g = cfg.shared_burn->load(std::memory_order_relaxed);
+		if(g != UINT32_MAX && g + cfg.burn_slack < cut)
+			cut = g + cfg.burn_slack;
+	}
+	return cut;
+}
+
 // Cout lexicographique empaquete : brulees, puis actions, puis decisions —
 // comparable par un seul entier.
 static inline uint64_t CostKey(uint32_t burned, uint32_t actions,
@@ -565,6 +575,14 @@ bool Search::GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,
 		// La borne B&B se resserre a chaque amelioration (anytime seulement).
 		if(cfg.anytime && cfg.burn_slack < 255)
 			burn_cut = best_burned_seen + cfg.burn_slack;
+		// Publication aux autres workers (CAS min) : une amelioration ICI
+		// coupe chez TOUS des la prochaine decision.
+		if(cfg.shared_burn) {
+			uint32_t cur = cfg.shared_burn->load(std::memory_order_relaxed);
+			while(s.burned < cur &&
+				  !cfg.shared_burn->compare_exchange_weak(
+					  cur, s.burned, std::memory_order_relaxed)) {}
+		}
 	}
 	if(!cfg.anytime) {
 		solutions.push_back(std::move(s));
@@ -1306,7 +1324,8 @@ bool Search::Rollout(uint64_t& rng) {
 		}
 		if(GuardCut(here, summons))
 			return hit;
-		if(burn_cut != UINT32_MAX && CurrentBurned() > burn_cut) {
+		if(const uint32_t bcut = EffectiveBurnCut();
+		   bcut != UINT32_MAX && CurrentBurned() > bcut) {
 			++stats.burn_cuts;
 			return hit;
 		}
@@ -1489,7 +1508,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			return;
 		// Borne brulees (B&B anytime) : un etat qui brule deja plus que la
 		// meilleure ligne connue + la marge de recuperation ne la battra pas.
-		if(burn_cut != UINT32_MAX && CurrentBurned() > burn_cut) {
+		if(const uint32_t bcut = EffectiveBurnCut();
+		   bcut != UINT32_MAX && CurrentBurned() > bcut) {
 			++stats.burn_cuts;
 			return;
 		}

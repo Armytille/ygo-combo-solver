@@ -79,8 +79,12 @@ combosolver.exe duel.yrpX --scriptdir <scripts> `
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
-`--approach`, `--verbose`). La graine des tirages est dérivée du temps et
-imprimée — la redonner via `--seed` rejoue les mêmes tirages.
+`--approach`, `--prior`, `--prior-weight`, `--no-burn-share`, `--verbose`).
+La graine des tirages est dérivée du temps et imprimée — la redonner via
+`--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
+divergent quand même (l'ordre des échanges entre workers dépend du timing) —
+les compteurs de tirages ne sont pas des métriques d'A/B, seuls les faits
+structurels le sont (coûts écrits, conversions, coupures).
 
 # OPTIMISATION DE COUT : chercher une ligne MOINS CHERE que la reference
 # (cout lexicographique : brulees, puis actions, puis decisions). La recherche
@@ -90,7 +94,14 @@ imprimée — la redonner via `--seed` rejoue les mêmes tirages.
 # et le finisseur s'enracine sur les prefixes des solutions les moins cheres.
 # --burn-slack regle la marge de la borne brulees (defaut 6 ; la reference
 # pique a 23 pour finir a 19 — marge de recuperation mesuree 4) ;
-# --burn-limit ensemence la borne avec un cout deja connu.
+# --burn-limit ensemence la borne avec un cout deja connu. Mesure session 6 :
+# sur le cas etalon la borne ne coupe JAMAIS en phase tirages (l'espace des
+# lignes gagnantes vit sous le pic de la reference) — la regler n'apporte
+# rien ; les compteurs burn_cuts/goal_hits des rapports en font foi.
+# --prior <f|dossier> (repetable) : prior par rejeu de solutions — les
+# plan_key du corpus deviennent des poids initiaux de politique NRPA
+# (releves sur le duel de LEUR en-tete). Mesure NEUTRE sur les deux etalons
+# (session 6) : disponible, hors commande recommandee.
 combosolver.exe duel.yrpX --scriptdir <scripts> --solve --optimize
 combosolver.exe ref.yrpX --scriptdir <scripts> --start ref.yrpX --optimize `
     --approach "solutions/solution_00_b19_a56.yrp" --finisher-min 420000

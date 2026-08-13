@@ -152,6 +152,19 @@ struct Options {
 	uint32_t burn_slack = 6;
 	// Graine de la borne : meilleures brulees connues d'avance (0 = aucune).
 	uint32_t burn_limit = 0;
+	// Partage de la borne brulees ENTRE workers (session 6) : un worker qui
+	// ameliore les brulees resserre la coupure B&B chez tous, via un atomique
+	// (CAS min a la publication, charge relaxed a la coupure).
+	// --no-burn-share desactive, pour l'A/B.
+	bool burn_share = true;
+	// PRIOR PAR REJEU DE SOLUTIONS (session 6, arXiv:2401.10431) : lignes de
+	// corpus (--prior, fichier ou dossier, repetable) dont les plan_key sont
+	// releves CHACUNE SUR SON DUEL (piege 21 : jamais rejouees sur le duel de
+	// depart) et servis en poids INITIAUX de politique NRPA — une politique
+	// qui sait deja ripper, la ou l'echantillonnage vierge fait 1/800k.
+	std::vector<std::string> prior_files;
+	// Poids d'un coup present dans TOUT le corpus (proportionnel sinon).
+	double prior_weight = 2.0;
 	// Contraintes de ligne, brutes, resolues en codes une fois la base de
 	// cartes chargee.
 	std::vector<std::string> summon_specs;      // "5:Zalen|Crystal Wing"
@@ -327,6 +340,16 @@ void Usage() {
 		"                     la marge se mesure sur la reference). 255 = off\n"
 		"  --burn-limit <n>   graine de la borne : meilleures brulees connues\n"
 		"                     d'avance (0 = aucune)\n"
+		"  --no-burn-share    ne PAS partager la borne brulees entre workers\n"
+		"                     (defaut : partagee — un worker qui ameliore coupe\n"
+		"                     chez tous). Sert a l'A/B.\n"
+		"  --prior <f|dir>    prior par rejeu de solutions : les plan_key des\n"
+		"                     lignes donnees (fichier .yrp ou dossier, repetable)\n"
+		"                     sont releves chacune sur SON duel et deviennent des\n"
+		"                     poids INITIAUX de politique NRPA — une politique\n"
+		"                     qui sait deja ripper. Tirages ET fenetres --fire.\n"
+		"  --prior-weight <x> poids d'un coup present dans tout le corpus\n"
+		"                     (defaut 2.0 ; proportionnel a sa frequence sinon)\n"
 		"  --fire <carte>     TEST ADVERSE : ajoute la carte a la main adverse\n"
 		"                     et la fait JOUER a chaque fenetre ou elle est\n"
 		"                     legale (un essai par fenetre) ; la recherche doit\n"
@@ -542,6 +565,14 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--burn-limit") {
 			const char* v = next("--burn-limit"); if(!v) return false;
 			o.burn_limit = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--no-burn-share") {
+			o.burn_share = false;
+		} else if(a == "--prior") {
+			const char* v = next("--prior"); if(!v) return false;
+			o.prior_files.emplace_back(v);
+		} else if(a == "--prior-weight") {
+			const char* v = next("--prior-weight"); if(!v) return false;
+			o.prior_weight = std::atof(v);
 		} else if(a == "--tt-mb") {
 			const char* v = next("--tt-mb"); if(!v) return false;
 			o.tt_mb = static_cast<size_t>(std::atoi(v));
@@ -1313,6 +1344,13 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 					r.burned_at_target, r.burned_max,
 					static_cast<int>(r.burned_max) -
 						static_cast<int>(r.burned_at_target));
+	else if(r.burned_max)
+		// Une ligne de solution s'arrete au tour 1 sans capturer de cible :
+		// son pic reste la donnee qui calibre --burn-slack (session 6 : la
+		// marge doit couvrir la recuperation de la MEILLEURE ligne, pas
+		// seulement celle de la reference).
+		std::printf("  brulees             : pic %u en cours de ligne (pas de "
+					"board cible capture)\n", r.burned_max);
 
 	int total = 0, forced = 0, binary = 0, decoded = 0;
 	for(const auto& [type, s] : r.stats) {
@@ -2071,6 +2109,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	struct PassOut {
 		std::vector<Solution> found;
 		uint64_t nodes = 0, transpos = 0, cuts = 0, resyncs = 0;
+		uint64_t goal_hits = 0;   // re-atteintes d'apres-but comprises
 		bool timed_out = false;
 		double ms = 0;
 	};
@@ -2131,6 +2170,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 					out.transpos += s.Stats().transpositions;
 					out.cuts += s.Stats().novelty_cuts;
 					out.resyncs += s.Stats().resyncs;
+					out.goal_hits += s.Stats().goal_hits;
 					out.timed_out |= s.Stats().hit_time_limit;
 				}
 			}
@@ -2238,10 +2278,17 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		if(o.resyncs)
 			std::snprintf(resync, sizeof(resync), "  %llu resync",
 						  (unsigned long long)o.resyncs);
-		std::printf("  %-8u %10zu %12llu %11llu %10llu %8.1f s%s%s\n", k,
+		// Session 6 : les atteintes du but (re-atteintes comprises sous
+		// --optimize, piege 35) ne se lisaient nulle part.
+		char goals[40] = "";
+		if(opt.optimize && o.goal_hits)
+			std::snprintf(goals, sizeof(goals), "  %llu atteinte(s)",
+						  (unsigned long long)o.goal_hits);
+		std::printf("  %-8u %10zu %12llu %11llu %10llu %8.1f s%s%s%s\n", k,
 					o.found.size(), (unsigned long long)o.nodes,
 					(unsigned long long)o.transpos, (unsigned long long)o.cuts,
-					o.ms / 1000.0, o.timed_out ? "  (budget epuise)" : "", resync);
+					o.ms / 1000.0, o.timed_out ? "  (budget epuise)" : "", resync,
+					goals);
 		for(const auto& x : o.found)
 			sols.push_back(x);
 	}
@@ -2672,6 +2719,117 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 	return written;
 }
 
+// PRIOR PAR REJEU DE SOLUTIONS (--prior, session 6 — arXiv:2401.10431,
+// « Policy Learning from Solved Games ») : la politique NRPA vierge ne sait
+// pas ripper (mesure : 1 tirage sur ~800 k fait les 3 resolutions exigees)
+// alors que le corpus de solutions CONTIENT les sequences de rip completes.
+// On releve les plan_key de chaque ligne du corpus — LiftPlan sur le duel de
+// SON en-tete, jamais un rejeu sur le duel de depart (piege 21) ; seules les
+// identites SEMANTIQUES traversent, invariantes par deck/main/graine — et on
+// en fait des poids INITIAUX de politique : chaque worker demarre avec une
+// politique qui sait deja ripper. Poids d'un coup : prior_weight x la
+// proportion des fichiers du corpus qui le jouent — les coups presents
+// PARTOUT (les rips, l'echine du combo) portent le poids plein, les
+// idiosyncrasies d'une seule ligne un poids fractionnaire.
+void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
+					  NrpaPolicy& out) {
+	if(opt.prior_files.empty())
+		return;
+	namespace fs = std::filesystem;
+	std::vector<std::string> files;
+	for(const std::string& p : opt.prior_files) {
+		std::error_code ec;
+		if(fs::is_directory(p, ec)) {
+			for(const auto& e : fs::directory_iterator(p, ec)) {
+				const auto ext = e.path().extension();
+				if(ext == L".yrp" || ext == L".yrpX")
+					files.push_back(e.path().string());
+			}
+		} else {
+			files.push_back(p);
+		}
+	}
+	std::sort(files.begin(), files.end());
+	if(files.empty()) {
+		std::printf("!! --prior : aucun fichier .yrp/.yrpX trouve\n");
+		return;
+	}
+	std::printf("\n--- prior par rejeu : %zu ligne(s) de corpus (--prior) ---\n",
+				files.size());
+	auto t0 = Clock::now();
+	std::map<uint64_t, uint32_t> in_files;   // plan_key -> nb de fichiers
+	size_t used = 0;
+	for(const std::string& f : files) {
+		Replay holder;
+		std::string err;
+		if(!holder.Load(f, err)) {
+			std::printf("  !! %s : %s\n", f.c_str(), err.c_str());
+			continue;
+		}
+		const Replay* pr = holder.IsStreamed() ? holder.Embedded() : &holder;
+		if(!pr || pr->responses.empty()) {
+			std::printf("  !! %s : pas de reponses lisibles\n", f.c_str());
+			continue;
+		}
+		// Le duel de SON en-tete — un thread dedie, une arene ne s'initialise
+		// jamais sur un thread qui en possede deja une.
+		std::thread([&] {
+			Arena pa;
+			std::string aerr;
+			if(!pa.Init(opt.arena_mb << 20, 0, aerr)) {
+				std::printf("  !! arene du prior : %s\n", aerr.c_str());
+				return;
+			}
+			{
+				Duel pd(db, scripts, &pa);
+				if(!pd.Create(pr->seed, pr->duel_flags, pr->start_lp,
+							  pr->start_hand, pr->draw_count, aerr) ||
+				   !pd.Setup(*pr, aerr)) {
+					std::printf("  !! %s : duel non initialisable : %s\n",
+								f.c_str(), aerr.c_str());
+				} else {
+					if(opt.stop_gc)
+						pd.SetLuaGc(false);
+					EnumOptions eo;
+					eo.dedup_by_code = true;
+					eo.max_subsets = 24;
+					eo.db = &db;
+					std::vector<PlanStep> steps;
+					size_t unknown = LiftPlan(pd, pa, *pr, opt.target_player,
+											  SIZE_MAX, eo, steps);
+					std::vector<uint64_t> distinct;
+					for(const PlanStep& s : steps)
+						if(s.edge)
+							distinct.push_back(s.edge);
+					std::sort(distinct.begin(), distinct.end());
+					distinct.erase(
+						std::unique(distinct.begin(), distinct.end()),
+						distinct.end());
+					for(uint64_t k : distinct)
+						++in_files[k];
+					if(!distinct.empty())
+						++used;
+					std::printf("  %-44s %4zu etapes, %3zu non identifiees, "
+								"%zu coups distincts\n",
+								fs::path(f).filename().string().c_str(),
+								steps.size(), unknown, distinct.size());
+				}
+			}
+			pa.Shutdown();
+		}).join();
+	}
+	if(in_files.empty() || !used) {
+		std::printf("  !! prior vide : aucun coup releve\n");
+		return;
+	}
+	for(const auto& [k, n] : in_files)
+		out[k] = static_cast<float>(opt.prior_weight) *
+				 static_cast<float>(n) / static_cast<float>(used);
+	std::printf("  prior : %zu coups distincts sur %zu ligne(s), poids max "
+				"%.2f (--prior-weight), %.0f ms\n",
+				in_files.size(), used, opt.prior_weight, MsSince(t0));
+}
+
 // TEST ADVERSE (--fire) — la garde etait un proxy statique (« un contre est
 // disponible a chaque fenetre ») ; ce mode joue la menace POUR DE VRAI : la
 // carte est ajoutee a la main adverse, l'adversaire l'ACTIVE a chaque fenetre
@@ -2846,6 +3004,12 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		LiftPlan(duel, arena, yrp, opt.target_player, ref.target_at, eo, plan);
 		arena.Restore();
 	}
+	// Prior par rejeu (--prior) : politique INITIALE des recherches par
+	// fenetre. Le mur mesure des fenetres precoces est la re-derivation des
+	// trois rips depuis l'etat post-injection — exactement ce que le corpus
+	// encode. Doit survivre aux threads de recherche.
+	NrpaPolicy prior_policy;
+	BuildPriorPolicy(opt, db, scripts, prior_policy);
 
 	// --- 3. Etiquetage par joueur : le rejeu augmente ne peut pas consommer
 	// la liste plate (les fenetres nouvelles decalent tout).
@@ -3284,6 +3448,9 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 								fcfg.hint_cards.push_back(req.code);
 						if(have_alt)
 							fcfg.target_alts = &alts;
+						// Prior : la politique demarre en sachant ripper.
+						if(!prior_policy.empty())
+							fcfg.nrpa_init = &prior_policy;
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
 								   base_seed + w * 0x9E3779B97F4A7C15ull + 1);
@@ -3699,6 +3866,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		return;
 	}
 
+	// Prior par rejeu (--prior) : poids INITIAUX de la politique des tirages,
+	// releves sur le corpus de solutions (chaque ligne sur SON duel). Doit
+	// survivre a toutes les phases (tirages, finisseur).
+	NrpaPolicy prior_policy;
+	BuildPriorPolicy(opt, db, scripts, prior_policy);
+
 	// --- 4. Recherche, par approfondissement progressif du nombre d'ecarts.
 	SearchConfig cfg;
 	cfg.target_player = opt.target_player;
@@ -3805,6 +3978,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::unordered_map<uint64_t, ArchiveEntry> global_archive;
 	NrpaPolicy merged_policy;
 	unsigned policy_workers = 0;
+	// Borne brulees PARTAGEE entre workers (session 6) : semee par
+	// --burn-limit, resserree par chaque amelioration de chaque phase — un
+	// worker qui trouve 19 coupe chez les quinze autres des la decision
+	// suivante. --no-burn-share la debranche (A/B).
+	std::atomic<uint32_t> shared_burn{ opt.burn_limit ? opt.burn_limit
+													  : UINT32_MAX };
 	auto merge_archive = [&](const std::vector<ArchiveEntry>& a) {
 		for(const ArchiveEntry& e : a) {
 			auto [it, fresh] = global_archive.try_emplace(e.cell, e);
@@ -3891,6 +4070,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint64_t nodes = 0, rollouts = 0, cuts = 0, turn_cuts = 0, adapts = 0;
 			uint64_t hint_seen = 0, hint_taken = 0;
 			uint64_t rr[4] = { 0, 0, 0, 0 };
+			uint64_t burn_cuts = 0, goal_hits = 0;
 			uint32_t overlap = 0, monsters = 0, overlap_ripped = 0;
 		};
 		ModeStats greedy, nrpa;
@@ -3949,6 +4129,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					wcfg.nrpa_shared = &shared_best;
 					wcfg.nrpa_lr = opt.nrpa_lr;
 					wcfg.archive_k = opt.archive_k;
+					// Borne brulees partagee entre workers (session 6).
+					if(opt.optimize && opt.burn_share)
+						wcfg.shared_burn = &shared_burn;
+					// Prior par rejeu : la politique demarre en sachant
+					// ripper (attenuee ensuite comme les poids appris).
+					if(!prior_policy.empty())
+						wcfg.nrpa_init = &prior_policy;
 					Search s(local, la, start_yrp, wcfg);
 					// Graine distincte par worker : sans cela les seize tirent
 					// exactement la meme sequence de lignes.
@@ -3976,6 +4163,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.hint_taken += s.Stats().hint_taken;
 					for(int k = 0; k < 4; ++k)
 						m.rr[k] += s.Stats().resolve_reached[k];
+					m.burn_cuts += s.Stats().burn_cuts;
+					m.goal_hits += s.Stats().goal_hits;
 					m.overlap_ripped = (std::max)(m.overlap_ripped,
 												  s.Stats().best_overlap_ripped);
 					m.overlap = (std::max)(m.overlap, s.Stats().best_overlap);
@@ -4051,6 +4240,22 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			std::printf("  meilleure crete AUX resolutions completes : %u/%zu\n",
 						(std::max)(nrpa.overlap_ripped, greedy.overlap_ripped),
 						target.codes.size());
+		}
+		// Session 6 : la borne B&B ne tourne plus en aveugle — atteintes du
+		// but (re-atteintes d'apres-but comprises, piege 35) et coupures.
+		if(opt.optimize) {
+			uint32_t bb = opt.burn_limit ? opt.burn_limit : UINT32_MAX;
+			for(const Solution& s : sols)
+				bb = (std::min)(bb, s.burned);
+			char bstr[32] = "aucune";
+			if(bb != UINT32_MAX)
+				std::snprintf(bstr, sizeof(bstr), "%u (marge +%u)", bb,
+							  opt.burn_slack);
+			std::printf("  anytime : %llu atteinte(s) du but, %llu coupure(s) "
+						"borne brulees, meilleures brulees %s%s\n",
+						(unsigned long long)(nrpa.goal_hits + greedy.goal_hits),
+						(unsigned long long)(nrpa.burn_cuts + greedy.burn_cuts),
+						bstr, opt.burn_share ? "" : "  [partage OFF]");
 		}
 		if(!sols.empty())
 			std::printf("  %zu ligne(s) atteignant le board.\n", sols.size());
@@ -4290,6 +4495,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					  });
 			if(!best_known_burn || cheap[0]->burned < best_known_burn)
 				best_known_burn = cheap[0]->burned;
+			// La borne partagee herite du meilleur cout d'avant-finisseur.
+			if(opt.burn_share && best_known_burn) {
+				uint32_t cur = shared_burn.load();
+				while(best_known_burn < cur &&
+					  !shared_burn.compare_exchange_weak(cur, best_known_burn)) {}
+			}
 			char slbl[48];
 			for(size_t i = 0; i < cheap.size() && i < 3; ++i)
 				for(uint32_t back : { 30u, 60u, 90u, 120u })
@@ -4315,6 +4526,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// chaque racine restante peut porter une ligne MOINS CHERE.
 		const uint32_t found_stop = opt.optimize ? 0x7fffffffu : 4u;
 		std::mutex fmx;
+		// Session 6 : compteurs de la borne B&B, agreges sur toutes les
+		// racines du finisseur (LTS + tirages enracines).
+		std::atomic<uint64_t> fin_goal_hits{ 0 }, fin_burn_cuts{ 0 };
 
 		// --- phase 1 : racines d'approche, chacune sur SON duel (cf.
 		// ApproachSols). Deux moteurs, choisis par la profondeur du recul :
@@ -4411,6 +4625,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								Search fs(fd, fa, start_yrp, fcfg);
 								fs.RunLevin(target, plan, merged_policy);
 								const SearchStats& st = fs.Stats();
+								fin_goal_hits += st.goal_hits;
+								fin_burn_cuts += st.burn_cuts;
 								std::lock_guard<std::mutex> lk(fmx);
 								std::printf("  %-14s %9llu exp. %7.1f s  best "
 											"%u/%zu  %s%s\n", lbl,
@@ -4615,6 +4831,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											opt.optimize ? 12 : 4;
 										if(opt.optimize && best_known_burn)
 											fcfg.burn_limit = best_known_burn;
+										// Borne partagee, ici aussi : les
+										// racines visent le meme board.
+										if(opt.optimize && opt.burn_share)
+											fcfg.shared_burn = &shared_burn;
 										fcfg.nrpa_shared = shared2[r].get();
 										fcfg.nrpa_init = &merged_policy;
 										fcfg.nrpa_restart_keep =
@@ -4625,6 +4845,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													   w * 0x9E3779B97F4A7C15ull +
 													   1);
 										const SearchStats& st = fs.Stats();
+										fin_goal_hits += st.goal_hits;
+										fin_burn_cuts += st.burn_cuts;
 										std::lock_guard<std::mutex> lk(fmx);
 										std::printf(
 											"  %-22s w%-2u %8llu tirages %9llu "
@@ -4747,6 +4969,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							Search fs(fd, fa, start_yrp, fcfg);
 							fs.RunLevin(target, plan, merged_policy);
 							const SearchStats& st = fs.Stats();
+							fin_goal_hits += st.goal_hits;
+							fin_burn_cuts += st.burn_cuts;
 							std::lock_guard<std::mutex> lk(fmx);
 							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
 										"  %s%s\n",
@@ -4792,6 +5016,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		for(auto& t : pool)
 			t.join();
+		// Session 6 : le bilan de la borne B&B du finisseur.
+		if(opt.optimize)
+			std::printf("  finisseur : %llu atteinte(s) du but, %llu coupure(s) "
+						"borne brulees%s\n",
+						(unsigned long long)fin_goal_hits.load(),
+						(unsigned long long)fin_burn_cuts.load(),
+						opt.burn_share ? "" : "  [partage OFF]");
 	};
 
 	// En optimisation, le finisseur tourne MEME quand les tirages ont des
