@@ -123,7 +123,9 @@ bool Duel::Create(const uint64_t seed[4], uint64_t flags, uint32_t lp,
 	return true;
 }
 
-bool Duel::Setup(const Replay& yrp, std::string& error) {
+bool Duel::Setup(const Replay& yrp, std::string& error,
+				 const std::vector<uint32_t>* extra_hand,
+				 uint8_t extra_hand_team) {
 	if(yrp.decks.size() < 2) {
 		error = "le yrp1 ne contient pas deux decks";
 		return false;
@@ -148,6 +150,15 @@ bool Duel::Setup(const Replay& yrp, std::string& error) {
 		error = "Debug.ReloadFieldEnd() a echoue";
 		return false;
 	}
+	// Apres le ReloadFieldEnd du hand test (qui reconstruit le terrain), avant
+	// le demarrage : les cartes ajoutees arrivent en main telles quelles.
+	if(extra_hand) {
+		for(uint32_t code : *extra_hand) {
+			OCG_NewCardInfo info{ extra_hand_team, 0, code, extra_hand_team,
+								  LOCATION_HAND, 0, POS_FACEDOWN_DEFENSE };
+			OCG_DuelNewCard(handle, &info);
+		}
+	}
 	OCG_StartDuel(handle);
 	return true;
 }
@@ -158,18 +169,24 @@ int Duel::Process() {
 }
 
 std::vector<Message> Duel::Messages() {
+	std::vector<Message> out;
+	Messages(out);
+	return out;
+}
+
+void Duel::Messages(std::vector<Message>& out) {
+	out.clear();
 	uint32_t len = 0;
 	uint8_t* base = nullptr;
 	{
 		ArenaScope scope(arena);
 		base = static_cast<uint8_t*>(OCG_DuelGetMessage(handle, &len));
 	}
-	// Le vecteur retourne appartient a l'hote ; les Message pointent en revanche
+	// Le vecteur appartient a l'hote ; les Message pointent en revanche
 	// dans le tampon du core, donc dans l'arene : a copier avant toute
 	// restauration.
-	std::vector<Message> out;
 	if(!base || !len)
-		return out;
+		return;
 	uint32_t off = 0;
 	while(off + 4 <= len) {
 		uint32_t size = 0;
@@ -180,7 +197,6 @@ std::vector<Message> Duel::Messages() {
 		out.push_back(Message{ base[off], base + off + 1, size - 1 });
 		off += size;
 	}
-	return out;
 }
 
 void Duel::SetResponse(const std::vector<uint8_t>& data) {
@@ -208,6 +224,14 @@ const std::vector<uint8_t>& Duel::ProcessorState() {
 }
 
 std::vector<QueriedCard> Duel::Query(uint8_t con, uint32_t loc, uint32_t flags) {
+	std::vector<QueriedCard> out;
+	Query(con, loc, flags, out);
+	return out;
+}
+
+void Duel::Query(uint8_t con, uint32_t loc, uint32_t flags,
+				 std::vector<QueriedCard>& out) {
+	out.clear();
 	OCG_QueryInfo info{ flags, con, loc, 0, 0 };
 	uint32_t len = 0;
 	uint8_t* data = nullptr;
@@ -216,8 +240,52 @@ std::vector<QueriedCard> Duel::Query(uint8_t con, uint32_t loc, uint32_t flags) 
 		data = static_cast<uint8_t*>(OCG_DuelQueryLocation(handle, &len, &info));
 	}
 	if(!data || len <= 4)
-		return {};
-	return ParseQueryStream(data + 4, len - 4);
+		return;
+	ParseQueryStreamInto(data + 4, len - 4, out);
+}
+
+void Duel::QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out) {
+	out.clear();
+	OCG_QueryInfo info{ QUERY_CODE | QUERY_ALIAS, con, loc, 0, 0 };
+	uint32_t len = 0;
+	uint8_t* data = nullptr;
+	{
+		ArenaScope scope(arena);
+		data = static_cast<uint8_t*>(OCG_DuelQueryLocation(handle, &len, &info));
+	}
+	if(!data || len <= 4)
+		return;
+	// Meme decoupage que ParseQueryStream, reduit aux deux champs utiles :
+	// Code() = alias sinon code (identite de board, cf. QueriedCard::Code).
+	const uint8_t* p = data + 4;
+	uint32_t n = len - 4, off = 0;
+	uint32_t code = 0, alias = 0;
+	bool building = false;
+	while(off + 2 <= n) {
+		uint16_t size = 0;
+		std::memcpy(&size, p + off, 2);
+		off += 2;
+		if(size == 0)   // emplacement vide
+			continue;
+		if(off + size > n)
+			break;
+		const uint8_t* body = p + off;
+		uint32_t flag = Take<uint32_t>(body);
+		off += size;
+		if(flag == QUERY_END) {
+			out.push_back(alias ? alias : code);
+			code = alias = 0;
+			building = false;
+			continue;
+		}
+		building = true;
+		if(flag == QUERY_CODE)
+			code = Take<uint32_t>(body);
+		else if(flag == QUERY_ALIAS)
+			alias = Take<uint32_t>(body);
+	}
+	if(building)
+		out.push_back(alias ? alias : code);
 }
 
 bool Duel::LoadScript(const std::string& name) {
@@ -246,6 +314,13 @@ bool Duel::SetLuaGc(bool enabled) {
 
 std::vector<QueriedCard> ParseQueryStream(const uint8_t* data, uint32_t len) {
 	std::vector<QueriedCard> out;
+	ParseQueryStreamInto(data, len, out);
+	return out;
+}
+
+void ParseQueryStreamInto(const uint8_t* data, uint32_t len,
+						  std::vector<QueriedCard>& out) {
+	out.clear();
 	QueriedCard cur;
 	bool building = false;
 	uint32_t off = 0;
@@ -303,7 +378,6 @@ std::vector<QueriedCard> ParseQueryStream(const uint8_t* data, uint32_t len) {
 		cur.present = true;
 		out.push_back(std::move(cur));
 	}
-	return out;
 }
 
 } // namespace solver

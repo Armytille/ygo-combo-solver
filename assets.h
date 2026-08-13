@@ -35,6 +35,12 @@ public:
 	const CardRow* Find(uint32_t code) const;
 	// Nom lisible, pour les rapports uniquement. "?" si inconnu.
 	const std::string& Name(uint32_t code) const;
+	// Cartes dont le nom contient `needle` (insensible a la casse). Codes
+	// CANONIQUES, dedupliques : deux illustrations de la meme carte portent le
+	// meme nom et ne doivent compter qu'une fois. Sert a la CLI des
+	// contraintes ; un fragment ambigu doit etre signale, pas devine.
+	std::vector<std::pair<uint32_t, std::string>>
+	FindByName(const std::string& needle) const;
 	// Code canonique d'une variante d'illustration. QUERY_OVERLAY_CARD rend le
 	// code physique des materiaux (card.cpp:180), sans passer par get_code() :
 	// sans cette resolution, deux Xyz aux materiaux d'illustration differente

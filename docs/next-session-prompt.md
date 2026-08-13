@@ -1,212 +1,234 @@
-# Prompt de reprise — optimisation du combo solver
+Tu reprends `combosolver`, un solveur de combo EDOPro écrit en C++ qui tourne
+sur sa propre copie d'`ocgcore`. Dépôt git autonome, racine
+`d:\ProjectIgnis\replay2video\combosolver`. Lis d'abord `README.md` puis
+`docs/combo-solver-design.md` — les §9.1-9.11 documentent cinq sessions,
+chaque choix adossé à une mesure, impasses comprises. Ne redécouvre rien de ce
+qui y est chiffré.
 
-> À coller tel quel dans une nouvelle session, depuis `d:\ProjectIgnis\replay2video\combosolver`.
+**LA MISSION (inchangée) : battre 19 brûlées sur le replay de référence
+`synchron handrip 2` — même deck, même main, même board, discipline complète,
+coût lexicographique (brûlées, puis actions, puis décisions).** L'état
+d'avancement de la session 5 (§9.11) :
 
----
+- **LIVRÉ : 19/55/261** (`sF_final/solution_00_b19_a55.yrp`), strictement
+  meilleure que la référence (19/56/273) — écrite, vérifiée, jugée depuis
+  zéro sous tous les drapeaux (garde 33/33, Omega@terrain 2/2, Trishula 1/1,
+  0 activation interdite). Le corpus historique (19/56/272) est dépassé.
+- **19 brûlées TIENT** : espace épuisé à k≤4 déviations de la référence
+  (959 k états, bornes relâchées 64 act/321 déc) ; k=5 incomplet à 2,33 M ;
+  ~3,5 M tirages pleine ligne + ~6 M enracinés sur trois graines
+  (888/999/777) et quatre budgets (600-1800 s), borne B&B armée — pas UNE
+  ligne à 18, toutes tombent sur 19 exactement.
+- La machinerie d'optimisation EXISTE et marche : `--optimize` (§9.11 —
+  score de but NRPA lexicographique, anytime avec remplacement du pire +
+  dedup, poursuite APRÈS le but, borne B&B brûlées `--burn-slack`/
+  `--burn-limit`, archive par coût, racines = solutions les moins chères,
+  LDS à bornes relâchées qui ÉPUISE ses passes). L'optimiseur effectif est
+  l'**escalade** : chaque run s'enracine (`--approach`) sur la meilleure
+  ligne du précédent — 272 → 263 → 261/55a en trois runs — puis a convergé
+  (graine 777, 4 racines convertissent, coût inchangé).
+- **Le TEST ADVERSE existe (`--fire`, demande du joueur) : Nibiru joué POUR
+  DE VRAI.** La carte est ajoutée à la main adverse et ACTIVÉE à chaque
+  fenêtre légale (37 sur la référence, une par essai) ; la recherche referme
+  depuis l'état post-injection, but double (board complet, ou board sans
+  `--fire-spare "Junk Signal"`). Verdict à 300 s/fenêtre (graine 999) :
+  **16/37 converties — 6 board COMPLET (19 brûlées/58-59 actions, Crystal
+  Wing contre gratuitement, déc. 152-212) et 10 sans Junk Signal (20/58-62,
+  voie Zalen+JS)**. Frontière : déc. ≥ ~131 convertit presque partout ; les
+  tirs précoces (déc. 55-128) touchent 8/8 sans refermer — indéterminés,
+  pas réfutés. Replays écrits/vérifiés/jugés (`sM_fire5/`, `sN_fire_deep/`,
+  rejugeables avec `--opp-hand "27204311"`). Pour les fenêtres précoces :
+  ensemencer avec les refermetures en `--approach`.
+- Les questions `test 3`/`test 4` restent en PAUSE (§9.10, ne pas reprendre
+  sans demande du joueur).
 
-Tu reprends `combosolver`, un solveur de combo EDOPro écrit en C++ qui tourne sur
-sa propre copie d'`ocgcore`. Dépôt git autonome, racine
-`d:\ProjectIgnis\replay2video\combosolver`, un seul commit. Lis d'abord
-`README.md` puis `docs/combo-solver-design.md` — ils portent les arbitrages, les
-mesures et les impasses déjà explorées.
+## Les chantiers, par rendement attendu
 
-**Ta mission : rendre la recherche moins gloutonne, algorithmiquement d'abord,
-programmatiquement ensuite.** Le constat qui déclenche ce travail : on explore
-beaucoup trop d'états pour ce qu'on en tire.
-
-## Ce que fait le solveur
-
-Il rejoue un `.yrpX`, en extrait le board de fin de tour du joueur, puis cherche
-à l'atteindre autrement — soit dans le même duel à moindre coût (`--solve`), soit
-depuis un autre deck (`--start <replay>`). Sortie : des replays rejouables,
-vérifiés par rejeu depuis zéro avant écriture.
-
-Critère d'équivalence du board : mêmes cartes par **type** de zone, mêmes
-positions, mêmes matériaux, mêmes compteurs. La colonne est ignorée.
-Coût lexicographique : (1) cartes brûlées, (2) actions, (3) décisions.
-
-## Construire et lancer
-
-```powershell
-Set-Location "D:\ProjectIgnis\replay2video\combosolver"
-& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe" `
-    build\combosolver.sln /p:Configuration=Release /p:Platform=x64 /m /nologo /v:quiet
-```
-
-```powershell
-# Même deck : chercher mieux que la référence
-.\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
-    --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000
-
-# Autre deck : refaire le même board depuis test 4
-.\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
-    --scriptdir ..\deps\scripts_2026-04-13\script `
-    --start "D:\ProjectIgnis\replay\test 4.yrpX" --solve-ms 600000 --outdir solutions
-```
-
-`--scriptdir` **n'est pas optionnel.** Sans lui le rejeu diverge en silence : 218
-`MSG_RETRY` au lieu de 0, et l'outil continue d'afficher des mesures d'apparence
-normale. Le compteur `MSG_RETRY` du rapport est le seul détecteur.
-
-Si `..\deps\scripts_2026-04-13` manque, le régénérer avec
-`.\tools\fetch_solver_deps.ps1` (il extrait aussi ocgcore et applique ses cinq
-patchs). `deps/` est hors dépôt.
+1. **La preuve pour 18 : relaxation arithmétique SMT/ILP des ressources**
+   (déjà cadrée §9.10 avec le joueur : conservation des corps, tuners/
+   niveaux, copies, arithmétique du handrip — le jeu complet n'est pas
+   encodable, le moteur reste la seule spécification, mais l'UNSAT d'une
+   RELAXATION est une preuve d'absence valide). C'est la seule voie qui
+   TRANCHE : 18 existe ou 19 est optimal. Commencer par l'inventaire des
+   contraintes comptables du board cible (6 monstres dont 5 synchros, les
+   matériaux finissent au cimetière, Omega banni par son propre rip…).
+2. **Pousser l'escalade au-delà de son rayon** : reculs d'approche > 150
+   (le point de conversion le plus profond mesuré est recul 110), budgets
+   d'un autre ordre sur la phase A2, plusieurs approches STRUCTURELLEMENT
+   différentes en même temps (les 49 lignes de sG sont des variantes de la
+   même fin — chercher des lignes 8/8 muettes DISTINCTES comme racines).
+3. **Épuiser k=5** (LDS-optimize) : 2,33 M états en 550 s, incomplet —
+   un run dédié (~30-40 min, `--tt-mb` plus grand) fermerait le rayon 5.
+4. **Petits chantiers code** : afficher `burn_cuts`/`goal_hits` (les stats
+   existent, aucun printf ne les sert) ; partager la borne brûlées entre
+   workers (atomique global — chaque Search resserre la sienne aujourd'hui) ;
+   A/B isolé de `--burn-slack` (défaut 6, marge mesurée 4, jamais stressé).
+5. **Génériques toujours ouverts** (§9.10) : LTS à frontière partagée,
+   LuaJIT côté core (2-10× plausible, risqué), adaptation lente niveau 1.
 
 ## L'état mesuré, à ne pas re-dériver
 
 | | |
 |---|---|
-| Ligne de référence | 290 décisions, 0 `MSG_RETRY`, board atteint à la réponse #276 |
-| Coût de la référence | 56 actions, 273 décisions, 19 cartes brûlées |
-| Branchement | produit brut 10^97 le long de la seule ligne ; 36 % des décisions forcées |
-| Vitesse | 0,2 ms/décision ; re-simulation complète 78 ms ; restauration d'instantané 0,05 ms |
-| Couverture de l'énumérateur | 289/290, validée **sémantiquement** (appliquer / comparer / restaurer) |
-| Digest | 290 états sur la ligne, 290 distincts, **0 fusion** |
-| Même deck | ~500 solutions, toutes de coût **identique** à la référence, aucune strictement meilleure ; résiste à 7–8 écarts |
-| Autre deck (`test 4`) | **aucune ligne**. Meilleure approche : 6 des 8 cartes, 6 monstres |
+| Référence | 19/56/273 ; garde 33/33 ; pic de brûlées EN COURS de ligne 23 (marge de récupération 4 — calibre `--burn-slack`) |
+| **Meilleure ligne connue (session 5)** | **19/55/261** — `sF_final/solution_00_b19_a55.yrp` (jugée : 261/261, 0 retry, garde 33/33, rips 2/2+1/1) ; variantes 49× dans `sG_iter/`, 263 dans `sD_corpus/` |
+| Résistance de 19 brûlées | LDS épuisée k≤4 (959 k états à k=4, 253 s) ; k=5 incomplet (2,33 M états, 550 s) ; 3 graines, 4 budgets, 0 ligne à 18 |
+| Verrou d'échantillonnage | 1 tirage pleine ligne sur ~800 k fait les 3 résolutions ; la conversion se joue aux reculs 60-110 des approches (crête-rip 8/8, 4 racines sur 4 en sG) |
+| Racines rippées-tôt | STÉRILES (3/8 avec 3 rips, ~700 k tirages) — rips en fin de ligne = structurel sur ce deck |
+| Ancienne « résistance à 8-12 déviations » | INVALIDÉE comme preuve : les passes s'arrêtaient à 16 variantes de coût égal (330 états/0,2 s) — seuls les épuisements sous `--optimize` comptent |
+| Le même board, autre deck | 13/45/208 (test 4, sans discipline) — la marge venait de là ; sous discipline même-deck elle ne s'est PAS matérialisée en tier 1 |
+| Rejetés sur mesure (sessions 1-4) | GNRPA-LR R=2 ; gloutons >1/8 ; événements courants dans resolve/summon-min ; Rollout-IW sans arbre ; allocations hôte |
+| Reproductibilité | jamais bit-à-bit à graine fixée — écarts francs ou répétitions ; A/B intra-run de préférence |
+| `test 3`/`test 4` (EN PAUSE) | état complet §9.10 |
 
-Sur `test 4`, les 8 cartes du board sont dans le deck, mais la ligne empruntait
-Fake Trap, Red Dragon Archfiend et Scarred Dragon Archfiend, absents. Les mains
-d'ouverture diffèrent : `Assault Zone + 3x Fake Trap` contre `2x Assault Zone`
-(la seconde est morte, « 1 seule par tour »).
+## Commandes
 
-## Le chiffre qui justifie ta mission
+```powershell
+# construire
+& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe" `
+    build\combosolver.sln /p:Configuration=Release /p:Platform=x64 /m /nologo /v:quiet
 
-À un écart, sur l'autre deck : **1 439 473 états développés, 222 363 fusions par
-transposition — la table ne rattrape que 15 %.** Elle ne fusionne que les états
-*identiques* ; or deux lignes qui diffèrent d'une carte au cimetière sont
-distinctes et pourtant sans intérêt distinct. On paie 0,2 ms et un instantané
-pour chacune.
+# santé (0 écart retrouve la référence, couverture 290/290, 0 fusion, A/B nouveauté)
+.\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
+    --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000 `
+    --outdir sX_sante --no-chain Zalen --no-chain "Crystal Wing"
+# NB : --outdir dédié TOUJOURS — le défaut « solutions/ » écraserait le corpus.
 
-Les tirages gloutons brûlent 8,5 M d'états en 300 s pour plafonner à 6/8.
+# L'ESCALADE (l'optimiseur effectif de la session 5) — enraciner sur la
+# meilleure ligne connue, budget au finisseur, borne armée :
+.\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
+    --scriptdir ..\deps\scripts_2026-04-13\script `
+    --start "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
+    --solve-ms 600000 --seed 777 --finisher levin --optimize `
+    --finisher-min 420000 --burn-limit 19 --archive-k 24 `
+    --approach "sF_final/solution_00_b19_a55.yrp" `
+    --outdir sX_iter `
+    --guard "5:Crystal Wing|Zalen@terrain+Junk Signal@main" --guard-off "mainadv<=2" `
+    --no-activate "Duel Evolution - Assault Zone" `
+    --no-chain Zalen --no-chain "Crystal Wing" `
+    --resolve "PSY-Framelord Omega@terrain:2" `
+    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
 
-## Direction algorithmique (recherche bibliographique déjà faite)
+# LDS-optimize (résistance locale, épuisements réels) : la commande santé
+# + --optimize + les drapeaux de discipline, --solve-ms selon le k visé
+# (k=4 a coûté 253 s ; k=5 dépasse 550 s).
 
-### 1. Élagage par nouveauté — le levier principal
+# mode JUGE : mêmes drapeaux sans --solve, sur n'importe quel replay produit.
 
-**Iterated Width** (Lipovetzky & Geffner) renverse notre approche : au lieu de
-tout développer puis dédupliquer, on **jette tout état qui ne rend vrai aucun
-n-uplet d'atomes inédit**. IW(1) = un atome neuf, IW(2) = une paire neuve. Le
-coût devient exponentiel dans la *largeur*, pas dans la taille de l'espace.
+# TEST ADVERSE : Nibiru joué pour de vrai à chaque fenêtre légale.
+.\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
+    --scriptdir ..\deps\scripts_2026-04-13\script `
+    --fire "27204311" --fire-spare "Junk Signal" --fire-ms 300000 --seed 999 `
+    --outdir sX_fire `
+    --guard "5:Crystal Wing|Zalen@terrain+Junk Signal@main" --guard-off "mainadv<=2" `
+    --no-activate "Duel Evolution - Assault Zone" `
+    --no-chain Zalen --no-chain "Crystal Wing" `
+    --resolve "PSY-Framelord Omega@terrain:2" `
+    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
+# (la garde sert au rapport ; la continuation post-injection tourne SANS garde
+# — menace dépensée — et SANS no_chain — chaîner sur la menace est le rôle des
+# gardes, piège 37. Les replays produits se rejugent avec --opp-hand.)
+```
 
-Trois raisons pour lesquelles c'est applicable ici sans rien remodéliser :
-
-- **Nos atomes existent déjà** : `ComputeBoardKey` et `StateDigest`
-  (`search.cpp`) calculent exactement les faits (carte, zone, position).
-- **Ça marche sur simulateur opaque**, sans modèle PDDL — c'est toute la lignée
-  Atari. On ne sait pas inspecter les préconditions d'ocgcore, seulement
-  appliquer et restaurer : c'est précisément ce cadre.
-- **`Rollout-IW` est notre `Search::Rollout()` en mieux** : la version anytime
-  d'IW. Il manque la table de nouveauté et la coupure d'un tirage dès qu'il
-  cesse de produire du neuf.
-
-Lectures : arXiv:2106.04866 (survol, point d'entrée), arXiv:1801.03354
-(Rollout-IW), arXiv:2404.17648 (BFWS, nouveauté + heuristique).
-
-### 2. Sérialiser le but — la moitié structurelle
-
-On teste le board comme **un but conjonctif atomique** : les 8 cartes d'un coup.
-C'est le pire cas — le test ne se déclenche jamais avant la toute fin, donc il ne
-guide rien pendant 300 décisions. IW brille sur les buts *atomiques*.
-
-`Serialized IW` atteint les sous-buts un par un. Les **policy sketches**
-(arXiv:2311.05490, arXiv:2105.04250) donnent un langage pour déclarer la
-décomposition, explicitement conçu pour « encoder de la connaissance de domaine
-à la main ou l'apprendre à partir de petits exemples ». C'est mot pour mot ce
-qu'est notre répertoire — mais un sketch de largeur bornée vient avec une
-garantie polynomiale, là où le répertoire n'est qu'un ordre de visite.
-
-### 3. NRPA pour les tirages
-
-La prime de répertoire dans `Search::Rollout()` est réglée à la main, et elle
-était fausse au premier essai (elle valait +40 quand un monstre posé vaut +3, si
-bien que « terminer le tour » — coup connu de la référence, donc primé — passait
-devant une invocation productive ; terminer le tour est irréversible). Corrigée
-en départage plutôt qu'en prime additive : 5/8 → 6/8.
-
-**NRPA** (Cazenave) fait ça proprement : il apprend un poids par code de coup au
-fil de tirages imbriqués. Nos `Choice::plan_key` **sont déjà** ces codes de
-coups. GNRPA (arXiv:2003.10024) ajoute température et **biais** — l'emplacement
-prévu pour un prior comme le nôtre. arXiv:2401.10420 traite le mode de
-défaillance qu'on rencontrerait : la politique qui converge et rejoue sans cesse
-la même séquence. Voir aussi arXiv:2101.03563.
-
-Domaines d'application de NRPA : SameGame, Morpion Solitaire, TSP avec fenêtres,
-repliement d'ARN inverse — tous mono-joueur, déterministes, à longue séquence.
-Notre forme exacte.
-
-**Réserve honnête :** la garantie polynomiale d'IW suppose une largeur bornée, et
-rien ne dit qu'un combo Yu-Gi-Oh! en a une — la disponibilité d'une carte dépend
-de beaucoup d'autres. Vise IW(2) sérialisé, sans garantie, mais avec un élagage
-sans commune mesure avec l'existant. **Mesure la largeur effective avant de
-promettre quoi que ce soit.**
-
-## Direction programmatique
-
-- **Parallélisme à 5 cœurs sur 16.** Chaque worker a sa propre arène, son propre
-  duel et sa **propre** table de transposition : ils refont le même travail. Une
-  table partagée (lock-free, à la lazy SMP) est le levier identifié. La
-  réclamation dynamique est déjà en place (`SearchConfig::claims`), réclamer au
-  *deuxième* écart et non au premier a fait passer de 2 à 5 cœurs.
-- **`Heuristic()` fait deux requêtes de zone par fils évalué.** Chaud.
-- **`StateDigest()` interroge 7 zones × 2 joueurs + l'état du processeur** à
-  chaque nœud. Si la nouveauté remplace la transposition, une bonne part de ce
-  coût disparaît.
-- Profiler avant d'optimiser : le rapport donne déjà ms/décision et pages sales.
+Drapeaux d'optimisation : `--optimize` (anytime + score lexicographique +
+poursuite après but + archive par coût + racines-solutions), `--burn-slack`
+(marge B&B, défaut 6, marge mesurée sur la référence : 4), `--burn-limit`
+(ensemencer la borne, typiquement 19). Le reste inchangé : `--finisher levin`,
+`--archive-k`, `--approach` (répétable), `--finisher-min`, `--levin-h`,
+`--resolve-weight` 250, `--no-chain`, `--scriptdir` obligatoire (218 retries
+silencieux sans lui).
 
 ## Les pièges qui ont coûté cher — ne pas les redécouvrir
 
-1. **`Arena::Init` s'approprie le routage des libérations du thread** (`t_owner`).
-   Jamais deux arènes sur le même thread : toute arène supplémentaire tourne sur
-   son propre thread. Et le `Duel` doit mourir **avant** `Arena::Shutdown()`.
-2. **`ScriptProvider::Read` commence par `ArenaPause`** — son journal `misses`
-   est partagé entre threads et ne doit pas vivre dans une arène.
-3. **`Arena::Init` doit `reserve()` ses propres structures AVANT `t_owner = this`**,
-   sinon l'allocateur alloue ses tables dans l'arène qu'il gère. `SelfCheck()`
-   vérifie l'invariant.
-4. **Toute lecture du suivi de pages sales passe par `SyncDirty()`** :
-   `GetWriteWatch` avec RESET détruit les bits.
-5. **`QUERY_CODE` ≠ `QUERY_ALIAS`.** `c.Code()` (alias résolu) pour l'identité de
-   board — deux illustrations sont la même carte. `c.code` + `db.Canonical()`
-   pour compter ce qu'un deck doit contenir : `get_code()` reflète aussi
-   `EFFECT_CHANGE_CODE`, et Scarred Dragon Archfiend s'y présente comme « Red
-   Dragon Archfiend ».
-6. **L'appariement au plan utilise `plan_key`, pas `edge`** — la clé sans la
-   colonne. Y mettre l'arête rend tout choix de zone inappariable.
-7. **Une décision forcée (un seul choix légal) coûte zéro écart.** La facturer
-   vide le budget sur des non-choix et tue la descente au premier prompt de
-   l'adversaire.
-8. **Le plan est un répertoire, pas un calendrier.** Le suivre pas à pas fait
-   décrocher à la 4ᵉ décision sur une question inédite (4 états contre 60 000).
+1-31 : sessions 1-4 (voir la liste complète dans l'ancien prompt au besoin —
+les plus mordants : arène `Pop()` jamais `Discard()` (22) ; `--resolve`/
+`--summon-min` = événements RARES uniquement, deux effondrements mesurés
+(28, 31) ; une approche se rejoue sur le duel de SON en-tête (21) ; jamais
+bit-à-bit à graine fixée (24) ; équivalence de but sans position mais avec
+la face (26) ; ne pas élaguer sur « carte brûlée » (27) ; `Choice::card`
+couvre les fenêtres de chaîne (29)).
+
+32. **Le défaut `--outdir` est `solutions/` — le corpus.** Toujours un
+    `--outdir` dédié par run, sinon les 16 fichiers écrasent le répertoire
+    de racines.
+33. **Un « résiste à N déviations » sans `--optimize` est un arrêt à 16
+    variantes, pas une preuve.** Seules les passes marquées ÉPUISÉ sous
+    `--optimize` comptent (et un run court tronque sans le dire — le run
+    900 s fait foi contre le run 60 s, mêmes k).
+34. **Les brûlées ne sont pas monotones** (pic 23 → final 19 sur la
+    référence) : toute borne sur les brûlées porte une MARGE (`--burn-slack`,
+    défaut 6 > marge mesurée 4). Une borne sans marge couperait la référence.
+35. **La poursuite d'après-but est active sous `--optimize`** : le board
+    atteint n'est plus terminal (tirages ET DFS). Les 5 « solutions » à k=0
+    sont les ré-atteintes le long de la référence — normales, pas un bug.
+36. **Une réponse posée non traitée est ÉCRASÉE par le SetResponse suivant.**
+    La boucle de rejeu d'un préfixe sort avec la dernière réponse pendante
+    (la convention d'entrée du finisseur) ; injecter/poser une autre réponse
+    sans avoir traité la première la remplace en silence — l'état part
+    décalé d'une réponse et le chemin assemblé ne rejoue pas (payé 3 runs
+    sur `--fire` : 16/16 MSG_RETRY). Avancer au prompt AVANT d'injecter ;
+    l'auto-contrôle du worker (rejeu du chemin assemblé + indice de
+    divergence) est le détecteur.
+37. **`no_chain` ne s'applique pas à la continuation post-injection de
+    `--fire`** : la règle « Zalen/CW ne chaînent jamais » supposait le
+    solitaire ; chaîner sur la menace RÉELLE est leur rôle (mesuré : avec le
+    filtre hérité, zéro conversion board complet).
 
 ## Discipline de vérification — non négociable
 
-Chaque changement doit préserver, et le rapport les affiche tous :
-
-- `MSG_RETRY` = 0 au rejeu de référence ;
-- couverture de l'énumérateur ≥ 289/290 ;
-- **0 fusion de digest** sur les 290 états de la ligne (ils sont distincts par
-  construction ; une fusion signifie que le digest sous-hache et fait disparaître
-  des solutions **sans rien signaler** — c'est le mode de défaillance à
-  surveiller) ;
-- à zéro écart sur le même deck, la référence **doit** être retrouvée : c'est ce
-  qui fait qu'« aucune solution » reste un signal de défaut ;
-- les replays écrits sont rejoués depuis zéro dans un duel neuf avant écriture.
-
-Si tu introduis un élagage par nouveauté, **ajoute une mesure du taux de coupure
-et du taux de solutions perdues** sur le cas même-deck, dont on connaît les ~500
-solutions. Un élagage qui gagne 10× en états mais perd des solutions doit le dire
-lui-même, pas être découvert plus tard.
+0 retry / couverture 290/290 / 0 fusion ; **à 0 écart la référence est
+retrouvée** ; A/B nouveauté automatique ; tout replay écrit rejoué depuis
+zéro et jugé avec les MÊMES drapeaux ; **toute solution « moins chère » se
+vérifie sur les trois coûts ET la discipline avant d'être annoncée** ; A/B
+intra-run de préférence ; un A/B perdant se documente et se désactive par
+défaut.
 
 ## Cas de test
 
-- Référence : `D:\ProjectIgnis\replay\synchron handrip 2.yrpX`
-- Autre deck : `D:\ProjectIgnis\replay\test 4.yrpX`
-- `--workdir` par défaut `D:\ProjectIgnis` (installation EDOPro réelle, à ne
-  jamais modifier)
+- LE cas : `D:\ProjectIgnis\replay\synchron handrip 2.yrpX` (290/290, 0
+  fusion ; référence 19/56/273 ; MEILLEURE LIGNE CONNUE 19/55/261)
+- Répertoire : `solutions/` (corpus historique 19/56/272 — NE PAS écraser),
+  `sD_corpus/` (263), `sF_final/` (261/55a — LA racine d'escalade),
+  `sG_iter/` (49 variantes de 261)
+- Refermetures anti-Nibiru : `sM_fire5/`, `sN_fire_deep/` (b19_a58/59 board
+  complet, b20_a58-62 sans JS — rejugeables avec `--opp-hand "27204311"`,
+  racines `--approach` pour les fenêtres précoces) ; `sP_bake300/`
+  (`--fire-bake` : en-tête CUIT, VISIONNABLES dans EDOPro sans drapeau —
+  Nibiru dans le deck adverse servi en main par le pseudo-mélange ; 29
+  fenêtres seulement, le handrip peut ripper Nibiru lui-même) ;
+  `sT_zalen3/` (séquence Nibiru→JS→Zalen→Omega mise en scène — mais Nibiru
+  y est chaîné sur Junk Speeder : « frauduleux » selon le joueur, la vraie
+  menace DÉMARRE une chaîne) ; `sY_zalen5/` (LA conversion authentique :
+  fenêtre OUVERTE déc. 173, Nibiru ouvreur contré par Junk Signal, jugée
+  286/286 — via `--fire-open`, muselières `--fire-no-chain` CW+Dis Pater,
+  3 `--fire-spare`). Acquis §9.11 : 4 familles de contres par coût
+  croissant (CW, Dis Pater, JS, Omega/AZ), Zalen ne chaîne QUE par-dessus
+  JS, `--resolve Zalen` seul se fait contourner, le contre JS sauve les
+  fenêtres précoces (7/8) mais les rips depuis déc. 58 restent le mur ;
+  levier suivant : écrire la MEILLEURE APPROCHE par fenêtre pour visionner
+  les contres non refermés.
+- Logs session 5 : `sA_selfstart` → `sN_fire_deep` (.log + dossiers),
+  commandes au §9.11 ; logs session 4 : `mA_*` → `mO_*`
+- En pause : `test 4.yrpX`, `test 3.ydk` + leurs approches (§9.10)
+- `--workdir` par défaut `D:\ProjectIgnis` (ne jamais y écrire)
 
-Question ouverte à laquelle personne n'a répondu : **le board de la référence
-est-il atteignable depuis le deck de `test 4` ?** Rien ne l'exclut — les 8 cartes
-sont là — mais aucune ligne n'a été trouvée. L'outil peut prouver
-« atteignable » en produisant le replay ; il ne peut prouver « inatteignable »
-que par le test de disponibilité des cartes, qui passe.
+## Bibliographie (vérifiée sur arXiv)
+
+| Levier | Papier | arXiv |
+|---|---|---|
+| Coût lexicographique NRPA (IMPLÉMENTÉ session 5) | Montparnasse / MOGNRPALR | 2505.02110, 2606.07562 |
+| Multi-objectif (si Pareto redevient utile) | Pareto-NRPA | 2507.19109 |
+| LTS/PHS* (implémentés) | Policy-Guided Heuristic Search | 2103.11505 |
+| Recul principled | √LTS | 2412.05196 |
+| Archive d'états (fait, re-scorée par coût) | Go-Explore | 2004.12919 |
+| Politique CPU sans réseau | LTS with Context Models | 2305.16945 |
+| Stabilité NRPA | Stabilized NRPA | 2101.03563 |
+| Rejeté sur mesure | GNRPA-LR | 2401.10420 |
+| Théorie YGO | Deciding winning strategies is hard | 2603.02863 |
+
+Définition de « terminé » pour la session 6 : (a) la question « 18 brûlées
+existe-t-il ? » a avancé d'un cran PROUVABLE — relaxation SMT posée (même
+partielle : quelles contraintes comptables, quel solveur, premier UNSAT/SAT
+sur un sous-problème), OU un rayon d'épuisement étendu (k=5 fermé, reculs
+> 150 fouillés) ; (b) si une ligne < 19 tombe : vérifiée sur les trois coûts
+ET la discipline, jugée, livrée ; (c) §9.12 documenté, ce prompt régénéré.

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <set>
 
 #include "ocgapi_constants.h"
 
@@ -27,21 +26,22 @@ private:
 	bool ok{ true };
 };
 
-std::vector<uint8_t> Int32Response(int32_t v) {
-	std::vector<uint8_t> r(4);
+// Ecrivent EN PLACE dans la reponse d'un Choice reutilise : resize() sur un
+// vecteur deja capacitaire n'alloue pas.
+void PutInt32(std::vector<uint8_t>& r, int32_t v) {
+	r.resize(4);
 	std::memcpy(r.data(), &v, 4);
-	return r;
 }
 
 // [int32 type=2][uint32 count][uint8 index...]  (playerop.cpp:258)
-std::vector<uint8_t> CardIndexResponse(const std::vector<uint8_t>& idx) {
-	std::vector<uint8_t> r(8 + idx.size());
+void PutCardIndex(std::vector<uint8_t>& r, const uint8_t* idx, size_t n) {
+	r.resize(8 + n);
 	int32_t type = 2;
-	uint32_t count = static_cast<uint32_t>(idx.size());
+	uint32_t count = static_cast<uint32_t>(n);
 	std::memcpy(r.data(), &type, 4);
 	std::memcpy(r.data() + 4, &count, 4);
-	std::memcpy(r.data() + 8, idx.data(), idx.size());
-	return r;
+	if(n)
+		std::memcpy(r.data() + 8, idx, n);
 }
 
 uint64_t Mix(uint64_t h, uint64_t v) {
@@ -56,25 +56,40 @@ uint64_t EdgeOf(uint8_t message, std::initializer_list<uint64_t> parts) {
 	return h;
 }
 
-// Sous-ensembles de `n` elements de taille lo..hi, plafonnes. On privilegie les
-// tailles extremes : une selection minimale (economie de ressources) et une
-// selection maximale sont les deux qui portent l'essentiel de l'information.
-void EnumerateSubsets(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap,
-					  std::vector<std::vector<uint8_t>>& out) {
+// Label construit seulement si demande : chaque label est une allocation de
+// chaine par choix, et les chemins chauds n'en lisent aucun.
+void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
+			  uint64_t num, bool with_num = true) {
+	if(!opt.labels)
+		return;
+	c.label = prefix;
+	if(with_num)
+		c.label += std::to_string(num);
+}
+
+// Sous-ensembles de `n` elements de taille lo..hi, plafonnes, livres au
+// callback un par un — aucun stockage intermediaire. On privilegie les tailles
+// extremes : une selection minimale (economie de ressources) et une selection
+// maximale sont les deux qui portent l'essentiel de l'information.
+template<typename F>
+void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f) {
+	static thread_local std::vector<uint8_t> cur;
 	hi = (std::min)(hi, n);
 	if(lo > hi)
 		return;
-	for(uint32_t k = lo; k <= hi && out.size() < cap; ++k) {
+	uint32_t emitted = 0;
+	for(uint32_t k = lo; k <= hi && emitted < cap; ++k) {
 		if(k == 0) {
-			out.emplace_back();
+			f(nullptr, 0u);
+			++emitted;
 			continue;
 		}
-		std::vector<uint8_t> cur(k);
+		cur.resize(k);
 		for(uint32_t i = 0; i < k; ++i)
 			cur[i] = static_cast<uint8_t>(i);
 		for(;;) {
-			out.push_back(cur);
-			if(out.size() >= cap)
+			f(cur.data(), k);
+			if(++emitted >= cap)
 				return;
 			// combinaison suivante en ordre lexicographique
 			int i = static_cast<int>(k) - 1;
@@ -91,13 +106,8 @@ void EnumerateSubsets(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap,
 
 constexpr uint32_t kLocInfo = 1 + 1 + 4 + 4;
 
-} // namespace
-
-namespace {
-
-std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
-								 uint32_t len, const EnumOptions& opt) {
-	std::vector<Choice> out;
+void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
+				  const EnumOptions& opt, ChoiceList& out) {
 	Reader r(data, len);
 	// Les codes lus dans le prompt sont les codes IMPRIMES : deux illustrations
 	// de la meme carte n'y portent pas le meme nombre. Toute arete se construit
@@ -106,6 +116,11 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 	auto canon = [&opt](uint32_t code) {
 		return opt.db ? opt.db->Canonical(code) : code;
 	};
+	// Deduplication sans std::set : les listes sont courtes (quelques dizaines),
+	// la recherche lineaire dans un tampon reutilise bat le nid d'allocations.
+	static thread_local std::vector<uint32_t> seen_codes;
+	static thread_local std::vector<std::pair<uint32_t, uint64_t>> seen_pairs;
+	static thread_local std::vector<uint32_t> codes;
 
 	switch(message) {
 	case MSG_SELECT_IDLECMD: {
@@ -113,61 +128,80 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		// t : 0 invocation, 1 invocation speciale, 2 changement de position,
 		// 3 pose de monstre, 4 pose de magie/piege, 5 activation.
 		// La reponse est t | (s << 16)  (playerop.cpp:141)
-		static const char* kNames[5] = { "invoquer", "inv.speciale", "reposition",
-										 "poser-mon", "poser-st" };
+		static const char* kNames[5] = { "invoquer ", "inv.speciale ",
+										 "reposition ", "poser-mon ", "poser-st " };
 		const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
 		for(uint32_t g = 0; g < 5; ++g) {
 			uint32_t n = r.Get<uint32_t>();
-			std::set<uint32_t> seen;
+			seen_codes.clear();
 			for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 				uint32_t code = canon(r.Get<uint32_t>());
 				r.Skip(strides[g] - 4);
-				if(opt.dedup_by_code && !seen.insert(code).second)
-					continue;
-				Choice c;
-				c.response = Int32Response(static_cast<int32_t>(g | (i << 16)));
+				if(opt.dedup_by_code) {
+					if(std::find(seen_codes.begin(), seen_codes.end(), code) !=
+					   seen_codes.end())
+						continue;
+					seen_codes.push_back(code);
+				}
+				Choice& c = out.Emit();
+				PutInt32(c.response, static_cast<int32_t>(g | (i << 16)));
 				c.edge = EdgeOf(message, { g, code, opt.dedup_by_code ? 0u : i });
-				c.label = std::string(kNames[g]) + " " + std::to_string(code);
-				out.push_back(std::move(c));
+				c.card = code;
+				SetLabel(c, opt, kNames[g], code);
 			}
 		}
 		uint32_t n_act = r.Get<uint32_t>();
-		std::set<std::pair<uint32_t, uint64_t>> seen_act;
+		seen_pairs.clear();
 		for(uint32_t i = 0; i < n_act && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
-			r.Skip(1 + 1 + 4);
+			r.Skip(1);                       // controleur
+			uint8_t loc = r.Get<uint8_t>();  // zone d'ou la carte s'active
+			r.Skip(4);                       // sequence
 			uint64_t desc = r.Get<uint64_t>();
 			r.Skip(1);
-			if(opt.dedup_by_code && !seen_act.insert({ code, desc }).second)
-				continue;
-			Choice c;
-			c.response = Int32Response(static_cast<int32_t>(5u | (i << 16)));
+			// Activation interdite depuis cette zone : le choix n'existe pas.
+			if(opt.no_activate) {
+				auto it = opt.no_activate->find(code);
+				if(it != opt.no_activate->end() && (it->second & loc))
+					continue;
+			}
+			if(opt.dedup_by_code) {
+				std::pair<uint32_t, uint64_t> key{ code, desc };
+				if(std::find(seen_pairs.begin(), seen_pairs.end(), key) !=
+				   seen_pairs.end())
+					continue;
+				seen_pairs.push_back(key);
+			}
+			Choice& c = out.Emit();
+			PutInt32(c.response, static_cast<int32_t>(5u | (i << 16)));
 			c.edge = EdgeOf(message, { 5, code, desc });
-			c.label = "activer " + std::to_string(code);
-			out.push_back(std::move(c));
+			c.card = code;
+			SetLabel(c, opt, "activer ", code);
 		}
 		uint8_t to_bp = r.Get<uint8_t>();
 		uint8_t to_ep = r.Get<uint8_t>();
 		r.Get<uint8_t>();   // melanger la main : sans effet sur le board
-		if(!r.Ok())
-			return {};
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
 		if(opt.allow_phase_change) {
 			if(to_bp) {
-				Choice c;
-				c.response = Int32Response(6);
+				Choice& c = out.Emit();
+				PutInt32(c.response, 6);
 				c.edge = EdgeOf(message, { 6 });
-				c.label = "-> Battle Phase";
-				out.push_back(std::move(c));
+				c.phase = true;
+				SetLabel(c, opt, "-> Battle Phase", 0, false);
 			}
 			if(to_ep) {
-				Choice c;
-				c.response = Int32Response(7);
+				Choice& c = out.Emit();
+				PutInt32(c.response, 7);
 				c.edge = EdgeOf(message, { 7 });
-				c.label = "-> End Phase";
-				out.push_back(std::move(c));
+				c.phase = true;
+				SetLabel(c, opt, "-> End Phase", 0, false);
 			}
 		}
-		return out;
+		return;
 	}
 
 	case MSG_SELECT_BATTLECMD: {
@@ -178,46 +212,69 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 			r.Skip(1 + 1 + 4);
 			uint64_t desc = r.Get<uint64_t>();
 			r.Skip(1);
-			Choice c;
-			c.response = Int32Response(static_cast<int32_t>(0u | (i << 16)));
+			Choice& c = out.Emit();
+			PutInt32(c.response, static_cast<int32_t>(0u | (i << 16)));
 			c.edge = EdgeOf(message, { 0, code, desc });
-			c.label = "activer " + std::to_string(code);
-			out.push_back(std::move(c));
+			c.card = code;
+			SetLabel(c, opt, "activer ", code);
 		}
 		uint32_t n_atk = r.Get<uint32_t>();
 		for(uint32_t i = 0; i < n_atk && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
 			r.Skip(1 + 1 + 4 + 1);
-			Choice c;
-			c.response = Int32Response(static_cast<int32_t>(1u | (i << 16)));
+			Choice& c = out.Emit();
+			PutInt32(c.response, static_cast<int32_t>(1u | (i << 16)));
 			c.edge = EdgeOf(message, { 1, code });
-			c.label = "attaquer avec " + std::to_string(code);
-			out.push_back(std::move(c));
+			c.card = code;
+			SetLabel(c, opt, "attaquer avec ", code);
 		}
 		uint8_t to_m2 = r.Get<uint8_t>();
 		uint8_t to_ep = r.Get<uint8_t>();
-		if(!r.Ok())
-			return {};
-		if(to_m2) out.push_back({ Int32Response(2), EdgeOf(message, { 2 }), "-> Main 2" });
-		if(to_ep) out.push_back({ Int32Response(3), EdgeOf(message, { 3 }), "-> End Phase" });
-		return out;
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
+		if(to_m2) {
+			Choice& c = out.Emit();
+			PutInt32(c.response, 2);
+			c.edge = EdgeOf(message, { 2 });
+			c.phase = true;
+			SetLabel(c, opt, "-> Main 2", 0, false);
+		}
+		if(to_ep) {
+			Choice& c = out.Emit();
+			PutInt32(c.response, 3);
+			c.edge = EdgeOf(message, { 3 });
+			c.phase = true;
+			SetLabel(c, opt, "-> End Phase", 0, false);
+		}
+		return;
 	}
 
 	case MSG_SELECT_EFFECTYN:
-	case MSG_SELECT_YESNO:
-		out.push_back({ Int32Response(1), EdgeOf(message, { 1 }), "oui" });
-		out.push_back({ Int32Response(0), EdgeOf(message, { 0 }), "non" });
-		return out;
+	case MSG_SELECT_YESNO: {
+		Choice& y = out.Emit();
+		PutInt32(y.response, 1);
+		y.edge = EdgeOf(message, { 1 });
+		SetLabel(y, opt, "oui", 0, false);
+		Choice& n = out.Emit();
+		PutInt32(n.response, 0);
+		n.edge = EdgeOf(message, { 0 });
+		SetLabel(n, opt, "non", 0, false);
+		return;
+	}
 
 	case MSG_SELECT_OPTION: {
 		r.Get<uint8_t>();
 		uint8_t n = r.Get<uint8_t>();
 		for(uint8_t i = 0; i < n && r.Ok(); ++i) {
 			uint64_t desc = r.Get<uint64_t>();
-			out.push_back({ Int32Response(i), EdgeOf(message, { desc }),
-							"option " + std::to_string(i) });
+			Choice& c = out.Emit();
+			PutInt32(c.response, i);
+			c.edge = EdgeOf(message, { desc });
+			SetLabel(c, opt, "option ", i);
 		}
-		return out;
+		return;
 	}
 
 	case MSG_SELECT_CHAIN: {
@@ -226,24 +283,47 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		uint8_t forced = r.Get<uint8_t>();
 		r.Get<uint32_t>(); r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
-		std::set<std::pair<uint32_t, uint64_t>> seen;
+		seen_pairs.clear();
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
 			r.Skip(kLocInfo);
 			uint64_t desc = r.Get<uint64_t>();
 			r.Skip(1);
-			if(opt.dedup_by_code && !seen.insert({ code, desc }).second)
+			// --no-chain : cette carte ne se chaine jamais (ses declencheurs
+			// FORCES ne passent pas par ici, forced est exempte ci-dessous).
+			// L'option disparait, "ne pas chainer" demeure.
+			if(!forced && opt.no_chain &&
+			   std::find(opt.no_chain->begin(), opt.no_chain->end(), code) !=
+				   opt.no_chain->end())
 				continue;
-			out.push_back({ Int32Response(static_cast<int32_t>(i)),
-							EdgeOf(message, { code, desc }),
-							"chainer " + std::to_string(code) });
+			if(opt.dedup_by_code) {
+				std::pair<uint32_t, uint64_t> key{ code, desc };
+				if(std::find(seen_pairs.begin(), seen_pairs.end(), key) !=
+				   seen_pairs.end())
+					continue;
+				seen_pairs.push_back(key);
+			}
+			Choice& c = out.Emit();
+			PutInt32(c.response, static_cast<int32_t>(i));
+			c.edge = EdgeOf(message, { code, desc });
+			// La carte engagee : sans elle, les effets RAPIDES (le rip
+			// d'Omega s'active en fenetre de chaine) echappaient au biais des
+			// indices — les invocations etaient biaisees, jamais les
+			// activations en chaine.
+			c.card = code;
+			SetLabel(c, opt, "chainer ", code);
 		}
-		if(!r.Ok())
-			return {};
-		if(!forced)
-			out.push_back({ Int32Response(-1), EdgeOf(message, { uint64_t(-1) }),
-							"ne pas chainer" });
-		return out;
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
+		if(!forced) {
+			Choice& c = out.Emit();
+			PutInt32(c.response, -1);
+			c.edge = EdgeOf(message, { uint64_t(-1) });
+			SetLabel(c, opt, "ne pas chainer", 0, false);
+		}
+		return;
 	}
 
 	case MSG_SELECT_CARD:
@@ -253,39 +333,54 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		uint32_t lo = r.Get<uint32_t>();
 		uint32_t hi = r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
-		std::vector<uint32_t> codes;
+		codes.clear();
 		const uint32_t stride = (message == MSG_SELECT_CARD) ? kLocInfo : 7;
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 			codes.push_back(canon(r.Get<uint32_t>()));
 			r.Skip(stride);
 		}
-		if(!r.Ok())
-			return {};
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
 		// Les cartes de meme code sont interchangeables : on ne garde qu'un
 		// representant de chaque code avant de former les sous-ensembles.
-		std::vector<uint8_t> pool;
-		std::set<uint32_t> seen;
-		for(uint32_t i = 0; i < codes.size(); ++i)
-			if(!opt.dedup_by_code || seen.insert(codes[i]).second)
-				pool.push_back(static_cast<uint8_t>(i));
-
-		std::vector<std::vector<uint8_t>> subsets;
-		EnumerateSubsets(static_cast<uint32_t>(pool.size()), lo, hi,
-						 opt.max_subsets, subsets);
-		for(const auto& s : subsets) {
-			std::vector<uint8_t> idx;
-			uint64_t h = 0;
-			for(uint8_t p : s) {
-				idx.push_back(pool[p]);
-				h = Mix(h, codes[pool[p]]);
+		static thread_local std::vector<uint8_t> pool;
+		pool.clear();
+		seen_codes.clear();
+		for(uint32_t i = 0; i < codes.size(); ++i) {
+			if(opt.dedup_by_code) {
+				if(std::find(seen_codes.begin(), seen_codes.end(), codes[i]) !=
+				   seen_codes.end())
+					continue;
+				seen_codes.push_back(codes[i]);
 			}
-			out.push_back({ CardIndexResponse(idx), EdgeOf(message, { h, idx.size() }),
-							"choisir " + std::to_string(idx.size()) + " carte(s)" });
+			pool.push_back(static_cast<uint8_t>(i));
 		}
-		if(cancelable)
-			out.push_back({ Int32Response(-1), EdgeOf(message, { uint64_t(-1) }),
-							"annuler" });
-		return out;
+
+		static thread_local std::vector<uint8_t> idx;
+		ForEachSubset(static_cast<uint32_t>(pool.size()), lo, hi, opt.max_subsets,
+					  [&](const uint8_t* s, uint32_t k) {
+						  idx.clear();
+						  uint64_t h = 0;
+						  for(uint32_t j = 0; j < k; ++j) {
+							  idx.push_back(pool[s[j]]);
+							  h = Mix(h, codes[pool[s[j]]]);
+						  }
+						  Choice& c = out.Emit();
+						  PutCardIndex(c.response, idx.data(), idx.size());
+						  c.edge = EdgeOf(message, { h, k });
+						  if(opt.labels)
+							  c.label = "choisir " + std::to_string(k) +
+										" carte(s)";
+					  });
+		if(cancelable) {
+			Choice& c = out.Emit();
+			PutInt32(c.response, -1);
+			c.edge = EdgeOf(message, { uint64_t(-1) });
+			SetLabel(c, opt, "annuler", 0, false);
+		}
+		return;
 	}
 
 	case MSG_SELECT_UNSELECT_CARD: {
@@ -294,102 +389,140 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		uint8_t cancelable = r.Get<uint8_t>();
 		r.Get<uint32_t>(); r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
-		std::vector<uint32_t> codes;
+		codes.clear();
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 			codes.push_back(canon(r.Get<uint32_t>()));
 			r.Skip(kLocInfo);
 		}
 		uint32_t n_un = r.Get<uint32_t>();
-		if(!r.Ok())
-			return {};
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
 		// [int32 1][int32 index]  (playerop.cpp:439)
 		auto make = [&](uint32_t index, uint64_t key, const char* what) {
-			std::vector<uint8_t> resp(8);
-			int32_t one = 1, idx = static_cast<int32_t>(index);
-			std::memcpy(resp.data(), &one, 4);
-			std::memcpy(resp.data() + 4, &idx, 4);
-			out.push_back({ std::move(resp), EdgeOf(message, { key }), what });
+			Choice& c = out.Emit();
+			c.response.resize(8);
+			int32_t one = 1, idx32 = static_cast<int32_t>(index);
+			std::memcpy(c.response.data(), &one, 4);
+			std::memcpy(c.response.data() + 4, &idx32, 4);
+			c.edge = EdgeOf(message, { key });
+			SetLabel(c, opt, what, 0, false);
 		};
-		std::set<uint32_t> seen;
-		for(uint32_t i = 0; i < codes.size(); ++i)
-			if(!opt.dedup_by_code || seen.insert(codes[i]).second)
-				make(i, codes[i], "selectionner");
+		seen_codes.clear();
+		for(uint32_t i = 0; i < codes.size(); ++i) {
+			if(opt.dedup_by_code) {
+				if(std::find(seen_codes.begin(), seen_codes.end(), codes[i]) !=
+				   seen_codes.end())
+					continue;
+				seen_codes.push_back(codes[i]);
+			}
+			make(i, codes[i], "selectionner");
+		}
 		for(uint32_t i = 0; i < n_un; ++i)
 			make(static_cast<uint32_t>(codes.size()) + i, 0x8000000ull + i,
 				 "deselectionner");
-		if(finishable || cancelable)
-			out.push_back({ Int32Response(-1), EdgeOf(message, { uint64_t(-1) }),
-							"terminer" });
-		return out;
+		if(finishable || cancelable) {
+			Choice& c = out.Emit();
+			PutInt32(c.response, -1);
+			c.edge = EdgeOf(message, { uint64_t(-1) });
+			SetLabel(c, opt, "terminer", 0, false);
+		}
+		return;
 	}
 
 	case MSG_SELECT_PLACE:
 	case MSG_SELECT_DISFIELD: {
-		uint8_t player = r.Get<uint8_t>();
+		r.Get<uint8_t>();   // player
 		uint8_t count = r.Get<uint8_t>();
 		uint32_t flag = r.Get<uint32_t>();
 		if(!r.Ok() || count == 0)
-			return {};
-		// Un bit a 1 = zone interdite (playerop.cpp:590).
+			return;
+		// Un bit a 1 = zone interdite (playerop.cpp:590). 30 emplacements au
+		// plus : un tableau de pile suffit.
 		struct Slot { uint8_t owner, loc, seq; };
-		std::vector<Slot> free_slots;
+		Slot free_slots[30];
+		uint32_t n_free = 0;
 		for(uint8_t owner = 0; owner < 2; ++owner) {
 			for(uint8_t seq = 0; seq < 7; ++seq)
 				if(!(flag & (1u << (seq + owner * 16))))
-					free_slots.push_back({ owner, LOCATION_MZONE, seq });
+					free_slots[n_free++] = { owner, LOCATION_MZONE, seq };
 			for(uint8_t seq = 0; seq < 8; ++seq)
 				if(!(flag & (1u << (seq + 8 + owner * 16))))
-					free_slots.push_back({ owner, LOCATION_SZONE, seq });
+					free_slots[n_free++] = { owner, LOCATION_SZONE, seq };
 		}
 		if(opt.canonical_zones) {
 			// Une seule zone representative par (proprietaire, type de zone).
-			std::vector<Slot> keep;
-			std::set<std::pair<uint8_t, uint8_t>> seen;
-			for(const Slot& s : free_slots)
-				if(seen.insert({ s.owner, s.loc }).second)
-					keep.push_back(s);
-			free_slots.swap(keep);
+			uint32_t kept = 0;
+			for(uint32_t i = 0; i < n_free; ++i) {
+				bool dup = false;
+				for(uint32_t j = 0; j < kept; ++j)
+					if(free_slots[j].owner == free_slots[i].owner &&
+					   free_slots[j].loc == free_slots[i].loc) {
+						dup = true;
+						break;
+					}
+				if(!dup)
+					free_slots[kept++] = free_slots[i];
+			}
+			n_free = kept;
 		}
 		// On ne pose qu'une carte a la fois dans l'immense majorite des cas.
 		if(count == 1) {
-			for(const Slot& s : free_slots) {
-				std::vector<uint8_t> resp{ s.owner, s.loc, s.seq };
-				out.push_back({ std::move(resp),
-								EdgeOf(message, { s.owner, s.loc, s.seq }),
-								"zone " + std::to_string(s.seq),
-								EdgeOf(message, { s.owner, s.loc }) });
+			for(uint32_t i = 0; i < n_free; ++i) {
+				const Slot& s = free_slots[i];
+				Choice& c = out.Emit();
+				c.response.resize(3);
+				c.response[0] = s.owner;
+				c.response[1] = s.loc;
+				c.response[2] = s.seq;
+				c.edge = EdgeOf(message, { s.owner, s.loc, s.seq });
+				// L'identite de plan ignore la colonne : deux placements dans
+				// deux colonnes libres realisent la meme intention.
+				c.plan_key = EdgeOf(message, { s.owner, s.loc });
+				SetLabel(c, opt, "zone ", s.seq);
 			}
 		} else {
 			// Placement multiple : on prend les premieres zones libres.
-			std::vector<uint8_t> resp;
-			for(uint8_t i = 0; i < count && i < free_slots.size(); ++i) {
-				resp.push_back(free_slots[i].owner);
-				resp.push_back(free_slots[i].loc);
-				resp.push_back(free_slots[i].seq);
+			if(n_free >= count) {
+				Choice& c = out.Emit();
+				c.response.resize(size_t(count) * 3);
+				for(uint8_t i = 0; i < count; ++i) {
+					c.response[size_t(i) * 3 + 0] = free_slots[i].owner;
+					c.response[size_t(i) * 3 + 1] = free_slots[i].loc;
+					c.response[size_t(i) * 3 + 2] = free_slots[i].seq;
+				}
+				c.edge = EdgeOf(message, { count });
+				SetLabel(c, opt, "placement multiple", 0, false);
 			}
-			if(resp.size() == size_t(count) * 3)
-				out.push_back({ std::move(resp), EdgeOf(message, { count }),
-								"placement multiple" });
 		}
-		(void)player;
-		return out;
+		return;
 	}
 
 	case MSG_SELECT_POSITION: {
 		r.Get<uint8_t>();
-		r.Get<uint32_t>();
+		// La CARTE fait partie de l'identite du choix. Sans elle, "ATK" et
+		// "DEF" sont deux coups globaux : la politique NRPA apprend UN poids
+		// pour toutes les positions de toutes les cartes — mesure : six
+		// monstres en DEF la ou la cible en veut cinq en ATK — et le
+		// repertoire perd l'intention par carte de la reference.
+		uint32_t code = canon(r.Get<uint32_t>());
 		uint8_t pos = r.Get<uint8_t>() & 0xf;
 		if(!r.Ok())
-			return {};
+			return;
 		static const struct { uint8_t bit; const char* name; } kPos[] = {
-			{ POS_FACEUP_ATTACK, "ATK" }, { POS_FACEDOWN_ATTACK, "FD-ATK" },
-			{ POS_FACEUP_DEFENSE, "DEF" }, { POS_FACEDOWN_DEFENSE, "FD-DEF" },
+			{ POS_FACEUP_ATTACK, "ATK " }, { POS_FACEDOWN_ATTACK, "FD-ATK " },
+			{ POS_FACEUP_DEFENSE, "DEF " }, { POS_FACEDOWN_DEFENSE, "FD-DEF " },
 		};
 		for(const auto& p : kPos)
-			if(pos & p.bit)
-				out.push_back({ Int32Response(p.bit), EdgeOf(message, { p.bit }),
-								p.name });
-		return out;
+			if(pos & p.bit) {
+				Choice& c = out.Emit();
+				PutInt32(c.response, p.bit);
+				c.edge = EdgeOf(message, { code, p.bit });
+				c.card = code;
+				SetLabel(c, opt, p.name, code);
+			}
+		return;
 	}
 
 	case MSG_SELECT_SUM: {
@@ -401,26 +534,30 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		for(uint32_t i = 0; i < n_must && r.Ok(); ++i)
 			r.Skip(4 + kLocInfo + 4);
 		uint32_t n = r.Get<uint32_t>();
-		std::vector<uint32_t> codes;
+		codes.clear();
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 			codes.push_back(canon(r.Get<uint32_t>()));
 			r.Skip(kLocInfo + 4);
 		}
-		if(!r.Ok())
-			return {};
+		if(!r.Ok()) {
+			out.Clear();
+			return;
+		}
 		// La contrainte de somme n'est verifiable que par le core : on propose
 		// tous les sous-ensembles, les invalides seront rejetes (MSG_RETRY) et
 		// la branche abandonnee.
-		std::vector<std::vector<uint8_t>> subsets;
-		EnumerateSubsets(n, 1, n, opt.max_subsets, subsets);
-		for(const auto& s : subsets) {
-			uint64_t h = 0;
-			for(uint8_t p : s)
-				h = Mix(h, codes[p]);
-			out.push_back({ CardIndexResponse(s), EdgeOf(message, { h, s.size() }),
-							"somme " + std::to_string(s.size()) });
-		}
-		return out;
+		ForEachSubset(n, 1, n, opt.max_subsets,
+					  [&](const uint8_t* s, uint32_t k) {
+						  uint64_t h = 0;
+						  for(uint32_t j = 0; j < k; ++j)
+							  h = Mix(h, codes[s[j]]);
+						  Choice& c = out.Emit();
+						  PutCardIndex(c.response, s, k);
+						  c.edge = EdgeOf(message, { h, k });
+						  if(opt.labels)
+							  c.label = "somme " + std::to_string(k);
+					  });
+		return;
 	}
 
 	case MSG_SELECT_COUNTER:
@@ -432,28 +569,42 @@ std::vector<Choice> EnumerateRaw(uint8_t message, const uint8_t* data,
 		// Espaces de valeurs, pas des listes : une enumeration naive serait
 		// enorme et surtout non pertinente pour l'egalite de board. On se
 		// contente de la reponse par defaut.
-		std::vector<uint8_t> def;
-		if(DefaultResponse(message, data, len, def))
-			out.push_back({ std::move(def), EdgeOf(message, { 0 }), "defaut" });
-		return out;
+		static thread_local std::vector<uint8_t> def;
+		def.clear();
+		if(DefaultResponse(message, data, len, def)) {
+			Choice& c = out.Emit();
+			c.response = def;
+			c.edge = EdgeOf(message, { 0 });
+			SetLabel(c, opt, "defaut", 0, false);
+		}
+		return;
 	}
 
 	default:
-		return out;
+		return;
 	}
 }
 
 } // namespace
 
-std::vector<Choice> Enumerate(uint8_t message, const uint8_t* data, uint32_t len,
-							  const EnumOptions& opt) {
-	std::vector<Choice> out = EnumerateRaw(message, data, len, opt);
+void EnumerateInto(uint8_t message, const uint8_t* data, uint32_t len,
+				   const EnumOptions& opt, ChoiceList& out) {
+	out.Clear();
+	EnumerateRaw(message, data, len, opt, out);
 	// Par defaut l'identite de plan est l'arete elle-meme ; seuls les prompts
 	// qui la distinguent explicitement (choix de zone) la renseignent.
 	for(Choice& c : out)
 		if(!c.plan_key)
 			c.plan_key = c.edge;
-	return out;
+}
+
+std::vector<Choice> Enumerate(uint8_t message, const uint8_t* data, uint32_t len,
+							  const EnumOptions& opt) {
+	static thread_local ChoiceList scratch;
+	EnumOptions o = opt;
+	o.labels = true;   // les appelants froids lisent les labels
+	EnumerateInto(message, data, len, o, scratch);
+	return std::vector<Choice>(scratch.begin(), scratch.end());
 }
 
 bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
@@ -499,7 +650,9 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 		uint8_t n = r.Get<uint8_t>();
 		if(!r.Ok() || n == 0)
 			return false;
-		out = Int32Response(0);   // premier choix propose
+		out.resize(4);
+		int32_t v = 0;   // premier choix propose
+		std::memcpy(out.data(), &v, 4);
 		return true;
 	}
 	case MSG_ANNOUNCE_RACE:
@@ -511,6 +664,72 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 	default:
 		return false;
 	}
+}
+
+bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
+					   const std::vector<uint8_t>& response,
+					   const EnumOptions& opt) {
+	// --no-chain : une reponse ENREGISTREE qui chaine une carte interdite est
+	// rattrapee ici (mode reparation, ou la reponse de la reference est
+	// candidate a cout zero sans passer par l'enumerateur).
+	if(message == MSG_SELECT_CHAIN && response.size() == 4 && opt.no_chain &&
+	   !opt.no_chain->empty()) {
+		int32_t v = 0;
+		std::memcpy(&v, response.data(), 4);
+		if(v < 0)
+			return false;   // "ne pas chainer"
+		Reader r(data, len);
+		r.Get<uint8_t>();
+		r.Get<uint8_t>();
+		uint8_t forced = r.Get<uint8_t>();
+		r.Get<uint32_t>();
+		r.Get<uint32_t>();
+		uint32_t n = r.Get<uint32_t>();
+		if(forced || static_cast<uint32_t>(v) >= n || !r.Ok())
+			return false;
+		for(int32_t i = 0; i < v; ++i)
+			r.Skip(4 + kLocInfo + 8 + 1);
+		uint32_t code = r.Get<uint32_t>();
+		if(!r.Ok())
+			return false;
+		if(opt.db)
+			code = opt.db->Canonical(code);
+		return std::find(opt.no_chain->begin(), opt.no_chain->end(), code) !=
+			   opt.no_chain->end();
+	}
+	if(!opt.no_activate || opt.no_activate->empty())
+		return false;
+	if(message != MSG_SELECT_IDLECMD || response.size() != 4)
+		return false;
+	int32_t v = 0;
+	std::memcpy(&v, response.data(), 4);
+	uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
+	uint32_t s = static_cast<uint32_t>(v) >> 16;
+	if(t != 5)
+		return false;   // seule la famille "activer" est couverte
+	// Rejouer le decodage du prompt jusqu'a l'entree designee.
+	Reader r(data, len);
+	r.Get<uint8_t>();
+	const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
+	for(uint32_t g = 0; g < 5; ++g) {
+		uint32_t n = r.Get<uint32_t>();
+		for(uint32_t i = 0; i < n && r.Ok(); ++i)
+			r.Skip(strides[g]);
+	}
+	uint32_t n_act = r.Get<uint32_t>();
+	if(!r.Ok() || s >= n_act)
+		return false;
+	for(uint32_t i = 0; i < s; ++i)
+		r.Skip(4 + 1 + 1 + 4 + 8 + 1);
+	uint32_t code = r.Get<uint32_t>();
+	r.Skip(1);
+	uint8_t loc = r.Get<uint8_t>();
+	if(!r.Ok())
+		return false;
+	if(opt.db)
+		code = opt.db->Canonical(code);
+	auto it = opt.no_activate->find(code);
+	return it != opt.no_activate->end() && (it->second & loc) != 0;
 }
 
 } // namespace solver

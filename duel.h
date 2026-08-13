@@ -61,13 +61,29 @@ public:
 
 	// Met en place decks et extra puis demarre. Reproduit
 	// ReplayMode::StartDuel (old_replay_mode.cpp:108), mode hand test compris.
-	bool Setup(const Replay& yrp, std::string& error);
+	// `extra_hand` : cartes AJOUTEES a la main de `extra_hand_team` avant le
+	// demarrage (--opp-hand). C'est ce qui donne une vraie main a l'adversaire
+	// d'un hand test : sans cartes jouables en face, le core n'ouvre aucune
+	// fenetre de reponse adverse — la garde serait satisfaite par vacuite et le
+	// handrip ne ripperait rien.
+	bool Setup(const Replay& yrp, std::string& error,
+			   const std::vector<uint32_t>* extra_hand = nullptr,
+			   uint8_t extra_hand_team = 1);
 
 	int Process();                       // OCG_DUEL_STATUS_*
 	std::vector<Message> Messages();     // messages produits par le dernier Process
+	// Variante sans allocation apres echauffement : `out` est reutilise.
+	void Messages(std::vector<Message>& out);
 	void SetResponse(const std::vector<uint8_t>& data);
 
 	std::vector<QueriedCard> Query(uint8_t con, uint32_t loc, uint32_t flags);
+	// Variante reutilisant `out` (les chemins chauds interrogent les zones a
+	// chaque decision : l'allocation par requete etait un point chaud mesure).
+	void Query(uint8_t con, uint32_t loc, uint32_t flags,
+			   std::vector<QueriedCard>& out);
+	// Codes seuls (Code() = alias sinon code), zones cachees des atomes et de
+	// la garde : pas de QueriedCard du tout.
+	void QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out);
 	uint32_t Count(uint8_t team, uint32_t loc);
 
 	// Etat que les zones ne montrent pas : pile de resolution en cours, chaine
@@ -108,5 +124,7 @@ private:
 // Decoupe le tampon renvoye par OCG_DuelQueryLocation (prefixe par sa taille
 // utile, ocgapi.cpp:234) en cartes.
 std::vector<QueriedCard> ParseQueryStream(const uint8_t* data, uint32_t len);
+void ParseQueryStreamInto(const uint8_t* data, uint32_t len,
+						  std::vector<QueriedCard>& out);
 
 } // namespace solver

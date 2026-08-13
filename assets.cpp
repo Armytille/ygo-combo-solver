@@ -1,6 +1,7 @@
 #include "assets.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 
@@ -96,6 +97,31 @@ const std::string& CardDB::Name(uint32_t code) const {
 	static const std::string kUnknown = "?";
 	auto it = names.find(code);
 	return it == names.end() ? kUnknown : it->second;
+}
+
+std::vector<std::pair<uint32_t, std::string>>
+CardDB::FindByName(const std::string& needle) const {
+	auto lower = [](std::string s) {
+		for(char& c : s)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return s;
+	};
+	const std::string want = lower(needle);
+	std::vector<std::pair<uint32_t, std::string>> out;
+	if(want.empty())
+		return out;
+	for(const auto& [code, name] : names) {
+		if(lower(name).find(want) == std::string::npos)
+			continue;
+		uint32_t canon = Canonical(code);
+		bool dup = false;
+		for(const auto& [c, n] : out)
+			if(c == canon) { dup = true; break; }
+		if(!dup)
+			out.emplace_back(canon, name);
+	}
+	std::sort(out.begin(), out.end());
+	return out;
 }
 
 bool CardDB::Load(const std::string& workdir, std::string& error) {

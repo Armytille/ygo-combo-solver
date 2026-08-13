@@ -19,10 +19,117 @@ combosolver.exe duel.yrpX --scriptdir <scripts> --solve --outdir solutions
 
 # Refaire ce board depuis un AUTRE duel (autre deck, autre main, autre graine)
 combosolver.exe ref.yrpX --scriptdir <scripts> --start autre.yrpX --outdir solutions
+
+# Refaire ce board depuis une DECKLIST + une main de depart, sans replay de
+# depart : le duel est construit (parametres et adversaire de la reference,
+# main forcee par pseudo-shuffle et VERIFIEE sur un duel jetable).
+combosolver.exe ref.yrpX --scriptdir <scripts> `
+    --deck "D:\ProjectIgnis\deck\test 3.ydk" `
+    --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom"
+# --hand est optionnel : par defaut, la main de la reference (si la decklist
+# peut la fournir — sinon erreur explicite).
+
+# Donner une vraie main a l'adversaire d'un hand test : sans cartes JOUABLES
+# en face, le core n'ouvre aucune fenetre de reponse adverse — la garde serait
+# satisfaite par vacuite et le handrip ne ripperait rien. Les replays produits
+# ne se rejouent qu'avec le meme --opp-hand.
+... --opp-hand "27204311|27204311|27204311"   # 3 Nibiru en main adverse
+
+# Contraintes de ligne : jouer sous menace Nibiru. Des que la 5e invocation
+# resout (Nibiru devient actif), a chaque fenetre de reponse adverse : soit
+# Crystal Wing est en jeu, soit Zalen est en jeu AVEC Junk Signal encore en
+# main pour chainer par-dessus. La garde s'eteint une fois la main adverse
+# videe (handrip). Et on ne paie jamais les 2000 LP du terrain.
+combosolver.exe duel.yrpX --scriptdir <scripts> --solve `
+    --guard  "5:Crystal Wing|Zalen@terrain+Junk Signal@main" `
+    --guard-off "mainadv<=2" `
+    --no-activate "Duel Evolution - Assault Zone" `
+    --resolve "PSY-Framelord Omega@terrain:2" `
+    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
+
+# --resolve : la ligne doit resoudre ces effets (ici : le handrip de 3 cartes
+# qui eteint la garde). Controle au but, pas en cours de ligne. @zone restreint
+# la zone d'ACTIVATION : l'Omega qui rippe s'active du TERRAIN — sans @terrain,
+# son effet de cimetiere compterait aussi (faux positif mesure).
+
+# --summon "5:carte|carte" existe aussi (le n-ieme summon DOIT etre une de ces
+# cartes) — a ne pas confondre avec la garde : "protege quand la fenetre
+# s'ouvre" n'exige pas que le garde SOIT la 5e invocation, il peut deja etre
+# en jeu (la reference joue Zalen en 4e).
+
+# Mode JUGE : memes drapeaux sans --solve, sur n'importe quel replay, pour
+# savoir s'il respecte la discipline demandee.
+combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> `
+    --guard "5:Crystal Wing|Zalen@terrain+Junk Signal@main"
+
+# TEST ADVERSE (--fire) : la garde ci-dessus est un proxy statique ("un contre
+# est disponible") ; ce mode joue la menace POUR DE VRAI. Nibiru est ajoute a
+# la main adverse et ACTIVE a chaque fenetre ou il est legal (un essai par
+# fenetre) ; la recherche doit refermer le board depuis l'etat post-injection —
+# board complet (Crystal Wing contre gratuitement) ou board sans la carte
+# sacrifiee (--fire-spare : contrer par Zalen consomme Junk Signal). Les
+# replays produits se rejugent avec --opp-hand "27204311".
+combosolver.exe duel.yrpX --scriptdir <scripts> `
+    --fire "27204311" --fire-spare "Junk Signal" --fire-ms 60000 `
+    --no-activate "Duel Evolution - Assault Zone" `
+    --resolve "PSY-Framelord Omega@terrain:2" `
+    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
 ```
 
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
-`--growth`, `--verbose`).
+`--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
+`--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
+`--approach`, `--verbose`). La graine des tirages est dérivée du temps et
+imprimée — la redonner via `--seed` rejoue les mêmes tirages.
+
+# OPTIMISATION DE COUT : chercher une ligne MOINS CHERE que la reference
+# (cout lexicographique : brulees, puis actions, puis decisions). La recherche
+# ne s'arrete plus a la premiere solution (chaque solution resserre la borne),
+# le score de but NRPA devient lexicographique, les lignes continuent APRES le
+# but (une recuperation d'apres-but reduit les brulees sans toucher au board),
+# et le finisseur s'enracine sur les prefixes des solutions les moins cheres.
+# --burn-slack regle la marge de la borne brulees (defaut 6 ; la reference
+# pique a 23 pour finir a 19 — marge de recuperation mesuree 4) ;
+# --burn-limit ensemence la borne avec un cout deja connu.
+combosolver.exe duel.yrpX --scriptdir <scripts> --solve --optimize
+combosolver.exe ref.yrpX --scriptdir <scripts> --start ref.yrpX --optimize `
+    --approach "solutions/solution_00_b19_a56.yrp" --finisher-min 420000
+
+# Le finisseur : quand les tirages montent a 7-8/8 sans convertir, la
+# transplantation fouille les K meilleurs etats DISTINCTS (archive Go-Explore)
+# et leurs prefixes de recul en Levin Tree Search sur la politique NRPA du run.
+# --approach ressert les best_approach_*.yrp des sessions passees comme racines
+# supplementaires ; --finisher mono|ab rejoue l'ancien finisseur (A/B).
+
+## Comment la recherche évite de tout explorer
+
+Trois mécanismes, tous mesurés (docs/combo-solver-design.md §9) :
+
+- **Élagage par nouveauté (Iterated Width).** Un état n'est retenu que s'il rend
+  vrai un fait `(zone, carte, occurrence)` inédit ; une branche muette depuis
+  `patience` décisions est coupée. La patience est calibrée par `--width` : le
+  long de la ligne de référence, 82 % des états sont muets et la plus longue
+  série muette fait 17 décisions. Le préfixe répertoire est exempt, et un
+  contrôle A/B automatique sur le cas même-deck imprime états gagnés et
+  solutions perdues — un élagage qui perd des solutions le dit lui-même.
+- **Tirages NRPA (politique apprise).** Un poids par code de coup (`plan_key`),
+  échantillonnage softmax, adaptation vers la meilleure séquence, le répertoire
+  de la référence en biais — sans évaluation des fils, chaque décision coûte
+  plusieurs fois moins cher qu'un tirage glouton. La politique est persistante
+  entre redémarrages (`--nrpa-keep`) et la meilleure séquence est partagée
+  entre les workers : c'est cette mémoire, pas la vitesse brute, qui a rendu la
+  transplantation reproductible (§9.9). C'est la passe qui porte la
+  transplantation.
+- **Coupure de tour.** Le board cible est celui de la fin du tour 1 : tout état
+  au-delà du changement de tour est du temps perdu.
+
+Preuve sur pièce : le board de `synchron handrip 2` a été refait **depuis le
+deck de `test 4`** par la passe NRPA — 208 décisions, 45 actions, 13 cartes
+brûlées, moins cher que la référence sur son propre deck — et le `.yrp` produit
+se rejoue depuis zéro sans un seul `MSG_RETRY`. Depuis que la politique NRPA
+est persistante entre redémarrages et que la meilleure séquence est partagée
+entre les workers, ce résultat tombe en 90 s de budget sur les deux graines
+testées (il demandait 530 s et une graine chanceuse sur quatre).
 
 ## Le drapeau qu'on ne peut pas oublier
 
