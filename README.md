@@ -79,7 +79,8 @@ combosolver.exe duel.yrpX --scriptdir <scripts> `
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
-`--approach`, `--prior`, `--prior-weight`, `--no-burn-share`, `--verbose`).
+`--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
+`--no-burn-share`, `--verbose`).
 La graine des tirages est dérivée du temps et imprimée — la redonner via
 `--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
 divergent quand même (l'ordre des échanges entre workers dépend du timing) —
@@ -102,6 +103,15 @@ structurels le sont (coûts écrits, conversions, coupures).
 # plan_key du corpus deviennent des poids initiaux de politique NRPA
 # (releves sur le duel de LEUR en-tete). Mesure NEUTRE sur les deux etalons
 # (session 6) : disponible, hors commande recommandee.
+# --adapt <f|dossier> (repetable) + --adapt-passes <n> : rejeu d'ADAPTATION
+# du meme corpus — au lieu d'une prime par coup, le gradient NRPA sur les
+# carrefours des solutions (choix legaux + choisi). Le releve imprime la
+# COURBE D'ACCORD (probabilite moyenne du coup joue) : 44 % a politique
+# vierge, 65 % des la premiere passe, palier a 66 % — le mecanisme mord,
+# mais un poids par plan_key est aveugle a l'etat et ne peut pas monter plus
+# haut. Mesure session 7 : ensembles de conversion --fire IDENTIQUES,
+# meilleur cout inchange sur l'etalon meme-deck. Opt-in, hors commande
+# recommandee.
 combosolver.exe duel.yrpX --scriptdir <scripts> --solve --optimize
 combosolver.exe ref.yrpX --scriptdir <scripts> --start ref.yrpX --optimize `
     --approach "solutions/solution_00_b19_a56.yrp" --finisher-min 420000

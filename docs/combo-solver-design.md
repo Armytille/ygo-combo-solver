@@ -1670,3 +1670,130 @@ relance de l'escalade sur la meilleure ligne reste le geste le plus rentable du 
 (chantier 8, profil d'abord) ; le partage périodique de la POLITIQUE entre workers
 (chantier 4, le plus ancien non-fait) ; fermer k=5 et la relaxation SMT/ILP pour 18
 brûlées (§9.10-9.11).
+
+### 9.13 Session 7 : l'escalade se tait sur quatre graines, et le transfert de politique touche son plafond de représentation
+
+**La mission** : les deux leviers de rendement laissés debout par la session 6 — l'escalade
+(le seul mécanisme qui avait encore progressé) et la mémoire de politique (chantier 5bis :
+le rejeu d'ADAPTATION, la voie restante de arXiv:2401.10431 après la réfutation du prior par
+POIDS). Santé verte avant et après (0 retry, 290 digests distincts / 0 fusion, référence
+retrouvée à 0 écart, A/B nouveauté sans perte ; l'écart de couverture IDLECMD #240 reste
+préexistant) — et la santé d'après est IDENTIQUE ligne à ligne à celle d'avant (aux mesures
+de temps et au nom du `--outdir` près : 22 lignes de diff, toutes des durées), le mécanisme
+ajouté étant inerte sans son drapeau.
+
+**(a) L'escalade : trois graines muettes à 600 s, une quatrième à 1 800 s.** Enracinée sur la
+ligne 259 (`--approach sZ6_slack255/solution_00_b19_a55.yrp`, `--finisher-min 420000`,
+`--burn-limit 19`, `--archive-k 24`), la commande de l'étalon 1 a tourné sur les graines
+888, 999, 1234 (600 s) puis 4242 (1 800 s). **Aucune ne bat 19/55/259 ; toutes les quatre le
+RETROUVENT.** Le détail dit la même chose quatre fois : 888 → 3 conversions, 25 lignes,
+second coût 19/56/272 ; 999 → 3 conversions, 25 lignes, second 19/55/260 ; 1234 → 4
+conversions, 37 lignes, les trois premières à 19/55/259 ; 4242 (budget TRIPLE) → 3
+conversions, 25 lignes, les quatre premières à 19/55/259. La ligne écrite par le run 4242 a
+été jugée depuis zéro, indépendamment : **259/259 réponses, 0 retry, garde 35 fenêtres
+sous menace / 0 découverte, 0 activation interdite, Omega@terrain 2/2, Trishula@terrain 1/1**
+— « retrouver 259 » désigne bien une ligne réelle et rejouable, pas une écriture comptable.
+La barre de la session 6 (piège 41 :
+au moins trois graines muettes consécutives avant de conclure) est donc ATTEINTE pour la
+première fois, à ce budget et sur cette racine — la trajectoire 272 → 263 → 261 → 259
+s'arrête ici. Ce que la mesure ne dit PAS : que 259 soit optimal. Elle dit que le mécanisme
+d'escalade tel qu'il est réglé (racine = meilleure ligne, reculs 60-150, 600-1 800 s) a cessé
+de rendre — ce qui déplace la charge sur un mécanisme d'un autre ordre, pas sur une graine
+de plus.
+
+**Le sous-produit méthodologique de ces trois graines : une mesure de la DISPERSION du bras
+témoin.** Sans elle, l'A/B de l'étalon 1 se serait lu à l'envers (cf. plus bas) — trois runs
+témoins coûtent 30 minutes et valent mieux qu'un chiffre isolé, y compris sur des faits
+réputés structurels.
+
+**(b) Chantier 5bis — le rejeu d'ADAPTATION : implémenté, instrumenté, mesuré sur les deux
+étalons. VIVANT (contrairement au prior par poids) mais SANS effet sur les verdicts.** Le
+prior de la session 6 disait « ce coup existe dans les solutions » et le primait PARTOUT ;
+l'adaptation dit « à CE carrefour, la solution prenait celui-ci contre ceux-là ». Même
+corpus, même point d'injection (politique initiale des tirages et de chaque fenêtre `--fire`),
+même relevé sur le duel de l'en-tête de chaque ligne (piège 21) : l'A/B isole donc la FORME
+du signal, prime par coup contre gradient discriminatif.
+
+- *Le relevé* (`LiftPolicyRun`) reprend l'appariement de `LiftPlan` — la réponse enregistrée
+  est identifiée par l'ÉTAT qu'elle atteint, jamais octet par octet — mais conserve à chaque
+  prompt multi-choix l'ensemble des `plan_key` LÉGAUX et l'indice du choisi, c'est-à-dire
+  exactement le `PolicyStep` que consomme `Adapt()`. Le biais `known` du répertoire y est
+  reproduit, sans quoi le gradient serait calculé sous une distribution qui n'est pas celle
+  de l'échantillonnage. Coût : **28 lignes de `sF_final/`, 4 614 décisions multi-choix,
+  1 étape non identifiée par ligne, 4,7 s.**
+- *`Adapt()` devient libre* (`AdaptRun`/`AdaptCorpus`) pour que l'instrument et les workers
+  appliquent la MÊME mise à jour — un instrument qui mesure autre chose que ce que le run
+  subit ne mesure rien. Le refactor est bit-à-bit neutre (santé identique).
+- *L'INSTRUMENT, avant tout run* (piège 40) : la courbe de saturation de l'« accord du
+  corpus » — la probabilité moyenne que la politique donne au coup que les solutions ont
+  joué. Elle s'imprime au relevé, en microsecondes, pour 0/1/2/4/8/16 passes.
+
+**Ce que la courbe a dit, et qui a réglé le drapeau sans dépenser un run.** Sur les 28 lignes :
+**44,3 % à politique vierge → 65,2 % en UNE passe → 66,2 % à seize.** Le mécanisme MORD (le
+prior, lui, ne déplaçait rien d'observable) mais il sature immédiatement : au-delà d'une
+passe, rien. Sur une SEULE ligne (la 259) : 44,9 % → 58,1 / 62,2 / 65,9 / 68,6 / **70,2 %** —
+plus lent, et il finit au même palier. **Le plafond n'est donc pas le désaccord entre lignes
+du corpus : c'est la REPRÉSENTATION.** Un poids par `plan_key` est aveugle à l'état, alors
+qu'une même identité sémantique revient à des dizaines d'endroits d'une même ligne avec des
+choix différents ; aucun jeu de poids ne peut reproduire une politique dépendante de l'état.
+C'est la limite de fond du transfert de politique tel qu'il est représenté ici — elle borne
+le prior par poids ET l'adaptation, et elle explique après coup pourquoi le premier était
+neutre.
+
+**Étalon 2 (les fenêtres `--fire` ouvertes, graine 888, 300 s/fenêtre, corpus `sF_final`,
+4 passes) — ensembles de conversion IDENTIQUES, mais la recherche BOUGE.** Bras témoin :
+10/15 converties, déc. 113-173, les cinq fenêtres précoces (déc. 58-103) murées —
+**identique fenêtre par fenêtre à la base de la session 6, crêtes et diagnostics « manque : »
+compris.** C'est cette reproductibilité du témoin qui autorise à attribuer au mécanisme ce
+qui change dans l'autre bras. Bras adaptation : **mêmes 10/15, mêmes déc. 113-173, mêmes
+cinq murées** — mais les états atteints diffèrent : les manques des fenêtres précoces passent
+de Crimson Dragon / Crystal Wing / Crystal Wing à Hot Red Dragon Archfiend Abyss / Zalen /
+Junk Signal / Crimson Dragon, et les crêtes bougent sur 7 fenêtres (9-13 : 6/8 → 7/8 ;
+4 et 5 : 8/8 → 7/8 ; 6 : 7/8 → 8/8). Le verdict est donc plus informatif qu'une neutralité :
+**l'adaptation déplace réellement l'échantillonnage et ne franchit toujours pas le mur des
+rips précoces.** Le verrou n'est pas un déficit de guidage par coup — c'est bien un verrou de
+SÉQUENCE (re-dériver ~150 décisions dans le bon ordre), et un guide state-blind plafonné à
+66 % d'accord ne l'ouvre pas.
+
+**Étalon 1 (même-deck, graine 888, 600 s, même racine) — NEUTRE, et c'est la dispersion du
+témoin qui le prouve.** Le bras adaptation rend 19/55/259, 4 conversions, 37 lignes, second
+coût 19/55/260 — lu seul contre le témoin de MÊME graine (19/55/259, 3 conversions, 25
+lignes, second 19/56/272), il aurait l'air d'un gain. Mais les trois graines témoins couvrent
+exactement cet intervalle : 888 → 3/25, 999 → 3/25, **1234 → 4/37**. Le bras adaptation tombe
+DANS la dispersion de son propre témoin, et le meilleur coût est 19/55/259 dans les quatre
+runs. **Neutre.** Corollaire de discipline, à ajouter au piège 39 : les conversions et le
+nombre de lignes sont bien des faits structurels, mais un fait structurel se compare à une
+DISPERSION, pas à un run.
+
+**Verdict et réglage.** `--adapt <f|dossier>` (répétable) et `--adapt-passes <n>` (défaut 4 —
+sur le palier mesuré ; 0 coupe le mécanisme en gardant le relevé, c'est le bras témoin).
+Comme `--prior`, le drapeau reste OPT-IN et HORS de la commande recommandée : il est vivant,
+il ne rend rien sur les deux étalons. Les deux voies du chantier 5 sont désormais closes
+ensemble, et pour la même raison de fond — la politique NRPA est un sac de poids par coup.
+Le levier qui resterait n'est plus un mode d'injection mais un changement de
+REPRÉSENTATION : mettre du contexte dans la clé (`plan_key` × phase / × nombre d'invocations
+faites / × progrès de rips), ce qui rendrait la politique dépendante de l'état — à mesurer
+d'abord sur la courbe d'accord, qui dira en quelques secondes si le plafond de 66 % monte.
+
+**(c) Chantier 6 — les racines croisées `--fire` : CLOS SUR STRUCTURE, sans run.** L'idée
+(« les lignes converties d'une fenêtre servent d'`--approach` aux fenêtres voisines ») bute
+sur la construction même des fenêtres, vérifiée dans le code : `FireWindow::prefix` est un
+préfixe de LA MÊME passe de découverte — les fenêtres sont des troncatures emboîtées d'une
+seule ligne de base. Une ligne convertie de la fenêtre B vaut donc `préfixe_base(B) +
+injection_B + suffixe_B`. Pour une fenêtre A plus précoce : reculer cette ligne avant
+`our_at(A)` redonne exactement l'état d'où A part déjà (aucune information nouvelle), et
+reculer après `our_at(A)` saute l'injection de A — la fenêtre n'est plus tirée, le résultat
+ne répond plus à la question posée. Pour une fenêtre C plus tardive : la ligne de B diverge
+de la base dès `our_at(B) < our_at(C)`, elle ne contient pas non plus le préfixe de C.
+**Aucune racine au niveau des RÉPONSES ne peut porter la menace d'une autre fenêtre** ; le
+seul transfert inter-fenêtres possible est au niveau de la POLITIQUE — c'est-à-dire `--prior`
+(réfuté) et `--adapt` (ci-dessus, plafonné). La variante qui reste vivante est l'escalade
+transposée PAR fenêtre : écrire la meilleure APPROCHE de chaque fenêtre (les crêtes 7-8/8) et
+ré-enraciner CETTE fenêtre sur SA propre approche avec des reculs profonds — le mécanisme
+prouvé du répertoire, appliqué là où il n'a jamais été branché (chantier 6bis).
+
+**Non fait, et documenté comme tel** (session 7) : le contexte dans la `plan_key` (la suite
+du chantier 5, changement de représentation) ; l'escalade par fenêtre `--fire` (chantier
+6bis) ; le partage périodique de la POLITIQUE entre workers (chantier 4, toujours le plus
+ancien non-fait) ; le LTS à frontière partagée (chantier 7) ; le miroir de zones (chantier 8,
+profil d'abord) ; fermer k=5 et la relaxation SMT/ILP pour 18 brûlées (§9.10-9.11).

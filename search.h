@@ -250,6 +250,52 @@ struct NrpaShared {
 // RunLevin les consomme, et les workers les fusionnent (moyenne des poids).
 using NrpaPolicy = std::unordered_map<uint64_t, float>;
 
+// REJEU D'ADAPTATION du corpus (chantier 5bis, arXiv:2401.10431) : releve une
+// ligne de solution sous forme de SEQUENCE DE DECISIONS de politique — a chaque
+// prompt multi-choix de notre joueur, l'ensemble des plan_key LEGAUX et l'indice
+// de celui que la ligne a joue. C'est exactement ce que consomme Adapt(), le
+// gradient NRPA standard.
+//
+// Ce que cela apporte de plus que le prior par POIDS (`--prior`, mesure NEUTRE
+// session 6) : le prior donnait la meme prime a un coup PARTOUT ; l'adaptation
+// est DISCRIMINATIVE — un coup du corpus ne monte pas dans l'absolu, il monte
+// CONTRE les coups qui lui etaient opposes a cet endroit precis, et un coup du
+// corpus systematiquement ecarte ailleurs redescend. C'est la difference entre
+// « ces coups existent » et « a ce carrefour, la solution prenait celui-ci ».
+//
+// Le duel doit etre au depart, et c'est le duel de l'EN-TETE de la ligne
+// (piege 21 : on ne rejoue jamais une ligne de corpus sur le duel de depart —
+// seules les identites semantiques traversent). `repertoire` est l'index des
+// coups de la reference : il sert a reproduire le biais `known` de
+// l'echantillonnage, sans quoi Adapt() calculerait un gradient sous une
+// distribution qui n'est pas celle des tirages. Renvoie le nombre d'etapes non
+// identifiees (sautees : on ne sait pas quel choix la ligne a pris).
+size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
+					 int target_player, size_t stop_after, const EnumOptions& eo,
+					 const std::unordered_map<uint64_t, size_t>& repertoire,
+					 NrpaRun& out);
+
+// Probabilite moyenne (log) que `pol` donne aux coups CHOISIS par les lignes
+// du corpus, sous les memes biais que l'echantillonnage. C'est l'instrument
+// qui dit si le rejeu d'adaptation a mordu : a politique vierge il vaut la
+// moyenne des -log(nb de choix legaux) ; s'il ne monte pas apres les passes,
+// le mecanisme est inerte et il est inutile de payer un run pour l'apprendre
+// (piege 40).
+double CorpusAgreement(const NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
+					   float bias_known);
+
+// Un pas d'adaptation NRPA sur une sequence (le gradient de Cazenave : +alpha
+// au coup joue, -alpha*p a chacun des legaux). Libre plutot que membre pour que
+// le relevé du corpus et les workers appliquent EXACTEMENT la meme mise a jour
+// — un instrument qui mesure autre chose que ce que le run subit ne mesure
+// rien.
+void AdaptRun(NrpaPolicy& pol, const NrpaRun& run, float alpha, float bias_known,
+			  float hint_bias);
+
+// `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
+void AdaptCorpus(NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
+				 uint32_t passes, float alpha, float bias_known);
+
 // --- archive d'etats (Go-Explore, arXiv:2004.12919) ------------------------
 //
 // « First return, then explore » : conserver PENDANT la recherche les K
@@ -397,6 +443,14 @@ struct SearchConfig {
 	// la phase tirages sert de depart aux tirages du finisseur enracines sur
 	// les etats de recul — sans elle, chaque racine reapprendrait de zero.
 	const NrpaPolicy* nrpa_init = nullptr;
+	// Rejeu d'ADAPTATION du corpus (chantier 5bis) : sequences de decisions
+	// relevees sur les lignes de solution (LiftPolicyRun), adaptees dans la
+	// politique AVANT le premier tirage — `nrpa_adapt_passes` passes sur chaque
+	// ligne. Le point d'injection est celui du prior par poids (politique
+	// initiale du premier redemarrage) : l'A/B isole donc la FORME de
+	// l'injection, prime par coup contre gradient discriminatif. 0 = inactif.
+	const std::vector<NrpaRun>* nrpa_adapt_runs = nullptr;
+	uint32_t nrpa_adapt_passes = 0;
 	// GNRPA a repetitions limitees (arXiv:2401.10420) : nombre de fois ou la
 	// meilleure sequence peut etre RE-TROUVEE (meme score MATERIEL — la part
 	// nouveaute du score decroit a chaque rejeu, l'egalite stricte ne se

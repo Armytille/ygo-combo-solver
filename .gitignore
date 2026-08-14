@@ -8,9 +8,10 @@ solutions/
 solutions_*/
 archive_runs/
 
-# Sorties des campagnes de runs (sessions 4-5 : mA_*..mO_*, sA_*..sY_*)
+# Sorties des campagnes de runs (sessions 4-5 : mA_*..mO_*, sA_*..sY_* ;
+# sessions 6-7 : sZ6_*, s7_*)
 m[A-Z]*_*/
-s[A-Z]*_*/
+s[0-9A-Z]*_*/
 
 # Logs et fichiers de travail
 *.log

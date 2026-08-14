@@ -165,6 +165,13 @@ struct Options {
 	std::vector<std::string> prior_files;
 	// Poids d'un coup present dans TOUT le corpus (proportionnel sinon).
 	double prior_weight = 2.0;
+	// REJEU D'ADAPTATION DU CORPUS (session 7, chantier 5bis — la voie restante
+	// de 2401.10431 apres la refutation du prior par POIDS) : les memes lignes,
+	// relevees non plus en coups isoles mais en SEQUENCES DE DECISIONS (choix
+	// legaux + choisi), adaptees dans la politique par le gradient NRPA avant le
+	// premier tirage. --adapt-passes 0 desactive le mecanisme (A/B).
+	std::vector<std::string> adapt_files;
+	uint32_t adapt_passes = 4;
 	// Contraintes de ligne, brutes, resolues en codes une fois la base de
 	// cartes chargee.
 	std::vector<std::string> summon_specs;      // "5:Zalen|Crystal Wing"
@@ -350,6 +357,14 @@ void Usage() {
 		"                     qui sait deja ripper. Tirages ET fenetres --fire.\n"
 		"  --prior-weight <x> poids d'un coup present dans tout le corpus\n"
 		"                     (defaut 2.0 ; proportionnel a sa frequence sinon)\n"
+		"  --adapt <f|dir>    rejeu d'ADAPTATION du corpus (repetable) : les\n"
+		"                     lignes donnees sont relevees en SEQUENCES DE\n"
+		"                     DECISIONS (choix legaux + choisi) et adaptees dans\n"
+		"                     la politique NRPA avant le premier tirage. Signal\n"
+		"                     discriminatif la ou --prior ne donne qu'une prime\n"
+		"                     par coup (mesure NEUTRE, session 6).\n"
+		"  --adapt-passes <n> passes d'adaptation par ligne (defaut 4 ; 0 coupe\n"
+		"                     le mecanisme sans toucher au releve — c'est l'A/B)\n"
 		"  --fire <carte>     TEST ADVERSE : ajoute la carte a la main adverse\n"
 		"                     et la fait JOUER a chaque fenetre ou elle est\n"
 		"                     legale (un essai par fenetre) ; la recherche doit\n"
@@ -573,6 +588,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--prior-weight") {
 			const char* v = next("--prior-weight"); if(!v) return false;
 			o.prior_weight = std::atof(v);
+		} else if(a == "--adapt") {
+			const char* v = next("--adapt"); if(!v) return false;
+			o.adapt_files.emplace_back(v);
+		} else if(a == "--adapt-passes") {
+			const char* v = next("--adapt-passes"); if(!v) return false;
+			o.adapt_passes = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--tt-mb") {
 			const char* v = next("--tt-mb"); if(!v) return false;
 			o.tt_mb = static_cast<size_t>(std::atoi(v));
@@ -2830,6 +2851,148 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 				in_files.size(), used, opt.prior_weight, MsSince(t0));
 }
 
+// REJEU D'ADAPTATION DU CORPUS (--adapt, session 7, chantier 5bis) — la voie
+// restante de arXiv:2401.10431 apres la refutation, session 6, du prior par
+// POIDS. Meme corpus, meme releve sur le duel de SON en-tete (piege 21), meme
+// point d'injection (politique initiale des tirages) : ce qui change est la
+// FORME du signal. Le prior disait « ce coup existe dans les solutions » et le
+// primait partout ; l'adaptation dit « a CE carrefour, la solution prenait
+// celui-ci contre ceux-la » — c'est le gradient NRPA lui-meme, applique aux
+// sequences deja resolues au lieu des tirages du run.
+//
+// L'A/B est donc propre : --prior et --adapt injectent au meme endroit, la
+// seule difference mesurable est prime-par-coup contre gradient discriminatif.
+void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
+					const std::vector<PlanStep>& plan,
+					std::vector<NrpaRun>& out) {
+	if(opt.adapt_files.empty())
+		return;
+	namespace fs = std::filesystem;
+	std::vector<std::string> files;
+	for(const std::string& p : opt.adapt_files) {
+		std::error_code ec;
+		if(fs::is_directory(p, ec)) {
+			for(const auto& e : fs::directory_iterator(p, ec)) {
+				const auto ext = e.path().extension();
+				if(ext == L".yrp" || ext == L".yrpX")
+					files.push_back(e.path().string());
+			}
+		} else {
+			files.push_back(p);
+		}
+	}
+	std::sort(files.begin(), files.end());
+	if(files.empty()) {
+		std::printf("!! --adapt : aucun fichier .yrp/.yrpX trouve\n");
+		return;
+	}
+	// Le repertoire de la reference, tel que l'echantillonnage le voit : Adapt()
+	// doit recalculer les MEMES probabilites que PolicyRollout.
+	std::unordered_map<uint64_t, size_t> repertoire;
+	for(size_t i = 0; i < plan.size(); ++i)
+		if(plan[i].edge)
+			repertoire.emplace(plan[i].edge, i);
+
+	std::printf("\n--- rejeu d'adaptation : %zu ligne(s) de corpus (--adapt) ---\n",
+				files.size());
+	auto t0 = Clock::now();
+	size_t total_steps = 0, total_unknown = 0;
+	for(const std::string& f : files) {
+		Replay holder;
+		std::string err;
+		if(!holder.Load(f, err)) {
+			std::printf("  !! %s : %s\n", f.c_str(), err.c_str());
+			continue;
+		}
+		const Replay* pr = holder.IsStreamed() ? holder.Embedded() : &holder;
+		if(!pr || pr->responses.empty()) {
+			std::printf("  !! %s : pas de reponses lisibles\n", f.c_str());
+			continue;
+		}
+		// Le duel de SON en-tete, sur un thread dedie : une arene ne s'initialise
+		// jamais sur un thread qui en possede deja une.
+		std::thread([&] {
+			Arena pa;
+			std::string aerr;
+			if(!pa.Init(opt.arena_mb << 20, 0, aerr)) {
+				std::printf("  !! arene de l'adaptation : %s\n", aerr.c_str());
+				return;
+			}
+			{
+				Duel pd(db, scripts, &pa);
+				if(!pd.Create(pr->seed, pr->duel_flags, pr->start_lp,
+							  pr->start_hand, pr->draw_count, aerr) ||
+				   !pd.Setup(*pr, aerr)) {
+					std::printf("  !! %s : duel non initialisable : %s\n",
+								f.c_str(), aerr.c_str());
+				} else {
+					if(opt.stop_gc)
+						pd.SetLuaGc(false);
+					EnumOptions eo;
+					eo.dedup_by_code = true;
+					eo.max_subsets = 24;
+					eo.db = &db;
+					NrpaRun run;
+					size_t unknown =
+						LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX,
+									  eo, repertoire, run);
+					if(!run.steps.empty()) {
+						total_steps += run.steps.size();
+						total_unknown += unknown;
+						std::printf("  %-44s %4zu decisions multi-choix, "
+									"%2zu non identifiees\n",
+									fs::path(f).filename().string().c_str(),
+									run.steps.size(), unknown);
+						out.push_back(std::move(run));
+					} else {
+						std::printf("  %-44s aucune decision relevee\n",
+									fs::path(f).filename().string().c_str());
+					}
+				}
+			}
+			pa.Shutdown();
+		}).join();
+	}
+	if(out.empty()) {
+		std::printf("  !! adaptation vide : aucune sequence relevee\n");
+		return;
+	}
+	// INSTRUMENTATION AVANT CALIBRAGE (piege 40) : la politique reproduit-elle
+	// vraiment les sequences du corpus apres les passes ? A politique vierge,
+	// l'accord vaut la moyenne des -log(nb de choix legaux) ; s'il ne monte pas,
+	// le mecanisme est inerte et aucun run n'a besoin de le dire.
+	std::printf("  adaptation : %zu ligne(s), %zu decisions (%zu non "
+				"identifiees), %.0f ms\n",
+				out.size(), total_steps, total_unknown, MsSince(t0));
+	// COURBE DE SATURATION, calculee avant tout run (piege 40 : instrumenter
+	// AVANT de calibrer). `p(choisi)` est la probabilite moyenne que la
+	// politique donne aux coups que les solutions ont joues : a politique
+	// vierge elle vaut la moyenne des 1/(nb de choix legaux), et si elle ne
+	// monte pas avec les passes, le mecanisme est inerte — inutile de payer un
+	// run de 600 s pour l'apprendre. Le nombre de poids dit combien de coups
+	// distincts le corpus touche.
+	SearchConfig defaults;
+	std::printf("  accord du corpus (p moyen du coup joue) :");
+	for(uint32_t n : { 0u, 1u, 2u, 4u, 8u, 16u }) {
+		NrpaPolicy probe;
+		AdaptCorpus(probe, out, n, defaults.nrpa_alpha, defaults.nrpa_bias_known);
+		const double a =
+			CorpusAgreement(probe, out, defaults.nrpa_bias_known);
+		std::printf("  %up=%.1f%%", n, 100.0 * std::exp(a));
+	}
+	std::printf("\n");
+	{
+		NrpaPolicy probe;
+		AdaptCorpus(probe, out, opt.adapt_passes, defaults.nrpa_alpha,
+					defaults.nrpa_bias_known);
+		std::printf("  retenu : %u passe(s), %zu poids initiaux%s\n",
+					opt.adapt_passes, probe.size(),
+					opt.adapt_passes
+						? ""
+						: "   <-- adaptation DESACTIVEE (bras temoin de l'A/B)");
+	}
+}
+
 // TEST ADVERSE (--fire) — la garde etait un proxy statique (« un contre est
 // disponible a chaque fenetre ») ; ce mode joue la menace POUR DE VRAI : la
 // carte est ajoutee a la main adverse, l'adversaire l'ACTIVE a chaque fenetre
@@ -3010,6 +3173,10 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 	// encode. Doit survivre aux threads de recherche.
 	NrpaPolicy prior_policy;
 	BuildPriorPolicy(opt, db, scripts, prior_policy);
+	// Rejeu d'adaptation (--adapt, chantier 5bis) : meme corpus, meme point
+	// d'injection, signal discriminatif au lieu d'une prime par coup.
+	std::vector<NrpaRun> adapt_runs;
+	BuildAdaptRuns(opt, db, scripts, plan, adapt_runs);
 
 	// --- 3. Etiquetage par joueur : le rejeu augmente ne peut pas consommer
 	// la liste plate (les fenetres nouvelles decalent tout).
@@ -3451,6 +3618,12 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						// Prior : la politique demarre en sachant ripper.
 						if(!prior_policy.empty())
 							fcfg.nrpa_init = &prior_policy;
+						// Rejeu d'adaptation : elle demarre en sachant quel
+						// coup la solution prenait a chaque carrefour.
+						if(!adapt_runs.empty()) {
+							fcfg.nrpa_adapt_runs = &adapt_runs;
+							fcfg.nrpa_adapt_passes = opt.adapt_passes;
+						}
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
 								   base_seed + w * 0x9E3779B97F4A7C15ull + 1);
@@ -3871,6 +4044,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// survivre a toutes les phases (tirages, finisseur).
 	NrpaPolicy prior_policy;
 	BuildPriorPolicy(opt, db, scripts, prior_policy);
+	// Rejeu d'adaptation (--adapt, chantier 5bis) : le corpus entre non plus
+	// en primes par coup mais en gradient sur ses propres carrefours.
+	std::vector<NrpaRun> adapt_runs;
+	BuildAdaptRuns(opt, db, scripts, plan, adapt_runs);
 
 	// --- 4. Recherche, par approfondissement progressif du nombre d'ecarts.
 	SearchConfig cfg;
@@ -4136,6 +4313,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					// ripper (attenuee ensuite comme les poids appris).
 					if(!prior_policy.empty())
 						wcfg.nrpa_init = &prior_policy;
+					// Rejeu d'adaptation : meme injection, gradient au lieu
+					// de prime (chantier 5bis).
+					if(!adapt_runs.empty()) {
+						wcfg.nrpa_adapt_runs = &adapt_runs;
+						wcfg.nrpa_adapt_passes = opt.adapt_passes;
+					}
 					Search s(local, la, start_yrp, wcfg);
 					// Graine distincte par worker : sans cela les seize tirent
 					// exactement la meme sequence de lignes.

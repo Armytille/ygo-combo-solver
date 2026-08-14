@@ -1616,25 +1616,36 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	}
 }
 
-void Search::Adapt(Policy& pol, const NrpaRun& best) const {
-	const double alpha = cfg.nrpa_alpha;
+void AdaptRun(NrpaPolicy& pol, const NrpaRun& run, float alpha, float bias_known,
+			  float hint_bias) {
 	std::vector<double> p;
-	for(const PolicyStep& s : best.steps) {
+	for(const PolicyStep& s : run.steps) {
 		p.resize(s.keys.size());
 		double mx = -1e300;
 		for(size_t i = 0; i < s.keys.size(); ++i) {
 			auto it = pol.find(s.keys[i]);
 			double w = (it == pol.end()) ? 0.0 : it->second;
-			p[i] = w + (s.known[i] ? cfg.nrpa_bias_known : 0.0f) +
-				   (i < s.hinted.size() && s.hinted[i] ? cfg.hint_bias : 0.0f);
+			p[i] = w + (s.known[i] ? bias_known : 0.0f) +
+				   (i < s.hinted.size() && s.hinted[i] ? hint_bias : 0.0f);
 			mx = (std::max)(mx, p[i]);
 		}
 		double sum = 0;
 		for(double& x : p) { x = std::exp(x - mx); sum += x; }
-		pol[s.keys[s.chosen]] += static_cast<float>(alpha);
+		pol[s.keys[s.chosen]] += alpha;
 		for(size_t i = 0; i < s.keys.size(); ++i)
 			pol[s.keys[i]] -= static_cast<float>(alpha * p[i] / sum);
 	}
+}
+
+void AdaptCorpus(NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
+				 uint32_t passes, float alpha, float bias_known) {
+	for(uint32_t pass = 0; pass < passes; ++pass)
+		for(const NrpaRun& r : runs)
+			AdaptRun(pol, r, alpha, bias_known, 0.0f);
+}
+
+void Search::Adapt(Policy& pol, const NrpaRun& best) const {
+	AdaptRun(pol, best, cfg.nrpa_alpha, cfg.nrpa_bias_known, cfg.hint_bias);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
@@ -1760,6 +1771,15 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	Policy pol;
 	if(cfg.nrpa_init)
 		pol = *cfg.nrpa_init;
+	// Rejeu d'ADAPTATION du corpus (chantier 5bis) : avant le premier tirage, la
+	// politique subit le gradient NRPA des lignes deja resolues. Meme point
+	// d'injection que le prior par poids ; ce qui change est la FORME du signal
+	// (discriminatif, cf. LiftPolicyRun). L'adaptation est auto-limitante : une
+	// fois p(choisi) ~ 1 a une etape, la mise a jour y vaut alpha(1-p) ~ 0 —
+	// les passes saturent au lieu d'exploser.
+	if(cfg.nrpa_adapt_runs && cfg.nrpa_adapt_passes)
+		AdaptCorpus(pol, *cfg.nrpa_adapt_runs, cfg.nrpa_adapt_passes,
+					cfg.nrpa_alpha, cfg.nrpa_bias_known);
 	while(!BudgetExhausted() &&
 		  (cfg.anytime || solutions.size() < cfg.max_solutions)) {
 		NrpaRun best;
@@ -2164,6 +2184,128 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 		++ri;
 	}
 	return unknown;
+}
+
+size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
+					 int target_player, size_t stop_after, const EnumOptions& eo,
+					 const std::unordered_map<uint64_t, size_t>& repertoire,
+					 NrpaRun& out) {
+	size_t unknown = 0, ri = 0;
+	uint8_t ptype = 0;
+	std::vector<uint8_t> payload;
+	int player = -1;
+	out.score = 0;
+	out.steps.clear();
+
+	// Meme appariement que LiftPlan : on identifie la reponse enregistree par
+	// l'ETAT qu'elle atteint, jamais octet par octet (l'encodage d'EDOPro et
+	// celui de l'enumerateur different). 0 = rejet par le core.
+	auto advance = [&](const std::vector<uint8_t>& resp) -> uint64_t {
+		duel.SetResponse(resp);
+		uint8_t nt = 0;
+		std::vector<uint8_t> np;
+		for(;;) {
+			int status = duel.Process();
+			for(const Message& m : duel.Messages()) {
+				if(m.type == MSG_RETRY)
+					return 0;
+				if(IsPrompt(m.type)) {
+					nt = m.type;
+					np.assign(m.data, m.data + m.size);
+				}
+			}
+			if(status != OCG_DUEL_STATUS_CONTINUE)
+				break;
+		}
+		return StateDigest(duel, nt, np);
+	};
+
+	for(;;) {
+		int status = duel.Process();
+		for(const Message& m : duel.Messages()) {
+			if(IsPrompt(m.type)) {
+				ptype = m.type;
+				payload.assign(m.data, m.data + m.size);
+				player = m.size ? m.data[0] : -1;
+			}
+		}
+		if(status == OCG_DUEL_STATUS_END)
+			break;
+		if(status != OCG_DUEL_STATUS_AWAITING)
+			continue;
+		if(ri >= yrp.responses.size() || ri >= stop_after)
+			break;
+
+		const std::vector<uint8_t>& recorded = yrp.responses[ri];
+		if(player == target_player) {
+			auto choices = Enumerate(ptype, payload.data(),
+									 static_cast<uint32_t>(payload.size()), eo);
+			// Une decision a choix unique n'apprend rien : le gradient y vaut
+			// alpha - alpha*1 = 0. C'est aussi la convention de PolicyRollout,
+			// qui n'enregistre un PolicyStep qu'a partir de deux choix.
+			if(choices.size() > 1) {
+				arena.Push();
+				uint64_t want = advance(recorded);
+				arena.Restore();
+				size_t pick = choices.size();
+				for(size_t i = 0; i < choices.size(); ++i) {
+					uint64_t got = advance(choices[i].response);
+					arena.Restore();
+					if(want && got == want) {
+						pick = i;
+						break;
+					}
+				}
+				arena.Pop();
+				if(pick < choices.size()) {
+					PolicyStep step;
+					step.keys.reserve(choices.size());
+					step.known.reserve(choices.size());
+					for(const Choice& c : choices) {
+						step.keys.push_back(c.plan_key);
+						// Le biais du repertoire est reproduit ici parce que
+						// Adapt() doit recalculer les MEMES probabilites que
+						// l'echantillonnage (cf. PolicyRollout : un changement
+						// de phase est au repertoire sans y meriter de biais).
+						step.known.push_back(
+							(repertoire.count(c.plan_key) != 0 && !c.phase) ? 1
+																			: 0);
+					}
+					step.chosen = pick;
+					out.steps.push_back(std::move(step));
+				} else {
+					++unknown;
+				}
+			}
+		}
+		duel.SetResponse(recorded);
+		++ri;
+	}
+	return unknown;
+}
+
+double CorpusAgreement(const NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
+					   float bias_known) {
+	double total = 0;
+	size_t n = 0;
+	std::vector<double> p;
+	for(const NrpaRun& r : runs) {
+		for(const PolicyStep& s : r.steps) {
+			p.resize(s.keys.size());
+			double mx = -1e300;
+			for(size_t i = 0; i < s.keys.size(); ++i) {
+				auto it = pol.find(s.keys[i]);
+				double w = (it == pol.end()) ? 0.0 : it->second;
+				p[i] = w + (s.known[i] ? bias_known : 0.0f);
+				mx = (std::max)(mx, p[i]);
+			}
+			double sum = 0;
+			for(double& x : p) { x = std::exp(x - mx); sum += x; }
+			total += std::log((std::max)(p[s.chosen] / sum, 1e-30));
+			++n;
+		}
+	}
+	return n ? total / static_cast<double>(n) : 0.0;
 }
 
 void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
