@@ -681,6 +681,10 @@ struct Options {
 	// Repertoire des replays produits : le livrable demande.
 	std::string outdir = "solutions";
 	bool verbose = false;
+	// Profil du chemin chaud : sondes rdtsc thread_local, imprimees par phase
+	// avec la ligne « reste » (chantier perf, etape 1). Le cout de l'instrument
+	// se chiffre en comparant deux runs a graine egale, avec et sans.
+	bool profile = false;
 	int target_player = 0;
 	bool no_arena = false;
 	bool stop_gc = true;
@@ -1278,6 +1282,9 @@ void Usage() {
 		"                     --resolve (gate au but, gradient, biais), comptee\n"
 		"                     sur les invocations. Partage la limite de 4.\n"
 		"                     Ex : --summon-min \"Junk Meister\"\n"
+		"  --profile          profil du chemin chaud (sondes rdtsc par phase,\n"
+		"                     ligne « reste » comprise) ; l'instrument se paie,\n"
+		"                     le chiffrer fait partie de la mesure\n"
 		"  --verbose          trace chaque decision\n");
 }
 
@@ -1515,6 +1522,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--summon-min") {
 			const char* v = next("--summon-min"); if(!v) return false;
 			o.summon_min_specs.emplace_back(v);
+		} else if(a == "--profile") {
+			o.profile = true;
 		} else if(a == "--verbose" || a == "-v") {
 			o.verbose = true;
 		} else if(a == "--help" || a == "-h") {
@@ -3150,6 +3159,11 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		for(auto& t : pool)
 			t.join();
 		out.ms = MsSince(t0);
+		if(prof::enabled) {
+			char lbl[32];
+			std::snprintf(lbl, sizeof(lbl), "ecarts k=%u", k);
+			prof::PrintPhase(lbl);
+		}
 		return out;
 	};
 
@@ -5494,6 +5508,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		}).join();
 		spent += MsSince(t0);
+		prof::PrintPhase("sonde");
 	}
 
 	// --- 4b. Tirages profonds. C'est la passe qui a une chance d'aller au bout :
@@ -5684,6 +5699,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(policy_workers > 1)
 			for(auto& [k2, w] : merged_policy)
 				w /= static_cast<float>(policy_workers);
+		prof::PrintPhase("tirages");
 		double secs = MsSince(t0) / 1000.0;
 		spent += secs * 1000.0;
 		if(greedy.rollouts)
@@ -5799,6 +5815,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	auto replay_prefix = [&](Duel& fd,
 							 const std::vector<std::vector<uint8_t>>& pre)
 		-> PrefixCount {
+		// Le cout du rejeu de prefixe (finisseur : une fois par racine) a sa
+		// propre sonde ; son self exclut les Process internes.
+		prof::Scope ps(prof::kPrefix);
 		PrefixCount pc;
 		bool retry = false;
 		while(pc.used < pre.size() && !retry) {
@@ -5934,6 +5953,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			ReportPoison("finisseur mono guide", fa);
 			fa.Shutdown();
 		}).join();
+		prof::PrintPhase("finisseur mono");
 	};
 
 	// Le finisseur archive + LTS : racines = archive triee par score, puis le
@@ -6208,6 +6228,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			}
 			for(auto& t : apool)
 				t.join();
+			prof::PrintPhase("finisseur approches");
 		}
 
 		// --- phase A2 : tirages NRPA enracines sur les reculs PROFONDS des
@@ -6451,6 +6472,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				}
 				for(auto& t : npool)
 					t.join();
+				prof::PrintPhase("tirages A2 (reculs)");
 			}
 		}
 
@@ -6586,6 +6608,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		for(auto& t : pool)
 			t.join();
+		prof::PrintPhase("finisseur duel de depart");
 		// Session 6 : le bilan de la borne B&B du finisseur.
 		if(opt.optimize)
 			std::printf("  finisseur : %llu atteinte(s) du but, %llu coupure(s) "
@@ -6817,6 +6840,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			pool.emplace_back(worker, i);
 		for(auto& t : pool)
 			t.join();
+		if(prof::enabled) {
+			char lbl[40];
+			std::snprintf(lbl, sizeof(lbl), "ecarts plan k=%u", k);
+			prof::PrintPhase(lbl);
+		}
 
 		double ms = MsSince(t0);
 		spent += ms;
@@ -7023,6 +7051,10 @@ int main(int argc, char** argv) {
 		Usage();
 		return 2;
 	}
+	// Avant la creation du moindre thread : la publication du drapeau passe par
+	// le lancement des workers.
+	if(opt.profile)
+		prof::Enable();
 	std::string error;
 	if(!opt.deck_file.empty() && !opt.start_replay.empty()) {
 		std::printf("!! --deck et --start sont exclusifs : l'un construit la "
@@ -7540,5 +7572,8 @@ int main(int argc, char** argv) {
 		}
 	}
 	arena.Shutdown();
+	// Cumul du run entier — les phases deja imprimees plus ce qui a tourne hors
+	// d'elles (rejeu de reference, mesures du jalon 0...).
+	prof::PrintTotal();
 	return exit_code;
 }

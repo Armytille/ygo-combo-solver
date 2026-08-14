@@ -1,6 +1,8 @@
 #include "arena.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -196,6 +198,9 @@ void* Arena::Allocate(size_t size) {
 	if(size == 0)
 		size = 1;
 	++alloc_count;
+	// Compte seulement, jamais d'horloge : ~10^6 appels/s par worker, un rdtsc
+	// par appel fabriquerait le ralentissement qu'il pretend observer.
+	prof::Count(prof::kAlloc);
 
 	if(size > kMaxSmall) {
 		size_t span_count = (size + kSpanSize - 1) >> kSpanShift;
@@ -238,6 +243,7 @@ void Arena::Free(void* ptr) {
 	if(!ptr || !Contains(ptr))
 		return;
 	++free_count;
+	prof::Count(prof::kFree);
 	size_t idx = (static_cast<uint8_t*>(ptr) - base) >> kSpanShift;
 	uint8_t klass = spans[idx].klass;
 	if(klass == kLargeHead) {
@@ -254,6 +260,7 @@ void Arena::Free(void* ptr) {
 }
 
 void* Arena::Reallocate(void* ptr, size_t old_size, size_t new_size) {
+	prof::Count(prof::kRealloc);
 	if(!ptr)
 		return Allocate(new_size);
 	if(new_size == 0) {
@@ -365,6 +372,7 @@ static void ForEachDirtyPage(const std::vector<uint64_t>& bits, F&& fn) {
 }
 
 void Arena::Push() {
+	prof::Scope ps(prof::kArenaPush);
 	// Les tampons de l'instantane sont a l'hote : sans cette pause ils seraient
 	// alloues dans l'arene qu'ils sont censes photographier.
 	ArenaPause off;
@@ -411,11 +419,13 @@ void Arena::Push() {
 	cp.dirty.assign(committed / page_size / 64 + 2, 0);
 	checkpoints.push_back(std::move(cp));
 	last_push = { pages, pages * page_size };
+	prof::Count(prof::kPagesPushed, pages);
 }
 
 void Arena::Restore() {
 	if(checkpoints.empty())
 		return;
+	prof::Scope ps(prof::kArenaRestore);
 	ArenaPause off;
 	SyncDirty();
 	Checkpoint& cp = checkpoints.back();
@@ -435,11 +445,15 @@ void Arena::Restore() {
 	if(write_watch && committed)
 		ResetWriteWatch(base, committed);
 	last_restore = { pages, pages * page_size };
+	prof::Count(prof::kPagesRestored, pages);
 }
 
 void Arena::Pop() {
 	if(checkpoints.empty())
 		return;
+	// Le Restore() interne s'impute a sa propre sonde ; le self d'arene Pop est
+	// la fusion des pages sales et le retablissement du miroir.
+	prof::Scope ps(prof::kArenaPop);
 	// Etat du fils au moment de son empilement, puis retrait du niveau.
 	std::vector<uint64_t> child_dirty;
 	{
@@ -530,6 +544,208 @@ ArenaStats Arena::Stats() const {
 	s.poisoned = poisoned.load(std::memory_order_relaxed);
 	return s;
 }
+
+// --- profil du chemin chaud (--profile) --------------------------------------
+
+namespace prof {
+
+bool enabled = false;
+
+namespace {
+
+const char* const kSiteNames[kSiteCount] = {
+	"recherche (reste)",     // kSearch : self du corps des Run*
+	"rejeu prefixe (reste)", // kPrefix
+	"Process (core)",        // kProcess
+	"Query (zones)",         // kQuery
+	"QueryCodes",            // kQueryCodes
+	"ProcessorState",        // kProcState
+	"QueryCount",            // kCount
+	"enumeration",           // kEnumerate
+	"digest (self)",         // kDigest
+	"board key (self)",      // kBoardKey
+	"atomes IW (self)",      // kAtoms
+	"recettes (self)",       // kRecipe
+	"arene Push",            // kArenaPush
+	"arene Restore",         // kArenaRestore
+	"arene Pop",             // kArenaPop
+};
+
+struct TlBuf;
+void FlushBuf(TlBuf& b);
+
+// Compteurs du thread, verses aux atomiques globaux par le destructeur (mort
+// du thread — les workers sont joints par phase) ou par FlushThread (thread
+// principal). Aucun atomique sur le chemin par-appel (piege 58 et regle 2 de
+// l'etape 1 du chantier perf).
+struct TlBuf {
+	uint64_t calls[kSiteCount] = {};
+	uint64_t ticks[kSiteCount] = {};   // temps EXCLUSIF (self)
+	uint64_t counters[kCounterCount] = {};
+	// Schema du temps exclusif : cumul des durees INCLUSIVES des scopes fermes.
+	// Un scope englobant lit ce que ses enfants ont consomme pendant sa periode
+	// (child - child0) et le soustrait de son propre temps ; a sa propre
+	// fermeture il credite sa duree inclusive a son parent.
+	uint64_t child = 0;
+	~TlBuf() { FlushBuf(*this); }
+};
+
+std::atomic<uint64_t> g_calls[kSiteCount];
+std::atomic<uint64_t> g_ticks[kSiteCount];
+std::atomic<uint64_t> g_counters[kCounterCount];
+
+// Cumul du run entier, alimente a chaque remise a zero de phase.
+uint64_t g_run_calls[kSiteCount];
+uint64_t g_run_ticks[kSiteCount];
+uint64_t g_run_counters[kCounterCount];
+
+uint64_t g_tsc0 = 0;
+std::chrono::steady_clock::time_point g_t0;
+
+TlBuf& Tl() {
+	static thread_local TlBuf b;
+	return b;
+}
+
+void FlushBuf(TlBuf& b) {
+	for(uint32_t i = 0; i < kSiteCount; ++i) {
+		if(b.calls[i])
+			g_calls[i].fetch_add(b.calls[i], std::memory_order_relaxed);
+		if(b.ticks[i])
+			g_ticks[i].fetch_add(b.ticks[i], std::memory_order_relaxed);
+		b.calls[i] = b.ticks[i] = 0;
+	}
+	for(uint32_t i = 0; i < kCounterCount; ++i) {
+		if(b.counters[i])
+			g_counters[i].fetch_add(b.counters[i], std::memory_order_relaxed);
+		b.counters[i] = 0;
+	}
+}
+
+// La frequence tsc se calibre contre l'horloge murale sur TOUTE la duree
+// ecoulee depuis Enable() : gratuite, et d'autant plus precise que le run est
+// long.
+double TscGhz() {
+	const double s = std::chrono::duration<double>(
+						 std::chrono::steady_clock::now() - g_t0).count();
+	if(s <= 0)
+		return 3.0;   // valeur de survie, jamais atteinte en pratique
+	return double(__rdtsc() - g_tsc0) / s / 1e9;
+}
+
+void PrintTable(const char* label, const uint64_t calls[], const uint64_t ticks[],
+				const uint64_t counters[]) {
+	const double ghz = TscGhz();
+	uint64_t total = 0;
+	for(uint32_t i = 0; i < kSiteCount; ++i)
+		total += ticks[i];
+	if(!total)
+		return;
+	const uint64_t dec = counters[kDecisions];
+	std::printf("\n--- profil [%s] (tsc %.2f GHz) ---\n", label, ghz);
+	std::printf("  %-22s %12s %9s %12s %9s %6s\n", "sonde", "appels", "/dec",
+				"total", "us/appel", "part");
+	// Tri par temps decroissant : le profil se lit de haut en bas.
+	uint32_t order[kSiteCount];
+	for(uint32_t i = 0; i < kSiteCount; ++i)
+		order[i] = i;
+	std::sort(order, order + kSiteCount, [&](uint32_t a, uint32_t b) {
+		return ticks[a] > ticks[b];
+	});
+	for(uint32_t k = 0; k < kSiteCount; ++k) {
+		const uint32_t i = order[k];
+		if(!calls[i] && !ticks[i])
+			continue;
+		const double s = double(ticks[i]) / ghz / 1e9;
+		std::printf("  %-22s %12llu %9.2f %10.3f s %9.2f %5.1f%%\n",
+					kSiteNames[i], (unsigned long long)calls[i],
+					dec ? double(calls[i]) / double(dec) : 0.0, s,
+					calls[i] ? s * 1e6 / double(calls[i]) : 0.0,
+					100.0 * double(ticks[i]) / double(total));
+	}
+	const double ts = double(total) / ghz / 1e9;
+	std::printf("  %-22s %12s %9s %10.3f s\n", "total mesure", "", "", ts);
+	if(dec)
+		std::printf("  decisions : %llu  (%.1f us par decision, sondes comprises)\n",
+					(unsigned long long)dec, ts * 1e6 / double(dec));
+	if(counters[kAlloc] || counters[kFree])
+		std::printf("  arene : alloc %llu (%.1f/dec)  free %llu  realloc %llu\n",
+					(unsigned long long)counters[kAlloc],
+					dec ? double(counters[kAlloc]) / double(dec) : 0.0,
+					(unsigned long long)counters[kFree],
+					(unsigned long long)counters[kRealloc]);
+	if(calls[kArenaRestore] || calls[kArenaPush])
+		std::printf("  pages : %.1f/Restore (%llu appels)  %.1f/Push (%llu appels)\n",
+					calls[kArenaRestore]
+						? double(counters[kPagesRestored]) / double(calls[kArenaRestore])
+						: 0.0,
+					(unsigned long long)calls[kArenaRestore],
+					calls[kArenaPush]
+						? double(counters[kPagesPushed]) / double(calls[kArenaPush])
+						: 0.0,
+					(unsigned long long)calls[kArenaPush]);
+}
+
+} // namespace
+
+void Enable() {
+	g_tsc0 = __rdtsc();
+	g_t0 = std::chrono::steady_clock::now();
+	enabled = true;
+}
+
+void FlushThread() {
+	if(enabled)
+		FlushBuf(Tl());
+}
+
+void CountSlow(uint32_t counter, uint64_t n) {
+	Tl().counters[counter] += n;
+}
+
+void Scope::Begin() {
+	TlBuf& b = Tl();
+	buf_ = &b;
+	child0_ = b.child;
+	t0_ = __rdtsc();
+}
+
+void Scope::End() {
+	const uint64_t dt = __rdtsc() - t0_;
+	TlBuf& b = *static_cast<TlBuf*>(buf_);
+	++b.calls[site_];
+	const uint64_t inner = b.child - child0_;
+	b.ticks[site_] += dt > inner ? dt - inner : 0;
+	b.child = child0_ + dt;
+}
+
+void PrintPhase(const char* label) {
+	if(!enabled)
+		return;
+	FlushThread();
+	uint64_t calls[kSiteCount], ticks[kSiteCount], counters[kCounterCount];
+	for(uint32_t i = 0; i < kSiteCount; ++i) {
+		calls[i] = g_calls[i].exchange(0, std::memory_order_relaxed);
+		ticks[i] = g_ticks[i].exchange(0, std::memory_order_relaxed);
+		g_run_calls[i] += calls[i];
+		g_run_ticks[i] += ticks[i];
+	}
+	for(uint32_t i = 0; i < kCounterCount; ++i) {
+		counters[i] = g_counters[i].exchange(0, std::memory_order_relaxed);
+		g_run_counters[i] += counters[i];
+	}
+	PrintTable(label, calls, ticks, counters);
+}
+
+void PrintTotal() {
+	if(!enabled)
+		return;
+	// Une phase non imprimee (chemin sans PrintPhase) est versee au cumul ici.
+	PrintPhase("phase residuelle");
+	PrintTable("cumul du run", g_run_calls, g_run_ticks, g_run_counters);
+}
+
+} // namespace prof
 
 } // namespace solver
 

@@ -17,6 +17,27 @@ uint64_t Mix(uint64_t h, uint64_t v) {
 	return h;
 }
 
+// Melange un tampon par mots de 8 octets au lieu d'octet par octet (C22) : la
+// longueur est melangee d'abord, la queue est completee de zeros — deux tampons
+// distincts ne peuvent pas produire la meme sequence de mots. Les VALEURS de
+// digest changent, pas leur pouvoir discriminant : le controle est l'egalite
+// des faits structurels de la sante (273 digests deux a deux distincts).
+uint64_t MixBytes(uint64_t h, const uint8_t* p, size_t n) {
+	h = Mix(h, n);
+	size_t i = 0;
+	for(; i + 8 <= n; i += 8) {
+		uint64_t v;
+		std::memcpy(&v, p + i, 8);
+		h = Mix(h, v);
+	}
+	if(i < n) {
+		uint64_t tail = 0;
+		std::memcpy(&tail, p + i, n - i);
+		h = Mix(h, tail);
+	}
+	return h;
+}
+
 // Part MATERIELLE du score d'un tirage NRPA. Le score est material*1000 +
 // nouveaute (cf. PolicyRollout) ; la nouveaute est consommee par la table au
 // premier passage, donc rejouer la meme ligne rend un score legerement
@@ -28,6 +49,13 @@ uint64_t MatScore(double score) {
 
 constexpr uint32_t kBoardFlags = QUERY_CODE | QUERY_ALIAS | QUERY_POSITION |
 								 QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LINK;
+
+// Zones CACHEES (main, cimetiere, banni, extra) : materiaux, compteurs et
+// fleches de lien n'y existent pas — les cartes y ont perdu leurs overlays en
+// quittant le terrain. Demander ces champs faisait serialiser (et parser) des
+// octets vides a chaque requete du digest (C20). Les valeurs d'EntryOf sont
+// INCHANGEES par construction : overlay et counters y etaient deja vides.
+constexpr uint32_t kHiddenFlags = QUERY_CODE | QUERY_ALIAS | QUERY_POSITION;
 
 // Une entree de board, independante de la colonne occupee. `goal_view` :
 // equivalence de BUT — la position ATK/DEF est IGNOREE (arbitrage du joueur :
@@ -60,6 +88,8 @@ uint64_t EntryOf(uint32_t loc_kind, const QueriedCard& c, const CardDB& db,
 } // namespace
 
 void ComputeBoardKeyInto(Duel& duel, uint8_t con, BoardKey& key) {
+	// Self : les deux Query internes s'imputent a leur propre sonde.
+	prof::Scope ps(prof::kBoardKey);
 	static thread_local std::vector<QueriedCard> cards;
 	key.hash = 0;
 	key.entries.clear();
@@ -126,6 +156,7 @@ uint32_t CommonCodes(const std::vector<uint32_t>& a, const std::vector<uint32_t>
 
 void CollectAtoms(Duel& duel, uint8_t con, const BoardKey& here,
 				  uint32_t partition, std::vector<uint64_t>& out) {
+	prof::Scope ps(prof::kAtoms);
 	out.clear();
 	const uint64_t p = partition * 0x9e3779b97f4a7c15ull;
 	// Terrain : les entrees completes (code, position, materiaux, compteurs)
@@ -397,6 +428,9 @@ bool Search::FillChoices(ChoiceList& out) {
 
 uint64_t StateDigest(Duel& d, uint8_t prompt_type,
 					 const std::vector<uint8_t>& prompt_payload) {
+	// Self : les 12 Query, les 2 Count et le ProcessorState internes vont a
+	// leurs propres sondes ; ici ne reste que EntryOf + tri + melange.
+	prof::Scope ps(prof::kDigest);
 	static thread_local std::vector<QueriedCard> cards;
 	static thread_local std::vector<uint64_t> entries;
 	uint64_t h = 0xcbf29ce484222325ull;
@@ -417,7 +451,7 @@ uint64_t StateDigest(Duel& d, uint8_t prompt_type,
 		for(uint32_t loc : { LOCATION_HAND, LOCATION_GRAVE, LOCATION_REMOVED,
 							 LOCATION_EXTRA }) {
 			entries.clear();
-			d.Query(con, loc, kBoardFlags, cards);
+			d.Query(con, loc, kHiddenFlags, cards);
 			for(const auto& c : cards)
 				if(c.present)
 					entries.push_back(EntryOf(loc, c, d.Db()));
@@ -429,13 +463,12 @@ uint64_t StateDigest(Duel& d, uint8_t prompt_type,
 		h = Mix(h, d.Count(con, LOCATION_DECK));
 	}
 	h = Mix(h, prompt_type);
-	for(uint8_t b : prompt_payload)
-		h = Mix(h, b);
+	h = MixBytes(h, prompt_payload.data(), prompt_payload.size());
 	// Sans ceci, deux instants distincts d'une meme resolution de chaine —
 	// meme terrain, meme main, meme prompt — sont confondus, et la branche du
 	// combo est elaguee des le debut (patch C1).
-	for(uint8_t b : d.ProcessorState())
-		h = Mix(h, b);
+	const std::vector<uint8_t>& pstate = d.ProcessorState();
+	h = MixBytes(h, pstate.data(), pstate.size());
 	return h;
 }
 
@@ -457,6 +490,7 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 	}
 
 	++stats.nodes;
+	prof::Count(prof::kDecisions);
 	if(depth < stats.expansions_by_depth.size())
 		++stats.expansions_by_depth[depth];
 
@@ -540,6 +574,7 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
 	if(!cfg.recipes)
 		return 0.0f;
+	prof::Scope ps(prof::kRecipe);
 	const auto con = static_cast<uint8_t>(cfg.target_player);
 	// Zones cachees, relevees une fois par appel. Le terrain vient de
 	// `here.codes`, deja calcule par l'appelant : rien a repayer.
@@ -551,9 +586,13 @@ float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
 	// Zones cachees : une requete chacune. C'est le cout du mecanisme, et il
 	// n'est paye QUE dans RunLevin, au developpement d'un noeud — jamais dans
 	// les tirages, ou il serait redhibitoire (audit 6.1).
+	// Surcharge a TAMPON : la surcharge vecteur allouait un std::vector par
+	// requete, cinq fois par noeud developpe (audit 6, gain le plus bete).
+	static thread_local std::vector<QueriedCard> rq;
 	for(uint32_t loc : { LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_HAND,
 						 LOCATION_EXTRA, LOCATION_DECK }) {
-		for(const QueriedCard& c : duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS))
+		duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS, rq);
+		for(const QueriedCard& c : rq)
 			if(c.present)
 				recipe_present.push_back(
 					{ duel.Db().Canonical(c.Code()),
@@ -1009,6 +1048,7 @@ bool Search::DescendGuided(uint32_t depth, uint32_t actions, uint32_t turns,
 	uint64_t total_resolved = resolved + resolved_this_step;
 
 	++stats.nodes;
+	prof::Count(prof::kDecisions);
 	if(depth < stats.expansions_by_depth.size())
 		++stats.expansions_by_depth[depth];
 
@@ -1126,6 +1166,7 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	uint64_t total_resolved = resolved + resolved_this_step;
 
 	++stats.nodes;
+	prof::Count(prof::kDecisions);
 	if(depth < stats.expansions_by_depth.size())
 		++stats.expansions_by_depth[depth];
 
@@ -1317,6 +1358,7 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	uint64_t total_resolved = resolved + resolved_this_step;
 
 	++stats.nodes;
+	prof::Count(prof::kDecisions);
 	if(depth < stats.expansions_by_depth.size())
 		++stats.expansions_by_depth[depth];
 
@@ -1497,6 +1539,7 @@ bool Search::Rollout(uint64_t& rng) {
 		summons += static_cast<uint32_t>(summons_this_step.size());
 		resolved += resolved_this_step;
 		++stats.nodes;
+		prof::Count(prof::kDecisions);
 		if(resolved_this_step) {
 			const uint32_t rp = ResolveProgress(resolved);
 			for(uint32_t k = rp_prev; k < rp; ++k) {
@@ -1605,6 +1648,9 @@ bool Search::Rollout(uint64_t& rng) {
 
 void Search::RunRollouts(const BoardKey& t, const std::vector<PlanStep>& p,
 						 uint32_t count, uint64_t seed) {
+	// Le self de cette sonde est la ligne « reste » du profil : tout ce que les
+	// sondes internes ne couvrent pas (softmax, politique, tables, PQ...).
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	plan = &p;
 	plan_index.clear();
@@ -1675,6 +1721,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		summons += static_cast<uint32_t>(summons_this_step.size());
 		resolved += resolved_this_step;
 		++stats.nodes;
+		prof::Count(prof::kDecisions);
 		// Histogramme des resolutions atteintes par les tirages : monotone le
 		// long d'un tirage, chaque seuil n'est franchi qu'une fois.
 		if(resolved_this_step) {
@@ -1997,6 +2044,7 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 
 void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 					 uint64_t seed) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	plan = &p;
 	plan_index.clear();
@@ -2072,6 +2120,7 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 
 void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					  const NrpaPolicy& pol) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	plan = &p;
 	plan_index.clear();
@@ -2302,6 +2351,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		}
 		tt.emplace(key, 1u);
 		++stats.nodes;
+		prof::Count(prof::kDecisions);
 		const uint32_t ndepth = nodes[idx].depth;
 		const float nlogpi = nodes[idx].logpi;
 		if(ndepth >= cfg.max_decisions) {
@@ -2503,6 +2553,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 
 void Search::RunTransplant(const BoardKey& t, const std::vector<PlanStep>& p,
 						   uint32_t discrepancies) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	plan = &p;
 	start = std::chrono::steady_clock::now();
@@ -3039,6 +3090,7 @@ void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 }
 
 void Search::RunRepair(const BoardKey& t, uint32_t discrepancies) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();
@@ -3055,6 +3107,7 @@ void Search::RunRepair(const BoardKey& t, uint32_t discrepancies) {
 }
 
 void Search::RunGuided(const BoardKey& t) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();
@@ -3069,6 +3122,7 @@ void Search::RunGuided(const BoardKey& t) {
 }
 
 void Search::Run(const BoardKey& t) {
+	prof::Scope ps(prof::kSearch);
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();

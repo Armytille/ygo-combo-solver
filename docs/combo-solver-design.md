@@ -3041,3 +3041,123 @@ borne de Levin comme si elles étaient atomiques — c'est le critère de sélec
 une borne BASSE : le catalogue entier est supposé proposé à chaque décision, et aucune macro
 n'est créditée de raccourcir une ligne que le corpus a jouée. La mesure elle-même
 (`tools/s10_options.ps1`, 30 s) **reste à lire** : la session a été arrêtée avant.
+
+### 9.18 Session 11 : le profil est un instrument — deux régimes décomposés, et le facteur 70 expliqué
+
+Session PERFORMANCE : réduire le coût d'UNE décision simulée, sans toucher l'algorithme. Le
+constat d'entrée était que personne ne savait où partait le temps — le « ~250 µs par décision,
+dominée par `duel.Process()` et `arena.Restore()` » du §9.16 était une estimation relevée dans
+des logs, jamais un chiffre imprimé par un run (piège 52). La session installe l'instrument,
+décompose LES DEUX régimes, tranche l'écart inexpliqué de ~70× entre eux, et livre trois
+optimisations tenues par le contrôle de correction.
+
+**(a) L'instrument : `--profile`.** Sondes `__rdtsc` à temps EXCLUSIF (une sonde imbriquée se
+soustrait de celle qui l'englobe), compteurs `thread_local` versés dans des atomiques globaux au
+décès du thread — les workers sont créés et joints par phase, le versement est garanti ; le
+thread principal flushe explicitement (piège 58, celui de `host_fallbacks`). Aucun atomique sur
+le chemin par-appel. La sonde `kSearch` enveloppe le corps des `Run*` : son temps propre EST la
+ligne « reste », par construction — pas de soustraction à l'impression, pas de profil qui ment
+par omission. Les allocations d'arène sont comptées mais jamais chronométrées (~10⁶ appels/s par
+worker : un rdtsc par appel fabriquerait le ralentissement qu'il prétend observer). Impression
+par phase (`prof::PrintPhase` aux joins des pools) plus un cumul de fin de run. Éteint, une sonde
+coûte un load+branch. Le code vit dans `arena.h`/`arena.cpp` — le glob de premake est évalué à
+la génération, un fichier neuf aurait exigé de régénérer la solution.
+
+**(b) Le régime TIRAGES, décomposé pour la première fois** (étalon B contraint, 60 s, graine
+888, 16 workers ; 6,05 M décisions dans la phase) :
+
+| sonde | part | appels/déc | µs/appel |
+|---|---|---|---|
+| **Process (core)** | **82,0 %** | 2,79 | 27,2 |
+| arène Restore | 9,0 % | 0,12 (1/tirage) | 70,7 (63 pages) |
+| QueryCodes (nouveauté) | 2,9 % | 3,74 | 0,73 |
+| recherche (reste) | 2,0 % | — | — |
+| Query (board key) | 1,5 % | 2,15 | 0,66 |
+| Push+Pop, énumération, atomes, board key, Count | ~2,6 % | — | — |
+
+92,5 µs de temps sonde par décision (16 workers cumulés, soit ~5,8 µs de temps mur — cohérent
+avec les 51 µs/état×16 déduits de la session 10). Et : **369 allocations d'arène par décision**
+(2,24 milliards sur le run), toutes dans `Process` — c'est le trafic Lua/core lui-même.
+
+Deux conclusions. D'abord, le softmax, la politique, les tables — tout ce que C27 voulait
+optimiser — pèsent 2 % : morts avant d'être tentés, le §9.9 (« le coût est dans ocgcore, pas
+dans l'hôte ») est re-confirmé par l'instrument. Ensuite, l'hôte entier (requêtes comprises)
+pèse ~18 % : même réduit à zéro, le gain plafonnerait à ×1,2.
+
+**(c) Le facteur ~70 entre tirages et finisseur : tranché, et ce n'est PAS le branchement.**
+L'hypothèse de la session 10 (« une expansion développe tous les fils, à b≈20 les ~4 ms
+retombent sur ~200 µs par fils ») est FAUSSE. Le profil du finisseur (phase 2, RunLevin, 3 536
+expansions) :
+
+| sonde | part | appels/expansion | µs/appel |
+|---|---|---|---|
+| **Process (core)** | **86,2 %** | **79,9** | 131,1 |
+| arène Restore | 7,7 % | 2,74 | 341,6 (441 pages) |
+| arène Push | 4,1 % | 1,01 | 488,5 (707 pages) |
+| digest (self) | 0,03 % | 1,31 | 2,6 |
+
+12,2 ms par expansion dont 10,5 ms de `Process` — **80 appels par expansion**. Une expansion ne
+développe pas ses fils (ils sont seulement enfilés) : elle REJOUE le chemin depuis la racine
+quand le nœud extrait de la file n'est pas un voisin de la pile de plongée, et chaque coup forcé
+du rejeu est un `Process`. Le coût du finisseur est le REJEU, pas le développement. Les
+hypothèses alternatives sont éliminées par le même tableau : digest recalculé par fils — non
+(0,03 %) ; requêtes refaites par fils — non (0,4 %) ; restauration par fils — non (2,74/exp.).
+
+S'y ajoute un fait nouveau, mesurable seulement avec la décomposition par phase : **le coût d'un
+pas de core CROÎT avec la profondeur de l'état** — 27,2 µs/appel depuis la position de départ,
+89,8 µs aux racines de recul profond (phase A2), 131,1 µs dans le finisseur. Un board chargé
+coûte 3-5× par pas. Les 0,18 ms du jalon 0 étaient mesurés le long de la référence : ils étaient
+justes, mais pas représentatifs des états que la recherche visite réellement.
+
+**(d) Les optimisations livrées, et le contrôle qui les tient.** Santé stricte avant/après :
+20 lignes de diff, toutes des durées — 273 digests deux à deux distincts, 210/273, 209
+candidates, 16 replays, 19/56/272, « résiste à 12 déviations » inchangés.
+
+- **LTO** (`/GL`+`/LTCG`, les 4 projets — `flags { "LinkTimeOptimization" }` dans premake5.lua,
+  solution régénérée). Le core, Lua et le solveur étaient trois libs statiques : l'inlining
+  s'arrêtait sur `OCG_DuelProcess` et sur l'allocateur d'arène branché dans Lua, exactement le
+  chemin chaud. C'est le seul levier qui touche les 82-86 %.
+- **C20** : `kHiddenFlags` — les 8 requêtes de digest sur main/cimetière/banni/extra ne
+  sérialisent plus overlay/counters/link, qui y sont vides par règle du jeu. Valeurs de digest
+  INCHANGÉES par construction (les champs étaient vides dans `EntryOf`).
+- **C22** : `MixBytes` — le digest hache la charge du prompt et l'état processeur par mots de
+  8 octets (longueur mélangée d'abord, queue complétée de zéros). Les valeurs de digest
+  changent ; le contrôle est l'égalité structurelle de la santé, et elle passe.
+- **RecipeDistance** : la surcharge vecteur de `Query` (qui alloue) remplacée par la surcharge à
+  tampon — cinq allocations par nœud développé en moins sur le chemin `--recipes`.
+
+**Le gain, mesuré à temps égal** (étalon B contraint, 60 s, graine 888, phase tirages ; le
+témoin est le binaire pré-optimisation conservé — `bin\Release\combosolver_preopt.exe`) :
+
+| bras | tirages NRPA | états |
+|---|---|---|
+| ancien binaire, sans profil | 113 654 | 5 651 956 |
+| ancien binaire, avec `--profile` | 123 300 | 5 753 223 |
+| **nouveau binaire (LTO+C20+C22), sans profil** | **196 067** | **7 450 129** |
+
+Soit **+31,8 % d'états à temps égal** — un run unique, avec deux réserves écrites : la
+dispersion à graine fixée (piège 39 — les crêtes divergent, 3/8 contre 7/8) et le fait que des
+trajectoires divergentes visitent des états de profondeurs différentes, dont le coût unitaire
+varie de 3-5× (cf. (c)) — une partie de l'écart peut être de la chance de trajectoire. Les trois
+répétitions et les médianes restent dues. **Le coût de l'instrument**, lui, est sous le plancher
+de bruit : le bras profilé de l'ancien binaire rend +1,8 % d'états par rapport au bras nu — du
+MAUVAIS côté pour un surcoût — donc < 2 % et indiscernable du bruit sur un run.
+
+Le chiffre le plus robuste à la divergence de trajectoire est le coût PAR APPEL du core, relevé
+par la même sonde sur les deux binaires : `Process` passe de 27,2 à **23,5 µs/appel (−13,8 %)**
+dans la phase tirages — c'est le rendement propre du LTO, par-appel et non par-run.
+
+
+**(e) Ce que la session dit du problème.** Le prompt de session l'exigeait : si le profil montre
+que le temps part dans `OCG_DuelProcess`, le dire clairement plutôt que gratter des pourcentages.
+C'est le cas, dans les deux régimes (82 % et 86 %). Le levier n'est plus dans notre code : il est
+dans le NOMBRE d'appels — les OPTIONS (chantier 17) pour les tirages, et pour le finisseur la
+RÉDUCTION DES REJEUX (80 Process par expansion : garder plus de niveaux d'arène sur la pile de
+plongée, ou enraciner des checkpoints aux nœuds chauds de la file — un chantier algorithmique
+nouveau, désigné par l'instrument et absent de l'audit). La périphérie est déjà propre.
+
+**Réserves.** Les mesures de gain de cette session sont des runs UNIQUES à graine fixée
+(piège 39 : la dispersion domine) — l'amorce d'un A/B, pas sa conclusion ; les trois répétitions
+et les médianes restent dues. Le coût de l'instrument n'a été chiffré que sur un run. Et PGO
+n'a pas été tenté (LTO d'abord, mesuré seul — PGO est le candidat suivant, cas d'école sur un
+profil aussi stable).

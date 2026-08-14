@@ -56,6 +56,11 @@ workspace "combosolver"
 		defines "NDEBUG"
 		optimize "Speed"
 		runtime "Release"
+		-- LTO (/GL + /LTCG) : le core, Lua et le solveur sont trois libs
+		-- statiques distinctes — sans lui, l'inlining s'arrete a leurs
+		-- frontieres, c'est-a-dire exactement sur OCG_DuelProcess et sur
+		-- l'allocateur d'arene branche dans Lua (chantier perf, session 11).
+		flags { "LinkTimeOptimization" }
 	filter {}
 
 -- Lua, tel que le construit ocgcore : meme liste d'exclusions, meme

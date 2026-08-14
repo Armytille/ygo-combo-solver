@@ -101,7 +101,10 @@ combosolver.exe gabarit.yrpX --scriptdir <scripts> `
 `--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
 `--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
 `--nrpa-level`, `--max-subsets`, `--recipes`, `--no-seed-recipes`,
-`--no-seed-quant`, `--derive-summon-min`, `--verbose`).
+`--no-seed-quant`, `--derive-summon-min`, `--profile`, `--verbose`).
+`--profile` imprime le profil du chemin chaud par phase (sondes rdtsc, temps
+exclusif, ligne « reste ») — c'est l'instrument qui a tranché que 82-86 % du
+temps part dans le core (§9.18) ; son coût mesuré est sous le bruit (< 2 %).
 La graine des tirages est dérivée du temps et imprimée — la redonner via
 `--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
 divergent quand même (l'ordre des échanges entre workers dépend du timing) —

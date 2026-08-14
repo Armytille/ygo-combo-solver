@@ -168,6 +168,7 @@ bool Duel::Setup(const Replay& yrp, std::string& error,
 }
 
 int Duel::Process() {
+	prof::Scope ps(prof::kProcess);
 	ArenaScope scope(arena);
 	return OCG_DuelProcess(handle);
 }
@@ -209,11 +210,13 @@ void Duel::SetResponse(const std::vector<uint8_t>& data) {
 }
 
 uint32_t Duel::Count(uint8_t team, uint32_t loc) {
+	prof::Scope ps(prof::kCount);
 	ArenaScope scope(arena);
 	return OCG_DuelQueryCount(handle, team, loc);
 }
 
 const std::vector<uint8_t>& Duel::ProcessorState() {
+	prof::Scope ps(prof::kProcState);
 	uint32_t len = 0;
 	const uint8_t* data = nullptr;
 	{
@@ -241,6 +244,7 @@ std::vector<QueriedCard> Duel::Query(uint8_t con, uint32_t loc, uint32_t flags) 
 
 void Duel::Query(uint8_t con, uint32_t loc, uint32_t flags,
 				 std::vector<QueriedCard>& out) {
+	prof::Scope ps(prof::kQuery);
 	out.clear();
 	OCG_QueryInfo info{ flags, con, loc, 0, 0 };
 	uint32_t len = 0;
@@ -255,6 +259,7 @@ void Duel::Query(uint8_t con, uint32_t loc, uint32_t flags,
 }
 
 void Duel::QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out) {
+	prof::Scope ps(prof::kQueryCodes);
 	out.clear();
 	OCG_QueryInfo info{ QUERY_CODE | QUERY_ALIAS, con, loc, 0, 0 };
 	uint32_t len = 0;

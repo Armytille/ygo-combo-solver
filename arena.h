@@ -232,4 +232,95 @@ private:
 	Arena* previous;
 };
 
+// --- PROFIL DU CHEMIN CHAUD (--profile) ------------------------------------
+//
+// Ou part le temps d'une decision simulee. Les regles, chacune payee une fois :
+//   - compteurs thread_local, verses dans des atomiques globaux au DECES du
+//     thread (les workers sont crees et joints par phase, le versement est
+//     garanti) et par flush explicite pour le thread principal — un
+//     thread_local lu depuis un autre thread mesure zero, toujours (piege 58) ;
+//   - jamais d'atomique partage sur le chemin par-appel : seize workers qui
+//     tapent la meme ligne de cache mesureraient leur propre contention ;
+//   - __rdtsc, calibre une fois contre l'horloge murale au moment du rapport ;
+//   - eteint par defaut : une sonde inactive coute un load+branch.
+//
+// Le temps mesure par sonde est EXCLUSIF (self) : une sonde imbriquee se
+// soustrait de celle qui l'englobe. La sonde kSearch enveloppe le corps des
+// Run* : son temps propre est donc, PAR CONSTRUCTION, la ligne « reste » —
+// sans elle un profil ment par omission.
+//
+// Vit dans arena.h/arena.cpp et non dans un fichier neuf : premake evalue son
+// glob `files { "*.cpp" }` a la GENERATION, un fichier neuf exigerait de
+// regenerer la solution. arena.h est inclus par duel.h, donc visible de tout
+// le chemin chaud.
+namespace prof {
+
+enum Site : uint32_t {
+	kSearch = 0,     // corps d'un Run* — le self est la ligne « reste »
+	kPrefix,         // rejeu de prefixe (racines du finisseur)
+	kProcess,        // Duel::Process (le core lui-meme)
+	kQuery,          // Duel::Query, surcharge a tampon (la surcharge vecteur delegue)
+	kQueryCodes,     // Duel::QueryCodes
+	kProcState,      // Duel::ProcessorState
+	kCount,          // Duel::Count
+	kEnumerate,      // EnumerateInto
+	kDigest,         // StateDigest, hors requetes internes
+	kBoardKey,       // ComputeBoardKeyInto, hors requetes internes
+	kAtoms,          // CollectAtoms (nouveaute), hors requetes internes
+	kRecipe,         // RecipeDistance, hors requetes internes
+	kArenaPush,
+	kArenaRestore,
+	kArenaPop,
+	kSiteCount
+};
+
+enum Counter : uint32_t {
+	kAlloc = 0,      // Arena::Allocate
+	kFree,           // Arena::Free
+	kRealloc,        // Arena::Reallocate
+	kPagesPushed,    // pages traitees par Push
+	kPagesRestored,  // pages recopiees par Restore
+	kDecisions,      // decisions/expansions (aligne sur ++stats.nodes)
+	kCounterCount
+};
+
+// Fixe AVANT la creation des threads (la publication passe par le lancement).
+extern bool enabled;
+
+void Enable();               // allume + calibre l'origine tsc/horloge
+void FlushThread();          // verse les compteurs du thread APPELANT
+// Verse le thread courant, imprime la table de LA PHASE ecoulee (si des sondes
+// ont tire) et remet les compteurs de phase a zero. Le cumul de run continue.
+void PrintPhase(const char* label);
+void PrintTotal();           // le cumul de tout le run, en fin d'execution
+
+void CountSlow(uint32_t counter, uint64_t n);
+inline void Count(uint32_t counter, uint64_t n = 1) {
+	if(enabled)
+		CountSlow(counter, n);
+}
+
+class Scope {
+public:
+	explicit Scope(uint32_t site) : site_(site) {
+		if(enabled)
+			Begin();
+	}
+	~Scope() {
+		if(buf_)
+			End();
+	}
+	Scope(const Scope&) = delete;
+	Scope& operator=(const Scope&) = delete;
+
+private:
+	void Begin();
+	void End();
+	void* buf_ = nullptr;
+	uint64_t t0_ = 0, child0_ = 0;
+	uint32_t site_;
+};
+
+} // namespace prof
+
 } // namespace solver

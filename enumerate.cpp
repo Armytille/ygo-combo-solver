@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "arena.h"   // sonde de profil (--profile)
 #include "ocgapi_constants.h"
 
 namespace solver {
@@ -627,6 +628,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 
 void EnumerateInto(uint8_t message, const uint8_t* data, uint32_t len,
 				   const EnumOptions& opt, ChoiceList& out) {
+	prof::Scope ps(prof::kEnumerate);
 	out.Clear();
 	EnumerateRaw(message, data, len, opt, out);
 	// Par defaut l'identite de plan est l'arete elle-meme ; seuls les prompts
