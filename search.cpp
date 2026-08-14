@@ -2269,34 +2269,58 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		pq.pop();
 		const int32_t parent = nodes[idx].parent;
 
-		// Le parent est-il dans la pile de plongee ?
+		// Chaine d'ancetres de idx (racine exclue, idx compris), de la racine
+		// vers idx.
+		chain.clear();
+		for(int32_t i = static_cast<int32_t>(idx); i > 0; i = nodes[i].parent)
+			chain.push_back(static_cast<uint32_t>(i));
+		std::reverse(chain.begin(), chain.end());
+
+		// L'ANCETRE le plus profond present sur la pile de plongee — pas
+		// seulement le parent direct. Le profil (§9.18) a mesure ~80 Process
+		// par expansion : tout saut de la file vers un autre sous-arbre
+		// rejouait la chaine ENTIERE depuis la racine, alors que la pile
+		// detenait le prefixe commun. Depiler jusqu'a l'ancetre partage et ne
+		// rejouer que le SUFFIXE est semantiquement neutre — memes reponses,
+		// memes controles, seul le point de depart du rejeu change. Controle :
+		// l'etalon 0 (recul 0 doit rendre 42 exp., b=0, EPUISE).
 		int64_t at = -1;
-		for(size_t i = dive.size(); i-- > 0;)
-			if(static_cast<int32_t>(dive[i].node) == parent) {
-				at = static_cast<int64_t>(i);
+		size_t ci = 0;
+		for(size_t j = dive.size(); j-- > 0;) {
+			const uint32_t dn = dive[j].node;
+			if(dn == 0) {   // la racine est l'ancetre de tout noeud
+				at = static_cast<int64_t>(j);
+				ci = 0;
 				break;
 			}
+			bool anc = false;
+			for(size_t k = chain.size(); k-- > 0;)
+				if(chain[k] == dn) {
+					anc = true;
+					ci = k + 1;   // premier coup a rejouer : l'enfant de dn
+					break;
+				}
+			if(anc) {
+				at = static_cast<int64_t>(j);
+				break;
+			}
+		}
 
 		bool dead = false;
 		if(parent >= 0 && at < 0) {
-			// Parent hors pile : premier retour a la racine, rejeu du chemin
-			// de decisions (les coups forces se re-derivent).
+			// Pile vide (ou sans ancetre commun) : rejeu depuis la racine,
+			// les coups forces se re-derivent.
 			while(!dive.empty()) {
 				arena.Pop();
 				dive.pop_back();
 			}
-			chain.clear();
-			for(int32_t i = static_cast<int32_t>(idx); i > 0;
-				i = nodes[i].parent)
-				chain.push_back(static_cast<uint32_t>(i));
-			std::reverse(chain.begin(), chain.end());
 			arena.Restore();
 			path.clear();
 			actions = 0;
 			turns = cfg.initial_turns;
 			summons = cfg.initial_summons;
 			resolved = cfg.initial_resolved;
-			size_t ci = 0;
+			ci = 0;
 			for(;;) {
 				Adv a = advance(ci == chain.size());
 				if(a != Adv::Branch) {
@@ -2311,9 +2335,10 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				++ci;
 			}
 		} else {
-			// Enfant ou frere : depiler jusqu'au parent (chaque Pop restaure
-			// et fusionne ses pages sales), restaurer son etat, jouer la
-			// reponse du noeud. `at < 0` : le parent est la racine elle-meme.
+			// Depiler jusqu'a l'ancetre partage (chaque Pop restaure et
+			// fusionne ses pages sales), restaurer SON etat — il est A SON
+			// PROMPT — puis rejouer le suffixe de chaine : au plus court, la
+			// seule reponse de idx (enfant ou frere, l'ancien chemin rapide).
 			while(static_cast<int64_t>(dive.size()) > at + 1) {
 				arena.Pop();
 				dive.pop_back();
@@ -2333,11 +2358,22 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				summons = cfg.initial_summons;
 				resolved = cfg.initial_resolved;
 			}
-			if(idx != 0) {
-				duel.SetResponse(nodes[idx].response);
-				path.push_back(nodes[idx].response);
+			if(idx == 0) {
+				dead = advance(true) != Adv::Branch;
+			} else {
+				for(;;) {
+					duel.SetResponse(nodes[chain[ci]].response);
+					path.push_back(nodes[chain[ci]].response);
+					++ci;
+					Adv a = advance(ci == chain.size());
+					if(a != Adv::Branch) {
+						dead = true;
+						break;
+					}
+					if(ci == chain.size())
+						break;
+				}
 			}
-			dead = advance(true) != Adv::Branch;
 		}
 		if(dead)
 			continue;
