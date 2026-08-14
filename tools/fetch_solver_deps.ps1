@@ -17,8 +17,18 @@
   .\tools\fetch_solver_deps.ps1 -Commit 8e5f4e4f0ab6b8ca750e8e1c91c1a58f407e3272
 #>
 param(
-    # 2026-04-07 : dernier commit avant le replay de reference du 2026-04-13.
-    [string]$Commit = "8e5f4e4f0ab6b8ca750e8e1c91c1a58f407e3272",
+    # 2026-08-10. Remonte depuis 8e5f4e4 (2026-04-07) en session 7ter, apres
+    # mesure : les cinq patchs d'arene s'appliquent sans conflit sur cet arbre,
+    # les listes de sources sont identiques, et la porte de sante du replay de
+    # reference (2026-04-13) est IDENTIQUE ligne a ligne — 0 retry, 290 digests
+    # distincts / 0 fusion, reference retrouvee a 0 ecart, A/B nouveaute
+    # inchange. Le core precedent reste extractible : -Commit 8e5f4e4f...
+    #
+    # Rappel §6bis : ce pin doit rester contemporain du replay ANALYSE, pas de
+    # la date du jour. Un replay enregistre par un client EDOPro ancien exige un
+    # core ancien, meme si ses scripts, eux, se mettent a jour tout seuls — cas
+    # rencontre en session 7ter avec un client date du 2025-05-05.
+    [string]$Commit = "5a985af7c43c8470b06bef697bfb9051b40e114c",
     [string]$Dest = "deps/ocgcore",
     # Scripts de cartes a la date du replay de reference. Un jeu decale fait
     # diverger le rejeu aussi surement qu'un core decale, et sans le dire.

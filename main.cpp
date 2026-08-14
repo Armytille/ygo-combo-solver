@@ -1130,6 +1130,11 @@ struct LineResult {
 	std::map<uint8_t, Stat> stats;
 	long double log_raw = 0, log_dedup = 0;
 	bool have_target = false;
+	// La cible a ete prise a la FIN de l'enregistrement et non a un changement
+	// de tour : la ligne ne franchit pas la fin du tour (hand test arrete une
+	// fois le combo pose). A signaler, car les controles qui supposent un tour
+	// complet (coupure de tour, pic de brulees) se lisent differemment.
+	bool target_at_is_end = false;
 	Board target_self, target_oppo;
 	size_t target_at = 0;
 	// Position de depart, capturee au tout premier point de decision : c'est
@@ -1188,6 +1193,26 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 		peo.db = &duel.Db();
 	}
 
+	// Capture du BOARD CIBLE. Deux instants possibles, et c'est le second qui
+	// manquait : (1) le changement de tour, quand la ligne enregistree le
+	// franchit ; (2) LA FIN DE L'ENREGISTREMENT. Un hand test qui s'arrete une
+	// fois le combo pose est un replay parfaitement valide — c'est meme la
+	// facon normale d'enregistrer une ligne — et exiger qu'il passe son tour
+	// etait une hypothese de cet outil, pas une propriete des replays. Sans ce
+	// repli, un tel replay ne rendait aucune cible, donc aucun plan, et le flux
+	// de transplantation refusait de demarrer.
+	auto capture_target = [&] {
+		r.target_self = Snapshot(duel, uint8_t(opt.target_player));
+		r.target_oppo = Snapshot(duel, uint8_t(1 - opt.target_player));
+		r.target_at = r.responses_used;
+		r.fingerprint_at_target = Fingerprint(duel);
+		r.summons_at_target = r.summon_codes.size();
+		r.burned_at_target =
+			duel.Count(uint8_t(opt.target_player), LOCATION_GRAVE) +
+			duel.Count(uint8_t(opt.target_player), LOCATION_REMOVED);
+		r.have_target = true;
+	};
+
 	if(instrument && arena)
 		arena->ResetDirtyTracking();
 
@@ -1199,17 +1224,8 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 				++r.turns;
 				// Fin du tour du joueur cible : instant ou le board cible est
 				// defini (cf. section 4 du document de conception).
-				if(r.turns == 2 && !r.have_target) {
-					r.target_self = Snapshot(duel, uint8_t(opt.target_player));
-					r.target_oppo = Snapshot(duel, uint8_t(1 - opt.target_player));
-					r.target_at = r.responses_used;
-					r.fingerprint_at_target = Fingerprint(duel);
-					r.summons_at_target = r.summon_codes.size();
-					r.burned_at_target =
-						duel.Count(uint8_t(opt.target_player), LOCATION_GRAVE) +
-						duel.Count(uint8_t(opt.target_player), LOCATION_REMOVED);
-					r.have_target = true;
-				}
+				if(r.turns == 2 && !r.have_target)
+					capture_target();
 				break;
 			case MSG_NEW_PHASE:
 				if(m.size >= 2) { uint16_t p = 0; std::memcpy(&p, m.data, 2); phase = p; }
@@ -1371,6 +1387,12 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 			break;
 		}
 	}
+	// Repli : la ligne s'arrete sans changement de tour (le joueur a quitte une
+	// fois son board pose). L'etat final EST le board cible.
+	if(!r.have_target && r.responses_used) {
+		capture_target();
+		r.target_at_is_end = true;
+	}
 	r.fingerprint_final = Fingerprint(duel);
 	r.ms = MsSince(t0);
 	return r;
@@ -1467,7 +1489,10 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 		size_t on_board = CountPresent(r.target_self.mzone) +
 						  CountPresent(r.target_self.szone);
 		size_t burned = r.target_self.grave + r.target_self.removed;
-		std::printf("\n--- board cible (fin du tour du joueur %d) ---\n",
+		std::printf("\n--- board cible (%s, joueur %d) ---\n",
+					r.target_at_is_end
+						? "FIN DE L'ENREGISTREMENT : la ligne ne passe pas le tour"
+						: "fin du tour",
 					opt.target_player);
 		std::printf("    capture apres la reponse #%zu\n", r.target_at);
 		PrintBoard(r.target_self, db);
