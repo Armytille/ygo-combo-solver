@@ -7,6 +7,7 @@
 // fidele, toute la recherche l'est aussi.
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -63,6 +64,10 @@ struct CutCounts {
 	uint64_t novel = 0, stale = 0;   // taux de nouveaute des tirages
 	size_t atoms = 0;                // largeur mesuree de la table d'atomes
 	uint64_t num_broken = 0;         // arithmetique sqrt-LTS cassee
+	// --- graphe de recettes (chantier 16) ---
+	uint64_t recipes_seen = 0;       // invocations observees et versees
+	double recipe_h_sum = 0.0;       // somme des distances evaluees
+	uint64_t recipe_h_count = 0;
 	void Add(const SearchStats& s) {
 		constraint += s.constraint_cuts;
 		guard      += s.guard_cuts;
@@ -78,6 +83,9 @@ struct CutCounts {
 		stale      += s.novelty_stale;
 		atoms       = (std::max)(atoms, s.novelty_atoms);
 		num_broken += s.levin_overflow + s.lam_saturated;
+		recipes_seen   += s.recipes_seen;
+		recipe_h_sum   += s.recipe_h_sum;
+		recipe_h_count += s.recipe_h_count;
 	}
 };
 
@@ -170,6 +178,452 @@ uint32_t FinisherDepth(uint32_t ceiling, size_t prefix) {
 	return kFinisherFallbackDepth;
 }
 
+// --- COMPTAGE DERIVE DU BOARD CIBLE (chantier 16, premier pas) ---------------
+//
+// Le board cible seul impose une ARITHMETIQUE, sans aucun modele declaratif :
+// « 3x Liger Dancer » veut dire TROIS invocations Fusion. C'est un argument sur
+// le multi-ensemble cible et la decklist, dans l'esprit du comptage
+// d'operateurs, et il donne deux choses que le solveur ecrivait a la main :
+// une borne de faisabilite plus fine, et un --summon-min DERIVE.
+//
+// LE PIEGE, et il est explicite dans la revue : on compte les EVENEMENTS
+// d'invocation, JAMAIS leurs declencheurs. « Trois Liger donc trois
+// Polymerisations » serait faux — Lunalight Wolf fusionne depuis la zone
+// Pendule sans Polymerisation. Le type de la carte cible dit quel EVENEMENT
+// doit se produire ; il ne dit rien de ce qui le declenche.
+//
+// ET LA REGLE 2 DU CHANTIER : ceci ne PRUNE jamais. Un manque de copies est
+// rapporte comme un DOUTE, pas comme une impossibilite, parce qu'une carte qui
+// copie un nom (Kaleido Chick prenant le nom de Leo Dancer) satisfait un but
+// fonde sur le code effectif sans etre une copie physique. Servir d'oracle ici
+// supprimerait des solutions en silence — la forme exacte du piege 47.
+
+constexpr uint32_t kTypeMonster  = 0x1;
+constexpr uint32_t kTypeFusion   = 0x40;
+constexpr uint32_t kTypeRitual   = 0x80;
+constexpr uint32_t kTypeSynchro  = 0x2000;
+constexpr uint32_t kTypeToken    = 0x4000;
+constexpr uint32_t kTypeXyz      = 0x800000;
+constexpr uint32_t kTypePendulum = 0x1000000;
+constexpr uint32_t kTypeLink     = 0x4000000;
+
+// Mecanisme de mise en jeu impose par le TYPE de la carte cible.
+enum class Mech { Fusion, Synchro, Xyz, Link, Ritual, MainMonster, SpellTrap };
+
+const char* MechName(Mech m) {
+	switch(m) {
+	case Mech::Fusion:      return "Fusion";
+	case Mech::Synchro:     return "Synchro";
+	case Mech::Xyz:         return "Xyz";
+	case Mech::Link:        return "Lien";
+	case Mech::Ritual:      return "Rituelle";
+	case Mech::MainMonster: return "mise en jeu (main deck)";
+	default:                return "pose/activation";
+	}
+}
+
+Mech MechOf(uint32_t type) {
+	// L'ordre compte : un Pendule peut aussi etre Synchro/Xyz/Lien, et c'est le
+	// mecanisme d'EXTRA DECK qui impose l'evenement.
+	if(type & kTypeFusion)  return Mech::Fusion;
+	if(type & kTypeSynchro) return Mech::Synchro;
+	if(type & kTypeXyz)     return Mech::Xyz;
+	if(type & kTypeLink)    return Mech::Link;
+	if(type & kTypeRitual)  return Mech::Ritual;
+	if(type & kTypeMonster) return Mech::MainMonster;
+	return Mech::SpellTrap;
+}
+
+bool FromExtraDeck(Mech m) {
+	return m == Mech::Fusion || m == Mech::Synchro || m == Mech::Xyz ||
+		   m == Mech::Link;
+}
+
+struct TargetCount {
+	uint32_t code = 0;
+	uint32_t need = 0;      // exemplaires exiges par le board cible
+	uint32_t have = 0;      // exemplaires dans la decklist (main + extra)
+	Mech mech = Mech::SpellTrap;
+	bool token = false;
+};
+
+// Rend les comptes par carte cible, et remplit `events` : mecanisme -> nombre
+// d'EVENEMENTS d'invocation exiges.
+std::vector<TargetCount> CountTarget(const BoardKey& target, const Deck& deck,
+									 const CardDB& db,
+									 std::map<Mech, uint32_t>& events) {
+	std::map<uint32_t, uint32_t> need;
+	for(uint32_t c : target.codes)
+		++need[db.Canonical(c)];
+
+	std::map<uint32_t, uint32_t> have;
+	for(const auto* list : { &deck.main, &deck.extra })
+		for(uint32_t c : *list)
+			++have[db.Canonical(c)];
+
+	std::vector<TargetCount> out;
+	for(const auto& [code, n] : need) {
+		TargetCount t;
+		t.code = code;
+		t.need = n;
+		auto it = have.find(code);
+		t.have = it == have.end() ? 0u : it->second;
+		const CardRow* row = db.Find(code);
+		t.mech = row ? MechOf(row->type) : Mech::SpellTrap;
+		t.token = row && (row->type & kTypeToken);
+		// Un Token n'est pas dans la decklist et ne s'invoque pas : il est
+		// PRODUIT par un effet. Le compter comme une invocation manquante
+		// serait un faux positif garanti.
+		if(!t.token && FromExtraDeck(t.mech))
+			events[t.mech] += n;
+		out.push_back(t);
+	}
+	std::sort(out.begin(), out.end(),
+			  [](const TargetCount& a, const TargetCount& b) {
+				  if(a.need != b.need) return a.need > b.need;
+				  return a.code < b.code;
+			  });
+	return out;
+}
+
+// Rapport, et verdict de faisabilite — un DOUTE, jamais un arret.
+// Rend le nombre de cartes dont la decklist ne peut pas fournir les copies.
+size_t ReportTargetCounting(const std::vector<TargetCount>& counts,
+							const std::map<Mech, uint32_t>& events,
+							const CardDB& db) {
+	std::printf("\n--- comptage derive du board cible ---\n");
+	std::printf("  %-9s %-6s %-6s %-24s %s\n", "exiges", "deck", "code",
+				"mecanisme", "carte");
+	size_t short_of = 0;
+	for(const TargetCount& t : counts) {
+		const bool manque = !t.token && t.have < t.need;
+		if(manque)
+			++short_of;
+		std::printf("  %-9u %-6u %-6u %-24s %s%s\n", t.need,
+					t.token ? 0u : t.have, t.code, MechName(t.mech),
+					db.Name(t.code).c_str(),
+					t.token ? "   (Token : produit par un effet)"
+							: (manque ? "   <-- la decklist n'en a pas assez"
+									  : ""));
+	}
+	if(!events.empty()) {
+		std::printf("\n  EVENEMENTS d'invocation exiges par le board seul :");
+		for(const auto& [m, n] : events)
+			std::printf("  %u %s", n, MechName(m));
+		std::printf("\n  (on compte les EVENEMENTS, jamais leurs declencheurs :"
+					" « trois Fusions » ne veut\n   pas dire « trois "
+					"Polymerisations » — une Fusion peut partir d'ailleurs.)\n");
+	}
+	if(short_of) {
+		std::printf("\n  !! FAISABILITE DOUTEUSE : %zu carte(s) cible(s) "
+					"exigent plus d'exemplaires que\n     la decklist n'en "
+					"contient. Ce n'est PAS un verdict d'impossibilite — une "
+					"carte\n     qui COPIE un nom satisfait le but sans etre "
+					"une copie physique, et le but se\n     juge sur le code "
+					"EFFECTIF. La recherche continue (regle : on pondere, on "
+					"ne\n     prune pas).\n", short_of);
+	}
+	return short_of;
+}
+
+// AMORCE DU GRAPHE DE RECETTES PAR LE TEXTE DE CARTE (chantier 16, regle 3).
+//
+// « Le texte n'est qu'une AMORCE ; la verite vient de l'observation. » La moitie
+// observationnelle seule a une limite exacte : elle n'apprend que des
+// invocations REUSSIES, et la carte qu'on cherche est precisement celle qu'aucune
+// ligne n'a jamais posee. Sans amorce, `Distance` rend son plancher pour elle et
+// `h` reste PLAT la ou il devrait renseigner.
+//
+// Le texte comble ce trou. Sa premiere ligne, pour un monstre d'extra deck, est
+// la ligne de materiaux, et son format est regulier :
+//     "Lunalight Leo Dancer" + 3 "Lunalight" monsters
+//     2 Level 4 monsters
+//
+// CE QU'ON EN PREND — et la session 10 a du elargir, mesure a l'appui.
+//
+// La session 9 ne retenait que les materiaux NOMMES ENTRE GUILLEMETS, en jugeant
+// les exigences d'archetype et de niveau « presque toujours faciles a satisfaire,
+// donc du bruit sans gradient ». Le relevé des dix cartes de l'extra deck de
+// l'etalon A dit le contraire :
+//
+//   Liger Dancer    "Lunalight Leo Dancer" + 3 "Lunalight" monsters
+//   Leo Dancer      "Lunalight Panther Dancer" + 2 "Lunalight" monsters
+//   Sabre Dancer    3 "Lunalight" monsters
+//   Perfume Dancer  2 "Lunalight" monsters
+//   Bagooska        2 Level 4 monsters          <- une carte CIBLE
+//   Dugares         2 Level 4 monsters
+//   ... (Cross-Sheep, A Bao A Qu, Tiger King, Underworld Goddess)
+//
+// HUIT cartes sur dix ne nomment AUCUNE carte : sans les exigences cardinales,
+// l'amorce ne pose qu'une seule recette et le mecanisme est vivant sans effet
+// (piege 42). Et l'argument « sans gradient » est faux dans l'autre sens : une
+// exigence CARDINALE est precisement ce qui decroit continument — « 3 monstres
+// Lunalight » perd une unite a chaque Lunalight pose, c'est-a-dire AVANT
+// qu'aucune carte cible ne touche le terrain. C'est le trou du `h` plat.
+//
+// Restent ignorees, et volontairement : les exigences de type/attribut/race
+// (« Beast-Warrior », « Effect Monsters », « including a Fiend monster ») et les
+// contraintes de distinction (« 2 monsters with different names »). Les omettre
+// SOUS-ESTIME le cout — direction sure au regard de la regle 2.
+//
+// La zone est le JOKER : le texte nomme un materiau sans dire d'ou il vient.
+// Depuis la session 10, ce joker EXCLUT le deck et l'extra deck (cf. kZoneAny) :
+// une carte qui y dort n'est pas un materiau disponible.
+
+// Un archetype se nomme dans le texte (« Lunalight »), mais le core ne connait
+// que des SETCODES numeriques, et aucune table nom -> setcode n'est disponible
+// hors de `strings.conf`. On le resout donc par le DECK lui-meme : les cartes
+// dont le nom contient le fragment doivent toutes porter un setcode commun.
+// C'est vrai par construction d'un archetype, et verifiable — le setcode retenu
+// et son nombre de fournisseurs sont imprimes.
+//
+// Rend 0 si l'intersection est vide ou si le fragment ne designe pas au moins
+// deux cartes : dans le doute, on n'amorce pas (regle 2).
+uint16_t SetcodeOfFragment(const CardDB& db, const std::vector<uint32_t>& pool,
+						   const std::string& fragment, size_t* providers) {
+	std::vector<uint16_t> common;
+	size_t matched = 0;
+	for(uint32_t code : pool) {
+		const std::string name = db.Name(code);
+		if(name.find(fragment) == std::string::npos)
+			continue;
+		const CardRow* row = db.Find(code);
+		if(!row)
+			continue;
+		std::vector<uint16_t> mine;
+		for(uint16_t sc : row->setcodes)
+			if(sc)
+				mine.push_back(sc);
+		if(mine.empty())
+			return 0;   // une carte du nom sans setcode : fragment non fiable
+		if(!matched++) {
+			common = mine;
+		} else {
+			std::vector<uint16_t> keep;
+			for(uint16_t sc : common)
+				if(std::find(mine.begin(), mine.end(), sc) != mine.end())
+					keep.push_back(sc);
+			common.swap(keep);
+		}
+		if(common.empty())
+			return 0;
+	}
+	if(matched < 2 || common.empty())
+		return 0;
+	if(providers)
+		*providers = matched;
+	return common.front();
+}
+
+// CE QUE L'AMORCE VAUT, IMPRIME ET VERIFIABLE A LA MAIN.
+//
+// Le §9.16 publiait un tableau de distances amorcees (Liger 2, Leo 1, Bagooska
+// 1) qu'AUCUNE sortie du solveur ne produisait — il venait d'une trace hors
+// outil, et le piege 64 dit ce que vaut une trace qui ne rejoue pas le code.
+// Cette table-ci sort du graphe lui-meme, par le meme `DistanceAll` que le
+// finisseur appelle.
+//
+// L'etat de reference est le TERRAIN VIDE : rien de pose, rien au cimetiere.
+// C'est le point de depart de la ligne, et c'est la seule configuration
+// definie sans rejouer un duel. Le `h` plat y vaut 1 par carte cible manquante,
+// par construction — la colonne de droite dit donc immediatement si l'amorce
+// ajoute quoi que ce soit, et de combien.
+void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
+						   const CardDB& db) {
+	if(target.codes.empty())
+		return;
+	// Presence VIDE : aucune entite nulle part. Toute exigence est donc a
+	// satisfaire, et la distance affichee est celle du depart.
+	auto none = [](const Requirement&) -> uint32_t { return 0u; };
+	std::vector<uint32_t> seen;
+	std::printf("     %-44s %-8s %s\n", "carte cible", "h plat",
+				"distance amorcee");
+	for(uint32_t code : target.codes) {
+		const uint32_t c = db.Canonical(code);
+		if(std::find(seen.begin(), seen.end(), c) != seen.end())
+			continue;
+		seen.push_back(c);
+		const std::vector<uint32_t> one{ c };
+		const uint32_t d = graph.DistanceAll(one, 0x0c /* terrain */, none);
+		std::printf("     %-44s %-8u %u%s\n", db.Name(c).c_str(), 1u, d,
+					d > 1 ? "   <-- gradient" : "   (plancher : rien a dire)");
+	}
+}
+
+size_t SeedRecipesFromText(const CardDB& db, const Deck& deck,
+						   const BoardKey& target, RecipeGraph& graph,
+						   bool cardinal) {
+	// Candidats : l'extra deck (les seules cartes a ligne de materiaux) et les
+	// cartes du board cible, qui peuvent ne pas etre dans la decklist.
+	std::vector<uint32_t> candidates;
+	for(uint32_t c : deck.extra)
+		candidates.push_back(db.Canonical(c));
+	for(uint32_t c : target.codes)
+		candidates.push_back(db.Canonical(c));
+	std::sort(candidates.begin(), candidates.end());
+	candidates.erase(std::unique(candidates.begin(), candidates.end()),
+					 candidates.end());
+
+	// DISPONIBLE DANS CE DECK : main + extra. Un materiau nomme qui n'y est pas
+	// ne peut pas etre pose par ce deck, et la recette qui l'exige est une ROUTE
+	// MORTE — la compter donnerait un cout fonde sur un chemin impossible.
+	//
+	// Le cas est reel et il a ete trouve en lisant une trace : « Lunalight Leo
+	// Dancer » n'a qu'une ligne de materiaux, « "Lunalight Panther Dancer" +
+	// 2 "Lunalight" monsters », et Panther Dancer N'EST PAS dans le deck de
+	// l'etalon A. Or Leo y est bel et bien invocable — par substitut de Fusion,
+	// par copie de nom, par un effet qui ignore les materiaux. Le texte decrit
+	// UNE voie, pas LA voie.
+	//
+	// On retombe donc au plancher pour ce produit : « on ne sait pas comment il
+	// arrive » est plus vrai que « il coute le prix d'une route impossible ».
+	// C'est la regle 2 appliquee au sens strict — on n'invente pas de cout, et
+	// on ne declare rien inatteignable non plus.
+	std::vector<uint32_t> available;
+	for(const auto* list : { &deck.main, &deck.extra })
+		for(uint32_t c : *list)
+			available.push_back(db.Canonical(c));
+	std::sort(available.begin(), available.end());
+	available.erase(std::unique(available.begin(), available.end()),
+					available.end());
+	auto in_deck = [&available](uint32_t c) {
+		return std::binary_search(available.begin(), available.end(), c);
+	};
+
+	size_t seeded = 0, dead_routes = 0, named = 0, arch = 0, lvl = 0;
+	std::vector<std::string> announced;   // fragments d'archetype deja imprimes
+	for(uint32_t code : candidates) {
+		// SEULES les cartes d'EXTRA DECK ont une ligne de materiaux. Pour toute
+		// autre, la premiere ligne du texte est de la PROSE — et une prose
+		// contient volontiers « Special Summon 1 Level 4 monster », que
+		// l'analyse ci-dessous prendrait pour une exigence. On amorcerait alors
+		// une recette a partir d'une phrase, ce qui n'est plus une amorce mais
+		// une invention (regle 2).
+		const CardRow* prow = db.Find(code);
+		if(!prow || !(prow->type & (kTypeFusion | kTypeSynchro | kTypeXyz |
+									kTypeLink)))
+			continue;
+		const std::string& line = db.MaterialLine(code);
+		if(line.empty())
+			continue;
+		std::vector<Requirement> mats;
+		bool dead = false;
+		// Analyse par jetons. Un nombre en tete qualifie ce qui SUIT :
+		//     3 "Lunalight" monsters   ->  archetype Lunalight, count 3
+		//     2 Level 4 monsters       ->  niveau 4, count 2
+		//     "Lunalight Leo Dancer"   ->  carte nommee, count 1
+		// Un nombre suivi d'autre chose (« 2+ monsters », « 4+ Effect Monsters »)
+		// est JETE : on n'en tire aucune exigence, ce qui sous-estime.
+		uint32_t pending = 0;   // 0 = aucun nombre en attente
+		for(size_t i = 0; i < line.size() && !dead;) {
+			if(std::isdigit(static_cast<unsigned char>(line[i]))) {
+				uint32_t n = 0;
+				while(i < line.size() &&
+					  std::isdigit(static_cast<unsigned char>(line[i])))
+					n = n * 10 + static_cast<uint32_t>(line[i++] - '0');
+				pending = n;
+				continue;
+			}
+			if(line[i] == '"') {
+				const size_t b = line.find('"', i + 1);
+				if(b == std::string::npos)
+					break;
+				const std::string name = line.substr(i + 1, b - i - 1);
+				const uint32_t want = pending ? pending : 1u;
+				i = b + 1;
+				pending = 0;
+				const uint32_t mc = db.CodeByExactName(name);
+				if(mc && mc != code) {
+					if(!in_deck(mc)) {
+						dead = true;   // route morte (piege 63)
+						break;
+					}
+					// « 2 "Nom" » devient DEUX exigences d'une copie, pas une
+					// exigence de deux : une carte nommee se resout par une
+					// recherche de presence (0 ou 1) et par recursion sur SA
+					// recette, deux choses qu'un compteur ne sait pas faire.
+					// Le champ `count` reste ainsi toujours 1 pour kReqCard —
+					// c'est ce qui autorise le memo de Distance a l'ignorer.
+					for(uint32_t k = 0; k < want; ++k)
+						mats.push_back(Requirement{ mc, kZoneAny, kReqCard, 1 });
+					++named;
+					continue;
+				}
+				if(mc)          // le produit se nomme lui-meme : rien a exiger
+					continue;
+				// Aucune carte de ce nom : c'est un fragment d'ARCHETYPE.
+				if(!cardinal)
+					continue;
+				size_t providers = 0;
+				const uint16_t sc =
+					SetcodeOfFragment(db, available, name, &providers);
+				if(!sc)
+					continue;   // fragment non resolu : on n'invente rien
+				// Le setcode est DEDUIT du deck, pas lu dans une table : il est
+				// imprime avec son nombre de fournisseurs pour etre verifiable.
+				if(std::find(announced.begin(), announced.end(), name) ==
+				   announced.end()) {
+					announced.push_back(name);
+					std::printf("     archetype « %s » -> setcode 0x%x, %zu "
+								"fournisseur(s) au deck\n", name.c_str(), sc,
+								providers);
+				}
+				mats.push_back(Requirement{ sc, kZoneAny, kReqSetcode,
+											static_cast<uint8_t>(want) });
+				++arch;
+				continue;
+			}
+			// « Level N » : le niveau exige suit le mot.
+			if(cardinal && pending &&
+			   line.compare(i, 6, "Level ") == 0) {
+				size_t j = i + 6;
+				uint32_t m = 0;
+				while(j < line.size() &&
+					  std::isdigit(static_cast<unsigned char>(line[j])))
+					m = m * 10 + static_cast<uint32_t>(line[j++] - '0');
+				if(m) {
+					mats.push_back(Requirement{ m, kZoneAny, kReqLevel,
+												static_cast<uint8_t>(pending) });
+					++lvl;
+					pending = 0;
+					i = j;
+					continue;
+				}
+			}
+			// Tout mot ordinaire consomme le nombre en attente : « 2+ monsters,
+			// including a Fiend monster » ne doit pas voir son « 2 » recolle a
+			// un fragment plus loin dans la ligne.
+			if(std::isalpha(static_cast<unsigned char>(line[i]))) {
+				while(i < line.size() &&
+					  (std::isalpha(static_cast<unsigned char>(line[i])) ||
+					   line[i] == '-'))
+					++i;
+				pending = 0;
+				continue;
+			}
+			++i;
+		}
+		if(dead) {
+			++dead_routes;
+			continue;
+		}
+		if(mats.empty())
+			continue;
+		// `primed` : cette recette vient du TEXTE. Elle sera ecartee des qu'une
+		// invocation reelle du meme produit aura ete observee (regle 3).
+		graph.Observe(code, mats, /*primed=*/true);
+		++seeded;
+	}
+	if(dead_routes)
+		std::printf("     (%zu recette(s) ecartee(s) : elles nomment un materiau "
+					"absent de ce deck)\n", dead_routes);
+	if(seeded)
+		std::printf("     exigences posees : %zu nommee(s), %zu archetype(s), "
+					"%zu niveau(x)%s\n", named, arch, lvl,
+					cardinal ? "" : "   (--no-seed-quant : cardinales ETEINTES)");
+	return seeded;
+}
+
 void PrintCuts(const CutCounts& c) {
 	std::printf("           elagage : contrainte %llu, garde %llu, tour %llu, "
 				"borne %llu, partition %llu, sous-ens. %llu\n",
@@ -198,6 +652,23 @@ void PrintCuts(const CutCounts& c) {
 	if(c.num_broken)
 		std::printf("           !! %llu debordement(s) arithmetiques sqrt-LTS : "
 					"ce bras est a JETER\n", (unsigned long long)c.num_broken);
+	// GRAPHE DE RECETTES : sans ces deux chiffres le mecanisme serait invisible
+	// (piege 52). `invocations observees` a zero = le graphe est VIDE, donc la
+	// distance vaut exactement le `h` plat et le mecanisme est INERTE — a savoir
+	// avant toute conclusion. `h moyen` compare a |cible manquante| dit si le
+	// paysage s'est reellement creuse.
+	//
+	// `observee(s)` compte les OCCURRENCES, rejeux de prefixe compris : une meme
+	// invocation revue a chaque re-descente compte a chaque fois. C'est le bon
+	// chiffre pour dire « le graphe a-t-il vu quelque chose », pas pour dire
+	// « combien de recettes DISTINCTES il connait ».
+	if(c.recipes_seen || c.recipe_h_count)
+		std::printf("           recettes : %llu invocation(s) observee(s), "
+					"h moyen %.2f sur %llu evaluation(s)\n",
+					(unsigned long long)c.recipes_seen,
+					c.recipe_h_count ? c.recipe_h_sum / double(c.recipe_h_count)
+									 : 0.0,
+					(unsigned long long)c.recipe_h_count);
 }
 
 struct Options {
@@ -361,6 +832,31 @@ struct Options {
 	// le defaut de la structure (64) n'etait jamais utilise (C16). Son effet se
 	// lit dans la colonne « sous-ens. » de la ligne d'elagage.
 	uint32_t max_subsets = 24;
+	// Deriver --summon-min du BOARD CIBLE au lieu de l'ecrire a la main
+	// (chantier 16, premier pas). Opt-in : une contrainte derivee change le
+	// comportement de la recherche, elle ne doit pas s'imposer en silence.
+	bool derive_summon_min = false;
+	// GRAPHE DE RECETTES (chantier 16). Trois etats :
+	//   negatif : eteint, comportement d'avant a l'octet pres ;
+	//   0.0     : le graphe est ALIMENTE et MESURE, mais n'entre pas dans le
+	//             cout — c'est le mode qui chiffre ce qu'il saurait dire AVANT
+	//             de le laisser decider (piege 40) ;
+	//   > 0     : la distance de recettes entre dans `h` avec ce poids.
+	double recipes = -1.0;
+	// Amorcer le graphe avec les materiaux NOMMES par le texte de carte
+	// (regle 3 : le texte est une AMORCE, l'observation est la verite).
+	// Sans amorce le graphe n'apprend que des invocations REUSSIES — et
+	// la carte cherchee est justement celle qu'on ne reussit jamais.
+	bool seed_recipes = true;
+	// Amorcer AUSSI les exigences CARDINALES (« 3 "Lunalight" monsters »,
+	// « 2 Level 4 monsters »). Separe de seed_recipes pour que l'A/B puisse
+	// isoler ce qu'elles apportent : sans elles l'amorce ne pose qu'une recette
+	// sur l'etalon A (huit cartes de l'extra sur dix ne nomment aucune carte).
+	bool seed_cardinal = true;
+	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
+	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
+	// eteindre l'effet n'est pas attribuable — il est seulement cru.
+	bool subsets_ascending = false;
 	// sqrt-LTS : re-enraciner le finisseur a chaque indice (chantier 10).
 	bool levin_reroot = false;
 	// sqrt-LTS-H (session 8, chantier 11 — arXiv:2605.30664 §3.2) : rerooter
@@ -471,6 +967,66 @@ struct LineConstraints {
 			   !material_req.empty();
 	}
 };
+
+// --summon-min DERIVE du comptage, au lieu d'ecrit a la main.
+//
+// Un `--summon-min "Liger Dancer:3"` tape par l'operateur est une connaissance
+// de domaine ; derive du board cible, c'est une CONSEQUENCE du but. Trois
+// gardes non negociables :
+//   - le plafond de quatre entrees de --resolve/--summon-min est respecte ;
+//   - seules les cartes d'EXTRA DECK sont retenues. Une carte de main deck peut
+//     arriver par des voies qui ne sont pas des invocations, et les pieges 28
+//     et 31 disent que --resolve ne vaut que pour des EVENEMENTS RARES : une
+//     contrainte posee sur un evenement frequent effondre la politique ;
+//   - les entrees ecrites a la main l'emportent : on complete, on ne remplace pas.
+//
+// `cons` est LU seulement (pour ne pas doubler une entree manuelle) ; l'ecriture
+// se fait dans `cfg`, c'est-a-dire dans le GUIDE DE RECHERCHE. Ce n'est pas un
+// contournement du controle « verifie avant ecriture » : une contrainte DERIVEE
+// du board cible est REDONDANTE a la verification, et pour une raison exacte —
+// si le board final porte trois Liger Dancer, alors trois invocations Fusion ont
+// necessairement eu lieu, une invocation ne posant qu'une carte. Le
+// verificateur, qui compare le board final a la cible, l'a donc deja verifiee en
+// verifiant le board. Elle sert a GUIDER plus tot, pas a JUGER plus tard.
+void DeriveSummonMin(const std::vector<TargetCount>& counts,
+					 const LineConstraints& cons, const CardDB& db,
+					 SearchConfig& cfg) {
+	constexpr size_t kMaxEntries = 4;
+	std::vector<ResolveReq> eff = cons.resolve_min;   // les manuelles d'abord
+	size_t added = 0;
+	for(const TargetCount& t : counts) {
+		if(eff.size() >= kMaxEntries)
+			break;
+		if(t.token || !FromExtraDeck(t.mech))
+			continue;
+		bool already = false;
+		for(const ResolveReq& r : eff)
+			if(r.code == t.code) { already = true; break; }
+		if(already)
+			continue;
+		ResolveReq r;
+		r.code = t.code;
+		r.min_count = t.need;
+		r.on_summon = true;
+		eff.push_back(r);
+		++added;
+	}
+	if(!added) {
+		std::printf("  --derive-summon-min : rien a deriver (aucune carte "
+					"d'extra deck libre sous le plafond de %zu).\n", kMaxEntries);
+		return;
+	}
+	cfg.resolve_min = eff;
+	std::printf("  --derive-summon-min : %zu contrainte(s) DERIVEE(S) du board "
+				"cible.\n     Guide de recherche ; redondantes a la "
+				"verification, qui juge le board lui-meme :\n", added);
+	for(const ResolveReq& r : eff)
+		std::printf("      %ux %s\n", r.min_count, db.Name(r.code).c_str());
+	if(counts.size() > kMaxEntries)
+		std::printf("      (plafond de %zu entrees : les cartes cibles au-dela "
+					"ne sont pas contraintes)\n", kMaxEntries);
+}
+
 
 void Usage() {
 	std::printf(
@@ -601,6 +1157,29 @@ void Usage() {
 		"                     appel de niveau contre ~13 824) et qui separait\n"
 		"                     les commandes de plusieurs A/B publies. Le niveau\n"
 		"                     effectif est desormais imprime dans tous les cas.\n"
+		"  --recipes <w>      GRAPHE DE RECETTES (chantier 16) : h devient la\n"
+		"                     distance en INVOCATIONS restantes sur les recettes\n"
+		"                     OBSERVEES, materiaux intermediaires compris — une\n"
+		"                     distance qui DECROIT la ou le h plat ne bouge pas.\n"
+		"                     w = 0 : le graphe est alimente et MESURE sans\n"
+		"                     entrer dans le cout (chiffrer avant de decider).\n"
+		"                     w > 0 : il pese dans h. Il ne PRUNE jamais : une\n"
+		"                     recette inconnue vaut 1, donc au pire h redevient\n"
+		"                     le h plat d'aujourd'hui.\n"
+		"  --no-seed-recipes  n'amorce PAS le graphe avec le texte de carte : le\n"
+		"                     graphe n'apprend plus que des invocations reussies.\n"
+		"  --no-seed-quant    amorce les seuls materiaux NOMMES, sans les\n"
+		"                     exigences CARDINALES (« 3 \"Lunalight\" monsters »,\n"
+		"                     « 2 Level 4 monsters »). Sur l'etalon A, huit cartes\n"
+		"                     de l'extra sur dix ne nomment aucune carte : ce\n"
+		"                     drapeau isole ce que les cardinales apportent.\n"
+		"  --derive-summon-min\n"
+		"                     derive les contraintes --summon-min du BOARD CIBLE\n"
+		"                     au lieu de les ecrire a la main : 3x Liger Dancer\n"
+		"                     = trois EVENEMENTS d'invocation Fusion (jamais\n"
+		"                     « trois Polymerisations » : le declencheur varie).\n"
+		"                     Le comptage est TOUJOURS imprime ; ce drapeau le\n"
+		"                     branche sur les contraintes.\n"
 		"  --hint-bias <b>    poids du biais d'INDICE dans l'echantillonnage\n"
 		"                     (defaut 2.0). C'est le canal par lequel la\n"
 		"                     connaissance du joueur entre : les cartes\n"
@@ -882,6 +1461,22 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				return false;
 			}
 			o.max_subsets = static_cast<uint32_t>(n);
+		} else if(a == "--recipes") {
+			const char* v = next("--recipes"); if(!v) return false;
+			o.recipes = std::atof(v);
+			if(o.recipes < 0) {
+				std::printf("!! --recipes attend un poids >= 0 (0 = alimente et "
+							"mesure sans entrer dans le cout)\n");
+				return false;
+			}
+		} else if(a == "--subsets-ascending") {
+			o.subsets_ascending = true;
+		} else if(a == "--no-seed-recipes") {
+			o.seed_recipes = false;
+		} else if(a == "--no-seed-quant") {
+			o.seed_cardinal = false;
+		} else if(a == "--derive-summon-min") {
+			o.derive_summon_min = true;
 		} else if(a == "--hint-bias") {
 			const char* v = next("--hint-bias"); if(!v) return false;
 			o.hint_bias = std::atof(v);
@@ -2174,6 +2769,7 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 	EnumOptions eo;
 	eo.dedup_by_code = true;
 	eo.max_subsets = opt.max_subsets;
+	eo.subsets_ascending = opt.subsets_ascending;
 
 	// Comparer les octets serait trop strict : EDOPro encode ses selections en
 	// bitset (type 3), l'enumerateur en liste d'index (type 2), et la
@@ -2411,6 +3007,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	}
 	cfg.enumeration.dedup_by_code = true;
 	cfg.enumeration.max_subsets = opt.max_subsets;
+	cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 	cfg.summon_constraints = cons.summons;
 	cfg.guard_after = cons.guard_after;
 	cfg.guard_clauses = cons.guard;
@@ -3202,6 +3799,7 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					EnumOptions eo;
 					eo.dedup_by_code = true;
 					eo.max_subsets = opt.max_subsets;
+					eo.subsets_ascending = opt.subsets_ascending;
 					eo.db = &db;
 					std::vector<PlanStep> steps;
 					size_t unknown = LiftPlan(pd, pa, *pr, opt.target_player,
@@ -3319,6 +3917,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					EnumOptions eo;
 					eo.dedup_by_code = true;
 					eo.max_subsets = opt.max_subsets;
+					eo.subsets_ascending = opt.subsets_ascending;
 					eo.db = &db;
 					NrpaRun run;
 					size_t unknown =
@@ -3491,6 +4090,33 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		std::printf("      (le decompose est le MEILLEUR cas du rerooting : le "
 					"papier ajoute\n       un facteur pour l'incertitude du "
 					"rerooter — c'est un plafond.)\n");
+	}
+	// PREVISION DU GAIN DES OPTIONS (chantier 17). Le seul levier identifie qui
+	// touche l'EXPOSANT et non la base — et, comme alpha pour sqrt-LTS, il est
+	// chiffrable AVANT d'ecrire le mecanisme (piege 40).
+	{
+		std::printf("  prevision du gain des OPTIONS (macros minees dans le "
+					"corpus, politique uniforme) :\n");
+		std::printf("      %-10s %-9s %-6s %10s %11s %10s %9s\n", "catalogue",
+					"support", "long.", "decisions", "avec macros",
+					"log10 d/pi", "absorbe");
+		for(const auto& [cat, sup] : { std::pair<size_t, uint32_t>{ 16, 4 },
+									   std::pair<size_t, uint32_t>{ 64, 3 },
+									   std::pair<size_t, uint32_t>{ 256, 2 } }) {
+			const OptionForecast f = ForecastOptionGain(out, cat, sup, 8);
+			if(!f.lines || !f.options) {
+				std::printf("      %-10zu %-9u  (aucune macro de ce support)\n",
+							cat, sup);
+				continue;
+			}
+			std::printf("      %-10zu %-9u %-6zu %9.0f %10.0f  %5.1f -> %-5.1f "
+						"%7.0f%%\n", f.options, sup, f.max_len, f.depth_flat,
+						f.depth_opt, f.log10_flat, f.log10_opt,
+						100.0 * f.covered);
+		}
+		std::printf("      (borne BASSE : le catalogue entier est suppose "
+					"propose a chaque decision,\n       et aucune macro n'est "
+					"creditee de raccourcir une ligne que le corpus a jouee.)\n");
 	}
 	{
 		NrpaPolicy probe;
@@ -3679,6 +4305,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		EnumOptions eo;
 		eo.dedup_by_code = true;
 		eo.max_subsets = opt.max_subsets;
+		eo.subsets_ascending = opt.subsets_ascending;
 		eo.db = &db;
 		// La valeur de retour est le nombre d'etapes NON IDENTIFIEES. Les trois
 		// autres sites l'impriment ; ici elle etait jetee, et un plan a 90 % de
@@ -3776,6 +4403,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 				EnumOptions oeo;   // enumeration ADVERSE : brute, sans nos filtres
 				oeo.dedup_by_code = true;
 				oeo.max_subsets = opt.max_subsets;
+				oeo.subsets_ascending = opt.subsets_ascending;
 				oeo.db = &db;
 				std::vector<std::vector<uint8_t>> prefix;
 				size_t oi = 0, ti = 0;
@@ -4069,6 +4697,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 								EnumOptions reo;
 								reo.dedup_by_code = true;
 								reo.max_subsets = opt.max_subsets;
+								reo.subsets_ascending = opt.subsets_ascending;
 								reo.db = &db;
 								auto ropts = Enumerate(
 									rtype, rpayload.data(),
@@ -4112,6 +4741,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						fcfg.max_solutions = 4;
 						fcfg.enumeration.dedup_by_code = true;
 						fcfg.enumeration.max_subsets = opt.max_subsets;
+						fcfg.enumeration.subsets_ascending = opt.subsets_ascending;
 						fcfg.enumeration.db = &db;
 						if(!cons.no_activate.empty())
 							fcfg.enumeration.no_activate = &cons.no_activate;
@@ -4260,6 +4890,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 									EnumOptions deo;
 									deo.dedup_by_code = true;
 									deo.max_subsets = opt.max_subsets;
+									deo.subsets_ascending = opt.subsets_ascending;
 									deo.db = &db;
 									auto cold = Enumerate(
 										sc_ptype, sc_payload.data(),
@@ -4543,6 +5174,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		EnumOptions eo;
 		eo.dedup_by_code = true;
 		eo.max_subsets = opt.max_subsets;
+		eo.subsets_ascending = opt.subsets_ascending;
 		eo.db = &db;
 		arena.Restore();
 		auto t0 = Clock::now();
@@ -4651,6 +5283,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.max_solutions = 16;
 	cfg.enumeration.dedup_by_code = true;
 	cfg.enumeration.max_subsets = opt.max_subsets;
+	cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 	cfg.enumeration.db = &db;
 	cfg.plan_window = 32;
 	cfg.summon_constraints = cons.summons;
@@ -4659,6 +5292,20 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.guard_opp_hand_release = cons.guard_opp_hand_release;
 	cfg.resolve_min = cons.resolve_min;
 	CheckSaturations(target.codes.size(), cons.resolve_min);
+	// COMPTAGE DERIVE DU BOARD CIBLE (chantier 16, premier pas). Gratuit,
+	// et il repond avant la recherche a une question qu'elle mettait des
+	// minutes a ne pas repondre : de combien d'EVENEMENTS d'invocation le
+	// board a besoin, et la decklist peut-elle seulement les fournir.
+	if(!start_yrp.decks.empty() && !target.codes.empty()) {
+		const Deck& tdeck = start_yrp.decks[
+			opt.target_player < static_cast<int>(start_yrp.decks.size())
+				? opt.target_player : 0];
+		std::map<Mech, uint32_t> events;
+		auto counts = CountTarget(target, tdeck, db, events);
+		ReportTargetCounting(counts, events, db);
+		if(opt.derive_summon_min)
+			DeriveSummonMin(counts, cons, db, cfg);
+	}
 	cfg.material_req = cons.material_req;
 	cfg.hint_cards = cons.hints;
 	cfg.levin_h = static_cast<float>(opt.levin_h);
@@ -4669,6 +5316,32 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
 				opt.hint_bias >= 0 ? "--hint-bias" : "defaut du moteur");
 	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
+	// GRAPHE DE RECETTES (chantier 16). Un seul graphe pour tout le run : les
+	// recettes sont des FAITS observes, les reunir ne peut qu'enrichir. Il doit
+	// survivre a toutes les recherches, d'ou le `static` local — la duree de vie
+	// d'un run.
+	static RecipeGraph recipe_graph;
+	if(opt.recipes >= 0) {
+		cfg.recipes = &recipe_graph;
+		cfg.recipe_h = static_cast<float>(opt.recipes);
+		std::printf("  graphe de recettes : ACTIF, poids %.2f%s\n",
+					cfg.recipe_h,
+					cfg.recipe_h == 0.0f
+						? "  (alimente et MESURE, n'entre pas dans le cout)"
+						: "  (la distance de recettes pese dans h)");
+		// AMORCE PAR LE TEXTE, sans quoi la carte jamais posee n'a aucune
+		// recette et sa distance retombe au plancher — c'est-a-dire au `h` plat.
+		if(opt.seed_recipes && !start_yrp.decks.empty()) {
+			const Deck& sd = start_yrp.decks[
+				opt.target_player < static_cast<int>(start_yrp.decks.size())
+					? opt.target_player : 0];
+			const size_t n = SeedRecipesFromText(db, sd, target, recipe_graph,
+												 opt.seed_cardinal);
+			std::printf("  amorce par le texte : %zu recette(s) posee(s), "
+						"%zu produit(s) connus\n", n, recipe_graph.Products());
+			ReportSeededDistances(target, recipe_graph, db);
+		}
+	}
 	// Optimisation de cout anytime : la recherche continue apres la premiere
 	// solution (chaque solution resserre la borne), l'ensemble par worker est
 	// borne par remplacement du pire, le score de but NRPA est lexicographique.
@@ -4849,6 +5522,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint64_t hint_seen = 0, hint_taken = 0;
 			uint64_t rr[4] = { 0, 0, 0, 0 };
 			uint64_t burn_cuts = 0, goal_hits = 0;
+			// LES CONTRAINTES COUPENT ICI, dans les tirages — pas dans les
+			// passes LDS ou `PrintCuts` les affichait deja a zero. Les brancher
+			// sur la ligne de phase des tirages etait le point 1.1/1.2 de
+			// l'audit, et c'est la seule facon de repondre a la question
+			// laissee ouverte par le §9.11 : la garde elague-t-elle utilement,
+			// ou rase-t-elle l'espace ?
+			uint64_t constraint_cuts = 0, guard_cuts = 0;
 			uint32_t overlap = 0, monsters = 0, overlap_ripped = 0;
 		};
 		ModeStats greedy, nrpa;
@@ -4965,6 +5645,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.rollouts += s.Stats().rollout_count;
 					m.cuts += s.Stats().novelty_cuts;
 					m.turn_cuts += s.Stats().turn_cuts;
+					m.constraint_cuts += s.Stats().constraint_cuts;
+					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
 					m.hint_seen += s.Stats().hint_seen;
 					m.hint_taken += s.Stats().hint_taken;
@@ -5018,6 +5700,27 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)nrpa.nodes,
 						(unsigned long long)nrpa.adapts, nrpa.overlap,
 						target.codes.size(), nrpa.monsters);
+		// Ce que les CONTRAINTES DE LIGNE coupent, PAR MODE. Trois mecanismes
+		// actifs dans tous les runs disciplines depuis la session 3, et aucun
+		// n'etait imprime LA OU IL TRAVAILLE : `PrintCuts` ne couvrait que les
+		// passes LDS, ou ils valent zero par construction (audit 1.1-1.3).
+		// `garde` repond a la question laissee ouverte par le §9.11 ;
+		// `contrainte` dit combien de tirages --resolve/--summon-min tuent ;
+		// `tour` separe « budget de decisions trop court » de « la ligne
+		// deborde du tour 1 ».
+		for(int mi = 0; mi < 2; ++mi) {
+			const ModeStats& m = mi ? nrpa : greedy;
+			if(!m.rollouts)
+				continue;
+			std::printf("      %-7s coupures : contrainte %llu, garde %llu, "
+						"tour %llu   (%.0f%% des tirages)\n",
+						mi ? "NRPA" : "glouton",
+						(unsigned long long)m.constraint_cuts,
+						(unsigned long long)m.guard_cuts,
+						(unsigned long long)m.turn_cuts,
+						100.0 * double(m.constraint_cuts + m.guard_cuts +
+									   m.turn_cuts) / double(m.rollouts));
+		}
 		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
 					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
 					best_monsters);
@@ -5456,11 +6159,24 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												  (st.levin_overflow ||
 												   st.lam_saturated)
 													  ? " !!NUM" : "");
+								char rf[32] = "";
+								if(st.levin_children && st.reroots)
+									std::snprintf(rf, sizeof(rf), " rr/ar=%.2f",
+											  double(st.reroots) /
+												  double(st.levin_children));
+								char rg[48] = "";
+								if(st.recipe_h_count)
+									std::snprintf(rg, sizeof(rg),
+												  " rec=%llu hR=%.1f",
+												  (unsigned long long)
+													  st.recipes_seen,
+												  st.recipe_h_sum /
+													  double(st.recipe_h_count));
 								std::printf("  %-14s %9llu exp. %7.1f s  best "
-											"%u/%zu%s  b=%llu  %s%s\n", lbl,
+											"%u/%zu%s%s%s  b=%llu  %s%s\n", lbl,
 											(unsigned long long)st.nodes,
 											st.ms / 1000.0, st.best_overlap,
-											target.codes.size(), rr,
+											target.codes.size(), rr, rf, rg,
 											(unsigned long long)st.edges_skipped,
 											SearchOutcome(st),
 											fs.Solutions().empty()
@@ -5807,12 +6523,28 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											  st.h_root,
 											  (st.levin_overflow ||
 											   st.lam_saturated) ? " !!NUM" : "");
+							// FRACTION des aretes qui se re-enracinent. `rr`
+							// seul ne separe pas « le rerooter mord parfois »
+							// de « il se re-enracine PARTOUT » — deux pannes
+							// opposees, et la seconde degenere le cout en
+							// mesure locale.
+							char rf[32] = "";
+							if(st.levin_children && st.reroots)
+								std::snprintf(rf, sizeof(rf), " rr/ar=%.2f",
+											  double(st.reroots) /
+												  double(st.levin_children));
+							char rg[48] = "";
+							if(st.recipe_h_count)
+								std::snprintf(rg, sizeof(rg), " rec=%llu hR=%.1f",
+											  (unsigned long long)st.recipes_seen,
+											  st.recipe_h_sum /
+												  double(st.recipe_h_count));
 							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
-										"%s  b=%llu  %s%s\n",
+										"%s%s%s  b=%llu  %s%s\n",
 										roots[i].label.c_str(),
 										(unsigned long long)st.nodes,
 										st.ms / 1000.0, st.best_overlap,
-										target.codes.size(), rr,
+										target.codes.size(), rr, rf, rg,
 										(unsigned long long)st.edges_skipped,
 										SearchOutcome(st),
 										fs.Solutions().empty() ? ""
@@ -6224,6 +6956,7 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.max_nodes = 5000000;
 		cfg.enumeration.dedup_by_code = true;
 		cfg.enumeration.max_subsets = opt.max_subsets;
+		cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 
 		Search search(duel, arena, yrp, cfg);
 		search.Run(target);

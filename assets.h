@@ -34,6 +34,16 @@ public:
 	bool Load(const std::string& workdir, std::string& error);
 
 	const CardRow* Find(uint32_t code) const;
+	// PREMIERE LIGNE du texte de carte. Pour les monstres d'extra deck c'est la
+	// ligne de MATERIAUX, et son format est regulier :
+	//     "Lunalight Leo Dancer" + 3 "Lunalight" monsters
+	//     2 Level 4 monsters
+	// C'est l'AMORCE du graphe de recettes (chantier 16, regle 3 : « le texte
+	// n'est qu'une amorce, la verite vient de l'observation »). Vide si absent.
+	const std::string& MaterialLine(uint32_t code) const;
+	// Code canonique d'une carte par son nom EXACT (0 si inconnu). Les
+	// materiaux nommes dans le texte le sont entre guillemets, exactement.
+	uint32_t CodeByExactName(const std::string& name) const;
 	// Nom lisible, pour les rapports uniquement. "?" si inconnu.
 	const std::string& Name(uint32_t code) const;
 	// Cartes dont le nom contient `needle` (insensible a la casse). Codes
@@ -64,6 +74,10 @@ private:
 	bool LoadFile(const std::string& path);
 	std::unordered_map<uint32_t, CardRow> cards;
 	std::unordered_map<uint32_t, std::string> names;
+	// Premiere ligne du texte, par code. Chargee en meme temps que les noms.
+	std::unordered_map<uint32_t, std::string> material_lines;
+	// Nom exact -> code canonique, construit apres chargement.
+	std::unordered_map<std::string, uint32_t> by_name;
 	std::vector<std::string> sources;
 	mutable std::mutex unknown_mx;
 	mutable std::set<uint32_t> unknown;

@@ -221,6 +221,7 @@ Search::Step Search::StepToPrompt() {
 	resolved_this_step = 0;
 	material_violation = false;
 	recent_materials.clear();
+	recipe_materials.clear();
 	saw_retry = false;
 	for(;;) {
 		int status = duel.Process();
@@ -228,15 +229,32 @@ Search::Step Search::StepToPrompt() {
 		for(const Message& m : msgs_scratch) {
 			switch(m.type) {
 			case MSG_MOVE:
-				// Les materiaux d'une invocation portent REASON_SYNCHRO et
-				// REASON_MATERIAL : on les accumule pour les attribuer a
-				// l'invocation qui suit dans la meme resolution.
-				if(!cfg.material_req.empty() && m.size >= 28) {
+				// Les materiaux d'une invocation portent REASON_MATERIAL : on
+				// les accumule pour les attribuer a l'invocation qui suit dans
+				// la meme resolution.
+				//
+				// La charge utile est code(4) | loc PRECEDENTE(10) | loc
+				// courante(10) | raison(4) : l'octet 5 est donc la ZONE D'OU LE
+				// MATERIAU A ETE PRIS. C'est elle qui fait du noeud du graphe de
+				// recettes une EXIGENCE (« Leo Dancer au cimetiere ») et non une
+				// carte — regle 1 du chantier 16.
+				if((!cfg.material_req.empty() || cfg.recipes) && m.size >= 28) {
 					uint32_t code = 0, reason = 0;
 					std::memcpy(&code, m.data, 4);
 					std::memcpy(&reason, m.data + 24, 4);
-					if((reason & REASON_SYNCHRO) && (reason & REASON_MATERIAL))
-						recent_materials.push_back(code);
+					const uint8_t from = m.data[5];   // location precedente
+					if(reason & REASON_MATERIAL) {
+						// --material ne connait que le cas Synchro, mesure ;
+						// le graphe de recettes, lui, prend TOUS les
+						// mecanismes — c'est tout l'interet.
+						if((reason & REASON_SYNCHRO) &&
+						   !cfg.material_req.empty())
+							recent_materials.push_back(code);
+						if(cfg.recipes)
+							recipe_materials.push_back(
+								Requirement{ duel.Db().Canonical(code),
+											 NormalizeZone(from) });
+					}
 				}
 				break;
 			case MSG_SUMMONING:
@@ -278,6 +296,18 @@ Search::Step Search::StepToPrompt() {
 						// Chaque invocation consomme ses materiaux.
 						recent_materials.clear();
 					}
+					// GRAPHE DE RECETTES : l'invocation qu'on vient de voir est
+					// une recette OBSERVEE, avec ses materiaux et leurs zones
+					// d'origine. Aucun texte de carte n'est lu (regle 3) — une
+					// Fusion depuis la zone Pendule, un substitut de Fusion ou
+					// une carte qui copie un nom s'enregistrent exactement de la
+					// meme facon, en tant que fournisseurs de plus.
+					if(cfg.recipes && code) {
+						cfg.recipes->Observe(duel.Db().Canonical(code),
+											 recipe_materials);
+						++stats.recipes_seen;
+					}
+					recipe_materials.clear();
 				}
 				++actions_this_step;
 				break;
@@ -489,6 +519,129 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 			break;
 	}
 	arena.Pop();
+}
+
+// DISTANCE SUR LE GRAPHE DE RECETTES (chantier 16).
+//
+// Somme, sur les cartes du board cible NON ENCORE POSEES, du nombre minimal
+// d'invocations restant a faire d'apres les recettes observees. Les materiaux
+// intermediaires comptent : c'est ce qui rend la distance DECROISSANTE en cours
+// de ligne, la ou le `h` plat ne bouge pas tant qu'aucune carte cible n'est
+// posee.
+//
+// LE TEST DE PRESENCE EST ZONE-AWARE, et c'est la regle 1 : « Leo Dancer au
+// CIMETIERE » n'est pas satisfait par un Leo Dancer dans l'extra deck. Le
+// releve coute UNE requete de zone par appel (cimetiere + banni), et n'est fait
+// que dans RunLevin, au developpement d'un noeud — jamais dans les tirages.
+//
+// COUT PLANCHER, JAMAIS INFINI (regle 2) : un produit sans recette connue vaut
+// 1. Le graphe vide rend donc exactement le `h` d'aujourd'hui, et l'activer ne
+// peut pas rendre un but inatteignable.
+float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
+	if(!cfg.recipes)
+		return 0.0f;
+	const auto con = static_cast<uint8_t>(cfg.target_player);
+	// Zones cachees, relevees une fois par appel. Le terrain vient de
+	// `here.codes`, deja calcule par l'appelant : rien a repayer.
+	recipe_present.clear();
+	recipe_present_info.clear();
+	// Terrain : deja calcule par l'appelant (`here.codes`), rien a repayer.
+	for(uint32_t code : here.codes)
+		recipe_present.push_back({ code, NormalizeZone(LOCATION_MZONE) });
+	// Zones cachees : une requete chacune. C'est le cout du mecanisme, et il
+	// n'est paye QUE dans RunLevin, au developpement d'un noeud — jamais dans
+	// les tirages, ou il serait redhibitoire (audit 6.1).
+	for(uint32_t loc : { LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_HAND,
+						 LOCATION_EXTRA, LOCATION_DECK }) {
+		for(const QueriedCard& c : duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS))
+			if(c.present)
+				recipe_present.push_back(
+					{ duel.Db().Canonical(c.Code()),
+					  NormalizeZone(static_cast<uint8_t>(loc)) });
+	}
+	std::sort(recipe_present.begin(), recipe_present.end(),
+			  [](const Requirement& a, const Requirement& b) {
+				  if(a.code != b.code) return a.code < b.code;
+				  return a.zone < b.zone;
+			  });
+	// Ce que chaque entite EST — niveau, archetypes, monstre ou non. Une seule
+	// recherche de base par entite presente (~60-80 par noeud developpe), au
+	// lieu d'une par exigence cardinale evaluee.
+	if(cfg.recipes->HasCardinal()) {
+		recipe_present_info.resize(recipe_present.size());
+		for(size_t i = 0; i < recipe_present.size(); ++i)
+			recipe_present_info[i] = { duel.Db().Find(recipe_present[i].code),
+									   recipe_present[i].zone };
+	}
+	// Combien d'entites presentes satisfont une exigence. Appele une fois par
+	// materiau de chaque recette exploree : recherche binaire sur la table triee
+	// pour une carte nommee, parcours pour une exigence cardinale (la table fait
+	// ~60-80 entrees et n'est triee ni sur l'archetype ni sur le niveau).
+	auto avail = [this](const Requirement& r) -> uint32_t {
+		// EXIGENCE CARDINALE : un COMPTE, pas un test de presence. La table
+		// n'est pas triee sur l'archetype ni sur le niveau — on la parcourt, et
+		// elle est courte. Le DECK et l'EXTRA sont exclus par ZoneIsPlayable :
+		// trois Lunalight qui dorment dans le deck ne sont pas trois materiaux.
+		if(r.kind != kReqCard) {
+			uint32_t n = 0;
+			for(const PresentInfo& pi : recipe_present_info) {
+				if(!pi.row || !(pi.row->type & kRecipeTypeMonster))
+					continue;
+				if(r.zone == kZoneAny ? !ZoneIsPlayable(pi.zone)
+									  : pi.zone != r.zone)
+					continue;
+				if(r.kind == kReqLevel) {
+					n += (pi.row->level & 0xff) == r.code ? 1u : 0u;
+				} else {
+					for(uint16_t sc : pi.row->setcodes)
+						if(sc && SetcodeMatches(sc,
+												static_cast<uint16_t>(r.code))) {
+							++n;
+							break;
+						}
+				}
+			}
+			return n;
+		}
+		auto by_code = [](const Requirement& a, const Requirement& b) {
+			if(a.code != b.code) return a.code < b.code;
+			return a.zone < b.zone;
+		};
+		auto it = std::lower_bound(recipe_present.begin(), recipe_present.end(),
+								   Requirement{ r.code, 0 }, by_code);
+		if(it == recipe_present.end() || it->code != r.code)
+			return 0u;
+		// Zone JOKER (exigence amorcee par le texte) : n'importe quelle zone ou
+		// un materiau se PREND. Le deck et l'extra n'en sont pas : une carte qui
+		// y dort doit encore etre invoquee, et c'est l'etape que l'on compte.
+		for(; it != recipe_present.end() && it->code == r.code; ++it) {
+			if(r.zone == kZoneAny ? ZoneIsPlayable(it->zone)
+								  : it->zone == r.zone)
+				return 1u;
+		}
+		return 0u;
+	};
+
+	// Cartes cibles manquantes : c'est sur elles que porte la distance.
+	std::vector<uint32_t> missing;
+	{
+		std::vector<uint32_t> have = here.codes;
+		for(uint32_t t : target.codes) {
+			auto it = std::find(have.begin(), have.end(), t);
+			if(it != have.end())
+				have.erase(it);
+			else
+				missing.push_back(t);
+		}
+	}
+	// UN seul appel : le verrou du graphe et la memoisation sont pris une fois
+	// pour toutes les cartes manquantes.
+	const uint32_t total = cfg.recipes->DistanceAll(
+		missing, NormalizeZone(LOCATION_MZONE), avail);
+	// Les resolutions exigees restent comptees comme avant : le graphe ne
+	// modelise que les INVOCATIONS.
+	(void)resolved;
+	return static_cast<float>(total);
 }
 
 uint32_t Search::Heuristic(const BoardKey& here) const {
@@ -2172,6 +2325,23 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			hgoal = static_cast<float>(target.codes.size() - got) +
 					static_cast<float>(resolve_target - ResolveProgress(resolved));
 		}
+		// GRAPHE DE RECETTES : la distance qui DECROIT.
+		//
+		// `h` plat compte les cartes cibles manquantes — il ne bouge pas tant
+		// qu'aucune n'est posee, c'est-a-dire sur ~90 % de la ligne. La distance
+		// de recettes compte les INVOCATIONS qui restent a faire, materiaux
+		// intermediaires compris : poser Leo Dancer au cimetiere ne pose aucune
+		// carte cible, mais fait tomber la distance a Liger Dancer de 2 a 1.
+		//
+		// Toujours EVALUEE quand le graphe existe, meme si `recipe_h` vaut 0 :
+		// c'est le mode qui chiffre ce que le graphe saurait dire AVANT de le
+		// laisser decider (piege 40 — instrumenter avant de calibrer).
+		if(cfg.recipes) {
+			const float rh = RecipeDistance(board_scratch, resolved);
+			stats.recipe_h_sum += rh;
+			++stats.recipe_h_count;
+			hgoal += cfg.recipe_h * rh;
+		}
 		// Eq. 7 : l'echelle est h a la racine de CETTE recherche (C3).
 		if(idx == 0 && cfg.reroot_h > 0) {
 			h_root = (std::max)(1.0, static_cast<double>(hgoal));
@@ -2248,8 +2418,19 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				// commentaire dit qu'il est l'instrument de « a zero, le
 				// mecanisme est inerte » — devient non nul exactement quand le
 				// calcul a casse. On compte les deux separement (4.12).
+				//
+				// MAIS la RACINE porte hu = hv = +inf PAR CONVENTION : elle n'a
+				// aucun ancetre a prolonger, donc ses enfants DOIVENT se
+				// re-enraciner, et c'est correct. Les compter comme un
+				// debordement etait un FAUX POSITIF, et il allumait le drapeau
+				// sur toutes les lignes de toutes les racines — l'instrument
+				// accusait le mecanisme de ce qui est sa definition. Le vrai
+				// debordement est celui qui part d'un parent FINI.
+				const bool parent_finite = std::isfinite(nodes[idx].hu) &&
+										   std::isfinite(nodes[idx].hv);
 				const bool overflowed =
-					!std::isfinite(ext_v) || !std::isfinite(ext_u);
+					parent_finite &&
+					(!std::isfinite(ext_v) || !std::isfinite(ext_u));
 				if(overflowed)
 					++stats.levin_overflow;
 				if(ext_v <= new_u) {
@@ -2300,6 +2481,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				lcost = std::log(static_cast<double>(child.depth) + 1.0) +
 						static_cast<double>(cfg.levin_h) * hgoal - child.logpi;
 			}
+			++stats.levin_children;
 			nodes.push_back(std::move(child));
 			pq.push({ lcost, static_cast<uint32_t>(nodes.size() - 1) });
 		}
@@ -2632,6 +2814,122 @@ CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
 		out.log10_decomp = sum_decomp / n;
 		out.segments = sum_q / n;
 		out.worst_seg_log10 = sum_worst / n;
+	}
+	return out;
+}
+
+OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
+								  size_t max_options, uint32_t min_support,
+								  size_t max_len) {
+	OptionForecast out;
+	// Les lignes du corpus, reduites a la SEQUENCE DES COUPS JOUES. C'est sur
+	// elle que se minent les macros, et sur elle que se mesure la substitution.
+	std::vector<std::vector<uint64_t>> played;
+	std::vector<std::vector<uint32_t>> legal;
+	for(const NrpaRun& r : runs) {
+		if(r.steps.empty())
+			continue;
+		played.emplace_back();
+		legal.emplace_back();
+		for(const PolicyStep& s : r.steps) {
+			played.back().push_back(s.keys[s.chosen]);
+			legal.back().push_back(
+				static_cast<uint32_t>((std::max)(s.keys.size(), size_t{ 1 })));
+		}
+	}
+	if(played.empty())
+		return out;
+
+	// MINAGE. Support d'une sous-sequence = nombre d'occurrences dans tout le
+	// corpus. Une macro ne vaut d'etre retenue que si elle revient : une
+	// sous-sequence vue une fois est une ligne, pas une option.
+	std::map<std::vector<uint64_t>, uint32_t> support;
+	for(const std::vector<uint64_t>& seq : played)
+		for(size_t i = 0; i < seq.size(); ++i)
+			for(size_t len = 2; len <= max_len && i + len <= seq.size(); ++len)
+				++support[std::vector<uint64_t>(seq.begin() + i,
+												seq.begin() + i + len)];
+
+	// SELECTION. Gain brut d'une macro = (len - 1) decisions economisees par
+	// occurrence. On trie la-dessus et on prend les `max_options` premieres :
+	// une selection gloutonne exacte (re-evaluer la perte apres chaque ajout)
+	// couterait un ordre de grandeur de plus pour un instrument dont le role
+	// est de dire OUI ou NON, pas de livrer le catalogue definitif.
+	std::vector<std::pair<double, std::vector<uint64_t>>> ranked;
+	for(const auto& [seq, n] : support) {
+		if(n < min_support)
+			continue;
+		ranked.emplace_back(static_cast<double>(n) *
+								static_cast<double>(seq.size() - 1),
+							seq);
+	}
+	std::sort(ranked.begin(), ranked.end(),
+			  [](const auto& a, const auto& b) {
+				  if(a.first != b.first) return a.first > b.first;
+				  return a.second.size() > b.second.size();
+			  });
+	std::vector<std::vector<uint64_t>> catalog;
+	for(const auto& [gain, seq] : ranked) {
+		if(catalog.size() >= max_options)
+			break;
+		catalog.push_back(seq);
+		out.max_len = (std::max)(out.max_len, seq.size());
+	}
+	out.options = catalog.size();
+	if(catalog.empty())
+		return out;
+
+	// SUBSTITUTION ET COUT. La correspondance est GLOUTONNE, la plus longue
+	// d'abord : c'est ce que ferait un enumerateur qui propose ses macros.
+	const double m = static_cast<double>(catalog.size());
+	double sum_flat = 0, sum_opt = 0, sum_dflat = 0, sum_dopt = 0;
+	size_t absorbed = 0, total_steps = 0;
+	for(size_t li = 0; li < played.size(); ++li) {
+		const std::vector<uint64_t>& seq = played[li];
+		double logpi_flat = 0, logpi_opt = 0;
+		size_t d_opt = 0;
+		for(size_t i = 0; i < seq.size();) {
+			// Cout sans options : une decision, parmi ses legaux.
+			logpi_flat += std::log10(static_cast<double>(legal[li][i]));
+			size_t best = 0;
+			for(const std::vector<uint64_t>& opt : catalog) {
+				if(opt.size() <= best || i + opt.size() > seq.size())
+					continue;
+				if(std::equal(opt.begin(), opt.end(), seq.begin() + i))
+					best = opt.size();
+			}
+			// Le denominateur porte le catalogue ENTIER : on suppose toutes les
+			// options proposees partout, ce qui MINORE le gain.
+			logpi_opt += std::log10(static_cast<double>(legal[li][i]) + m);
+			++d_opt;
+			if(best) {
+				absorbed += best;
+				// Les decisions absorbees gardent leur cout DANS le bras plat,
+				// qui doit rester la ligne complete.
+				for(size_t k = 1; k < best; ++k)
+					logpi_flat +=
+						std::log10(static_cast<double>(legal[li][i + k]));
+				i += best;
+			} else {
+				++i;
+			}
+		}
+		total_steps += seq.size();
+		sum_flat += std::log10(static_cast<double>(seq.size())) + logpi_flat;
+		sum_opt += std::log10(static_cast<double>(d_opt)) + logpi_opt;
+		sum_dflat += static_cast<double>(seq.size());
+		sum_dopt += static_cast<double>(d_opt);
+		++out.lines;
+	}
+	if(out.lines) {
+		const double n = static_cast<double>(out.lines);
+		out.log10_flat = sum_flat / n;
+		out.log10_opt = sum_opt / n;
+		out.depth_flat = sum_dflat / n;
+		out.depth_opt = sum_dopt / n;
+		out.covered = total_steps ? static_cast<double>(absorbed) /
+										static_cast<double>(total_steps)
+								  : 0.0;
 	}
 	return out;
 }

@@ -406,6 +406,47 @@ CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
 								const std::vector<NrpaRun>& runs,
 								float bias_known, float shrink);
 
+// PREVISION DU GAIN DES OPTIONS (chantier 17), calculee AVANT d'ecrire le
+// mecanisme — comme alpha l'a ete pour sqrt-LTS (piege 40).
+//
+// L'argument est arithmetique et il est le seul de la revue a toucher
+// l'EXPOSANT : le mur du §9.14 est 0,74^160. Une option — une action
+// temporellement etendue — divise l'exposant : si « invoquer Kaleido Chick et
+// envoyer Leo Dancer au cimetiere » est UNE action au lieu de huit decisions,
+// une ligne de 160 decisions devient une ligne de ~20.
+//
+// CE QUE CETTE FONCTION FAIT. Elle mine les sous-sequences frequentes des coups
+// JOUES du corpus (Macro-FF, arXiv:1109.2154 ; Castellanos-Paez,
+// arXiv:1810.09145), puis re-calcule la borne de Levin d/pi comme si ces
+// sous-sequences etaient des actions atomiques — c'est-a-dire le critere de
+// selection d'Alikhasi & Lelis (arXiv:2410.11262), qui choisit les options en
+// MINIMISANT la perte de Levin.
+//
+// SOUS POLITIQUE UNIFORME, et c'est voulu : le papier selectionne ainsi, et
+// surtout cela mesure ce que les options apportent EN PROPRE, sans confondre
+// leur apport avec ce que la politique apprise sait deja.
+//
+// DEUX CONSERVATISMES ASSUMES, pour que le chiffre soit une borne BASSE du gain
+// et non une promesse :
+//   * chaque option est supposee proposee a CHAQUE decision (le denominateur
+//     porte le catalogue entier partout), alors qu'une option n'est applicable
+//     que rarement ;
+//   * aucune option n'est creditee de rendre une ligne plus courte que ce que
+//     le corpus a effectivement joue.
+struct OptionForecast {
+	size_t options = 0;      // taille du catalogue retenu
+	size_t max_len = 0;      // longueur de la plus longue option
+	double log10_flat = 0;   // log10 de d/pi, decisions atomiques
+	double log10_opt = 0;    // log10 de d/pi, options comprises
+	double depth_flat = 0;   // profondeur moyenne d'une ligne du corpus
+	double depth_opt = 0;    // profondeur moyenne apres substitution
+	double covered = 0;      // fraction des decisions absorbees par une option
+	size_t lines = 0;
+};
+OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
+								  size_t max_options, uint32_t min_support,
+								  size_t max_len);
+
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
 // Une politique de cette forme est une fonction du couple (contexte, ensemble
@@ -586,6 +627,291 @@ private:
 	uint64_t mask = 0;
 };
 
+// --- GRAPHE DE RECETTES (chantier 16) ---------------------------------------
+//
+// LE PROBLEME QU'IL RESOUT. Notre `h` — le nombre de cartes du board cible
+// manquantes — vaut zero sur ~90 % de la ligne : le paysage est PLAT, et un
+// mecanisme de decomposition (sqrt-LTS) ne peut rien decomposer dessus. Ce qui
+// manque n'est pas l'algorithme de recherche, c'est une distance qui DECROIT
+// pendant qu'on construit.
+//
+// LA FORME. Le combo est une retrosynthese sous contrainte de materiaux de
+// depart : board cible <-> molecule, deck <-> briques achetables, main
+// d'ouverture <-> materiau impose, invocation <-> reaction, piece brulee <->
+// impasse par consommation (DESP, arXiv:2407.06334). On ne peut pas inverser un
+// ETAT DE DUEL, mais on peut inverser une INVOCATION — et on n'a meme pas
+// besoin d'un modele : le core NOUS DIT ce qui a ete consomme.
+//
+// LES TROIS REGLES, non negociables.
+//
+// 1. LE NOEUD EST UNE EXIGENCE, PAS UNE CARTE : (code effectif, zone). « Leo
+//    Dancer AU CIMETIERE », pas « la carte Leo Dancer ». Une carte qui COPIE un
+//    nom (Kaleido Chick prenant le nom de Leo Dancer) devient alors un
+//    FOURNISSEUR de plus sous le meme noeud, pas une exception a traiter — et
+//    c'est gratuit, parce que le code observe est deja le code EFFECTIF.
+//
+// 2. LE GRAPHE NE PRUNE JAMAIS, IL PONDERE. Un produit sans recette connue rend
+//    la distance PLANCHER (1), jamais l'infini. S'il servait d'oracle, une voie
+//    non modelisee supprimerait des solutions en silence — la forme exacte du
+//    piege 47. Au pire, `h` redevient le `h` plat d'aujourd'hui et on n'a rien
+//    perdu ; c'est la garantie qui rend le mecanisme sur a activer.
+//
+// 3. LA VERITE VIENT DE L'OBSERVATION, pas du texte de carte. Chaque invocation
+//    executee dit quelles entites ont ete consommees et depuis quelles zones.
+//    Aucun dictionnaire a maintenir, aucun reseau a entrainer.
+
+// GENRE d'exigence. Le nœud OU de la regle 1 n'est pas toujours nommable par un
+// code : la moitie des lignes de materiaux d'un extra deck n'exige AUCUNE carte
+// precise (mesure sur l'etalon A : 8 cartes sur 10).
+//
+//   "Lunalight Leo Dancer" + 3 "Lunalight" monsters   <- 1 nommee + 3 archetype
+//   2 Level 4 monsters                                <- 2 niveau, 0 nommee
+//
+// Une exigence CARDINALE (« trois monstres Lunalight ») porte de surcroit le
+// gradient que le `h` plat n'a pas : elle decroit d'une unite a chaque Lunalight
+// pose, c'est-a-dire AVANT qu'aucune carte cible ne soit sur le terrain.
+enum ReqKind : uint8_t {
+	kReqCard = 0,      // `code` est un code de carte canonique
+	kReqSetcode = 1,   // `code` est un setcode d'archetype (0xdf = Lunalight)
+	kReqLevel = 2,     // `code` est un NIVEAU (2 Level 4 monsters -> code 4)
+};
+
+struct Requirement {
+	uint32_t code = 0;    // code CANONIQUE effectif, ou setcode, ou niveau
+	uint8_t zone = 0;     // zone NORMALISEE (cf. NormalizeZone)
+	uint8_t kind = kReqCard;
+	// Exemplaires exiges. TOUJOURS 1 pour kReqCard — « 2 "Nom" » est pose comme
+	// deux exigences d'une copie, parce qu'une carte nommee se resout par
+	// presence et par recursion sur sa recette, pas par un compteur. C'est ce
+	// qui autorise le memo de Distance a ne pas porter ce champ.
+	uint8_t count = 1;
+	bool operator==(const Requirement& o) const {
+		return code == o.code && zone == o.zone && kind == o.kind &&
+			   count == o.count;
+	}
+};
+
+// Zone JOKER : « n'importe ou l'on peut PRENDRE un materiau ». Le texte de carte
+// nomme un materiau sans dire d'ou il vient — et c'est correct, une Fusion prend
+// ses materiaux du terrain, de la main, parfois du cimetiere ou de la zone
+// bannie. Une exigence amorcee par le texte porte donc 0, et l'observation, qui
+// produit toujours une zone concrete, affine ensuite ce que le texte laisse
+// ouvert (regle 3).
+//
+// MAIS « n'importe ou » N'INCLUT NI LE DECK NI L'EXTRA DECK, et c'est la
+// difference entre un mecanisme qui mord et un mecanisme inerte. Une carte qui
+// dort dans l'extra deck n'est pas un materiau disponible : il faut d'abord
+// l'invoquer, et c'est EXACTEMENT l'etape que le graphe doit compter. Compter
+// l'extra rendait « Lunalight Leo Dancer present » vrai des le premier noeud —
+// Leo y est en deux exemplaires — donc la distance a Liger Dancer retombait a
+// son plancher de 1, c'est-a-dire au `h` plat, sur le seul cas ou l'amorce a
+// quelque chose a dire. Le mecanisme etait VIVANT et sans effet (piege 42).
+constexpr uint8_t kZoneAny = 0;
+
+// Les zones ou un materiau est DISPONIBLE, par opposition a celles ou une carte
+// n'est qu'en reserve. Sert au joker ci-dessus.
+inline bool ZoneIsPlayable(uint8_t normalized_zone) {
+	return normalized_zone == 0x0c ||   // terrain (MZONE | SZONE)
+		   normalized_zone == 0x02 ||   // main
+		   normalized_zone == 0x10 ||   // cimetiere
+		   normalized_zone == 0x20;     // bannie
+}
+
+// TYPE_MONSTER d'ocgcore. Une exigence cardinale porte toujours sur des
+// MONSTRES (« 3 "Lunalight" monsters ») : compter les magies et pieges de
+// l'archetype la satisferait sans qu'aucun materiau soit disponible.
+constexpr uint32_t kRecipeTypeMonster = 0x1;
+
+// Correspondance de setcodes, telle que le core la definit. Un setcode tient
+// sur 16 bits : les 12 bits bas sont l'archetype, les 4 bits hauts un
+// sous-archetype. « Lunalight » (0x9d) doit matcher « Lunalight Dancer »
+// (0x109d) mais pas l'inverse — d'ou l'asymetrie du masque haut.
+inline bool SetcodeMatches(uint16_t card_setcode, uint16_t wanted) {
+	if((card_setcode & 0x0fffu) != (wanted & 0x0fffu))
+		return false;
+	return (card_setcode & wanted & 0xf000u) == (wanted & 0xf000u);
+}
+
+// Zones ramenees a six seaux. MZONE et SZONE sont confondus en « terrain » :
+// la distinction ne change pas ce qu'une recette peut consommer, et la garder
+// couterait une requete de zone de plus par evaluation. Toute zone inconnue
+// tombe sur « terrain » plutot que de creer un seau fantome.
+//
+// La normalisation doit etre appliquee des DEUX cotes — a l'observation du
+// materiau et au test de presence — sinon une exigence ne serait jamais
+// satisfaite et la distance serait fausse dans le sens dangereux (surestimee
+// partout, donc plate a nouveau).
+inline uint8_t NormalizeZone(uint8_t loc) {
+	if(loc & 0x02) return 0x02;   // HAND
+	if(loc & 0x10) return 0x10;   // GRAVE
+	if(loc & 0x20) return 0x20;   // REMOVED
+	if(loc & 0x40) return 0x40;   // EXTRA
+	if(loc & 0x01) return 0x01;   // DECK
+	return 0x0c;                  // ONFIELD (MZONE | SZONE)
+}
+
+class RecipeGraph {
+public:
+	// PARTAGE ENTRE WORKERS. Les recettes sont des faits observes : les reunir
+	// ne peut qu'enrichir, jamais contredire — c'est ce qui rend un graphe
+	// unique legitime. Mais seize workers ecrivent dedans, donc l'acces est
+	// verrouille. Le verrou est pris UNE FOIS au sommet : `Distance` est
+	// recursive, et un mutex non recursif pris a chaque niveau se bloquerait
+	// lui-meme.
+	//
+	// Cout : `Observe` est rare (une invocation), `Distance` est appelee une
+	// fois par noeud DEVELOPPE du finisseur — jamais dans les tirages. Le
+	// chemin chaud des tirages ne prend donc jamais ce verrou.
+	// `primed` = recette AMORCEE PAR LE TEXTE, par opposition a une invocation
+	// reellement observee. La distinction n'est pas decorative : l'amorce ne
+	// modelise pas tout ce que le texte exige — ni type, ni attribut, ni race,
+	// ni « noms differents » — donc ses recettes restent SYSTEMATIQUEMENT moins
+	// cheres que les vraies. Un `min` naif les ferait gagner a tous les coups et
+	// l'observation ne pourrait JAMAIS les corriger — ce qui retourne la regle 3
+	// (« le texte n'est qu'une amorce ; la verite vient de l'observation »)
+	// exactement a l'envers.
+	void Observe(uint32_t product, const std::vector<Requirement>& mats,
+				 bool primed = false) {
+		if(!product)
+			return;
+		for(const Requirement& m : mats)
+			if(m.kind != kReqCard) {
+				has_cardinal.store(true, std::memory_order_relaxed);
+				break;
+			}
+		std::lock_guard<std::mutex> lk(mx);
+		auto& list = recipes[product];
+		for(Recipe& r : list) {
+			if(r.materials == mats) {
+				++r.seen;
+				// Une recette d'abord amorcee puis CONSTATEE devient une
+				// observation : le texte disait vrai.
+				r.primed = r.primed && primed;
+				return;
+			}
+		}
+		if(list.size() < kMaxPerProduct)
+			list.push_back({ mats, 1, primed });
+	}
+
+	// Somme des distances a plusieurs produits, sous un meme etat de presence.
+	//
+	// UN SEUL VERROU pour tout l'appel, et UNE SEULE memoisation : sans elle la
+	// recursion est exponentielle — jusqu'a `recettes x materiaux` par niveau,
+	// soit ~40^6 dans le pire cas, ce qui ferait PENDRE le finisseur au lieu de
+	// le ralentir. Le memo est valable pour la duree de l'appel parce que
+	// `present` y est constant.
+	//
+	// Jamais infinie (regle 2). `budget` borne la profondeur : les recettes
+	// forment un graphe cyclique (A consomme B ici, B consomme A ailleurs) et
+	// rien ne garantit qu'il soit acyclique.
+	// `avail` rend le NOMBRE d'entites presentes qui satisfont une exigence — 0
+	// ou 1 pour une carte nommee, un compte pour une exigence cardinale.
+	template<typename Avail>
+	uint32_t DistanceAll(const std::vector<uint32_t>& codes, uint8_t zone,
+						 const Avail& avail, uint32_t budget = 6) const {
+		std::lock_guard<std::mutex> lk(mx);
+		std::unordered_map<uint64_t, uint32_t> memo;
+		uint32_t total = 0;
+		for(uint32_t c : codes)
+			total += DistanceLocked(Requirement{ c, zone, kReqCard, 1 }, avail,
+									budget, memo);
+		return total;
+	}
+
+	size_t Products() const {
+		std::lock_guard<std::mutex> lk(mx);
+		return recipes.size();
+	}
+	// Le graphe porte-t-il au moins une exigence CARDINALE ? Sans elle, relever
+	// niveau et archetypes de chaque entite presente serait un cout paye pour
+	// rien a chaque noeud developpe. Drapeau pose a l'amorce, jamais retire :
+	// une observation n'en cree pas.
+	bool HasCardinal() const { return has_cardinal.load(std::memory_order_relaxed); }
+	size_t Size() const {
+		std::lock_guard<std::mutex> lk(mx);
+		size_t n = 0;
+		for(const auto& [k, v] : recipes)
+			n += v.size();
+		return n;
+	}
+
+private:
+	struct Recipe {
+		std::vector<Requirement> materials;
+		uint32_t seen = 0;
+		bool primed = false;   // issue du TEXTE, pas d'une invocation observee
+	};
+	// Une carte a rarement plus de quelques voies distinctes ; le plafond evite
+	// qu'un bruit d'observation (memes materiaux dans un ordre different) ne
+	// fasse enfler la liste sans rien apprendre.
+	static constexpr size_t kMaxPerProduct = 8;
+
+	template<typename Avail>
+	uint32_t DistanceLocked(const Requirement& req, const Avail& avail,
+							uint32_t budget,
+							std::unordered_map<uint64_t, uint32_t>& memo) const {
+		const uint32_t have = avail(req);
+		// EXIGENCE CARDINALE : on ne recurse pas. Aucun produit n'est nomme —
+		// « trois monstres Lunalight » ne designe pas une carte a fabriquer,
+		// mais un COMPTE a atteindre. Chaque exemplaire manquant coute une
+		// unite, ce qui sous-estime (poser un monstre coute au moins une
+		// action) : la direction sure de la regle 2, et le gradient est la —
+		// il decroit a chaque exemplaire pose, meme quand aucune carte cible
+		// n'arrive sur le terrain.
+		if(req.kind != kReqCard)
+			return have >= req.count ? 0u : req.count - have;
+		if(have)
+			return 0;
+		if(!budget)
+			return 1;   // plancher : on ne declare jamais inatteignable
+		// La cle porte le budget : la valeur en depend, et confondre deux
+		// budgets rendrait la distance dependante de l'ordre de visite. Elle
+		// porte aussi le genre : deux exigences de meme `code` et de genres
+		// differents (un setcode 4 et une carte de code 4 sont des objets sans
+		// rapport) se confondraient sinon dans le memo.
+		// Decalage de 16, pas de 12 : `zone` va jusqu'a 0x40, donc `zone << 4`
+		// occupe les bits 4 a 14 et empietait sur `code << 12` — un faux succes
+		// de cache, c'est-a-dire une distance FAUSSE et silencieuse.
+		const uint64_t key =
+			(static_cast<uint64_t>(req.code) << 24) |
+			(static_cast<uint64_t>(req.kind) << 20) |
+			(static_cast<uint64_t>(req.zone) << 4) | budget;
+		auto mit = memo.find(key);
+		if(mit != memo.end())
+			return mit->second;
+		auto it = recipes.find(req.code);
+		if(it == recipes.end() || it->second.empty()) {
+			memo.emplace(key, 1u);
+			return 1;   // recette inconnue -> exactement le `h` plat d'avant
+		}
+		// L'OBSERVATION PRIME SUR LE TEXTE (regle 3). Des qu'une invocation
+		// reelle de ce produit a ete vue, les recettes amorcees sont ignorees :
+		// elles sont incompletes par construction, donc trop bon marche, et les
+		// garder dans le `min` reviendrait a preferer une estimation a un fait.
+		bool has_observed = false;
+		for(const Recipe& r : it->second)
+			if(!r.primed) { has_observed = true; break; }
+		uint32_t best = 0xffffffffu;
+		for(const Recipe& r : it->second) {
+			if(has_observed && r.primed)
+				continue;
+			uint32_t cost = 1;   // l'invocation elle-meme
+			for(const Requirement& m : r.materials)
+				cost += DistanceLocked(m, avail, budget - 1, memo);
+			best = (std::min)(best, cost);
+		}
+		const uint32_t out = best == 0xffffffffu ? 1u : best;
+		memo.emplace(key, out);
+		return out;
+	}
+
+	mutable std::mutex mx;
+	std::unordered_map<uint32_t, std::vector<Recipe>> recipes;
+	// Hors du mutex : lu a chaque noeud developpe, ecrit une fois a l'amorce.
+	std::atomic<bool> has_cardinal{ false };
+};
+
 struct SearchConfig {
 	int target_player = 0;
 	uint32_t max_decisions = 24;      // profondeur, en decisions
@@ -745,6 +1071,16 @@ struct SearchConfig {
 	// une recurrence a deux termes (cf. RunLevin) : prolonger le meilleur ancetre
 	// courant, ou se re-enraciner sur le parent.
 	float reroot_h = 0.0f;
+	// --- graphe de recettes (chantier 16) ---
+	// Non nul : le graphe est ALIMENTE par les invocations observees, et `h`
+	// devient la distance sur ce graphe au lieu du compte de cartes manquantes.
+	// Nul : comportement d'avant, a l'octet pres. Le graphe appartient au
+	// Search ; le pointeur permet d'en servir un pre-appris.
+	RecipeGraph* recipes = nullptr;
+	// Poids de la distance de recettes dans `h`. 0 = le graphe est ALIMENTE et
+	// MESURE mais n'entre pas dans le cout : c'est le mode qui chiffre ce que
+	// le graphe saurait dire avant de le laisser decider (piege 40).
+	float recipe_h = 0.0f;
 	// Poids d'une resolution exigee (--resolve) dans le gradient des tirages.
 	// A 100 (une carte cible), les lignes 8/8 SANS rip gagnent la course
 	// d'adaptation contre les lignes rip-partielles (mesure session 4 :
@@ -926,6 +1262,17 @@ struct SearchStats {
 	// (un indice y est tombe). Sans ce compteur, un rerooting inactif serait
 	// indiscernable d'un rerooting inutile — piege 40.
 	uint64_t reroots = 0;
+	// --- graphe de recettes ---
+	// Invocations OBSERVEES et versees au graphe. A zero, le graphe est vide et
+	// la distance de recettes vaut exactement le `h` plat d'aujourd'hui : le
+	// mecanisme est alors inerte, et il faut le savoir AVANT de conclure
+	// (pieges 40 et 52).
+	uint64_t recipes_seen = 0;
+	// Somme des distances de recettes evaluees, et leur compte : leur rapport
+	// est le `h` MOYEN que le graphe produit. Compare a |cible manquante|, il
+	// dit si le paysage s'est reellement creuse ou s'il est reste plat.
+	double recipe_h_sum = 0.0;
+	uint64_t recipe_h_count = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -935,6 +1282,11 @@ struct SearchStats {
 	// degenere. A non nul, le bras est a JETER, pas a interpreter — sans ces
 	// trois compteurs, un mecanisme qui s'est eteint tout seul se lisait comme
 	// un mecanisme qui a perdu (4.12).
+	// Enfants ENGENDRES par le finisseur. Rapporte a `reroots`, il dit quelle
+	// FRACTION des aretes se re-enracine — la seule facon de distinguer « le
+	// rerooter mord parfois » de « il se re-enracine partout », qui sont deux
+	// pannes opposees et que `reroots` seul ne separe pas.
+	uint64_t levin_children = 0;
 	uint64_t levin_overflow = 0;
 	uint64_t reroot_by_overflow = 0;
 	uint64_t lam_saturated = 0;
@@ -1165,6 +1517,9 @@ private:
 	// Prend le board deja calcule — c'etait le point chaud : deux requetes de
 	// zone par fils evalue, dont une redondante avec ComputeBoardKey.
 	uint32_t Heuristic(const BoardKey& here) const;
+	// Distance sur le graphe de recettes (chantier 16). Non const : releve les
+	// zones cachees et remplit un tampon reutilise.
+	float RecipeDistance(const BoardKey& here, uint64_t resolved);
 	// Suivi de la meilleure approche + test de but. Rend true si `here` EST la
 	// cible ET que les minimums de resolutions sont atteints. Factorise ce que
 	// chaque strategie dupliquait. En mode anytime, l'enregistrement passe par
@@ -1219,6 +1574,23 @@ private:
 	// Materiaux (codes) envoyes par la resolution en cours, pour attribution a
 	// l'invocation qui suit.
 	std::vector<uint32_t> recent_materials;
+	// Materiaux de l'invocation en cours, AVEC leur zone d'origine : c'est la
+	// matiere premiere du graphe de recettes (chantier 16, regle 1).
+	std::vector<Requirement> recipe_materials;
+	// Exigences satisfaites dans l'etat courant, tampon reutilise entre appels.
+	std::vector<Requirement> recipe_present;
+	// Ce que les entites presentes SONT, pour les exigences cardinales : un
+	// archetype ou un niveau ne se lit pas sur un code. Rempli en meme temps que
+	// `recipe_present` (meme indice) pour ne pas repayer une recherche de base
+	// par exigence evaluee.
+	// Un POINTEUR vers la ligne de base, jamais une copie : copier le vecteur de
+	// setcodes ferait ~80 allocations par noeud developpe, sur le chemin que
+	// l'audit 6.1 designe comme le plus chaud du finisseur.
+	struct PresentInfo {
+		const CardRow* row = nullptr;
+		uint8_t zone = 0;
+	};
+	std::vector<PresentInfo> recipe_present_info;
 	// Changements de tour vus par le dernier StepToPrompt. Le board cible est
 	// celui de la fin du tour 1 : au-dela, il est fige et tout etat explore est
 	// du temps perdu.

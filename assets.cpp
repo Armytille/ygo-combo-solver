@@ -77,12 +77,28 @@ bool CardDB::LoadFile(const std::string& path) {
 
 	// Les noms ne servent qu'aux rapports : leur absence n'est pas une erreur.
 	sqlite3_stmt* ns = nullptr;
-	if(sqlite3_prepare_v2(db, "SELECT id,name FROM texts", -1, &ns, nullptr) == SQLITE_OK) {
+	if(sqlite3_prepare_v2(db, "SELECT id,name,desc FROM texts", -1, &ns,
+						  nullptr) == SQLITE_OK) {
 		while(sqlite3_step(ns) == SQLITE_ROW) {
+			const uint32_t id = static_cast<uint32_t>(sqlite3_column_int64(ns, 0));
 			const unsigned char* nm = sqlite3_column_text(ns, 1);
 			if(nm && *nm)
-				names[static_cast<uint32_t>(sqlite3_column_int64(ns, 0))] =
-					reinterpret_cast<const char*>(nm);
+				names[id] = reinterpret_cast<const char*>(nm);
+			// PREMIERE LIGNE du texte : pour un monstre d'extra deck c'est la
+			// ligne de MATERIAUX, et c'est tout ce dont l'amorce du graphe de
+			// recettes a besoin. On ne garde pas le reste : le texte complet
+			// pese des centaines de Mo sur l'ensemble des bases.
+			const unsigned char* ds = sqlite3_column_text(ns, 2);
+			if(ds && *ds) {
+				std::string d = reinterpret_cast<const char*>(ds);
+				const size_t nl = d.find('\n');
+				if(nl != std::string::npos)
+					d.resize(nl);
+				while(!d.empty() && (d.back() == '\r' || d.back() == ' '))
+					d.pop_back();
+				if(!d.empty())
+					material_lines[id] = std::move(d);
+			}
 		}
 		sqlite3_finalize(ns);
 	}
@@ -149,6 +165,14 @@ bool CardDB::Load(const std::string& workdir, std::string& error) {
 	for(const auto& p : paths)
 		LoadFile(p.string());
 
+	// Index nom EXACT -> code canonique. Deux illustrations de la meme carte
+	// portent le meme nom : on garde le code canonique, sinon un materiau nomme
+	// par le texte designerait un exemplaire et non une carte.
+	for(const auto& [code, name] : names) {
+		const uint32_t canon = Canonical(code);
+		by_name.emplace(name, canon);
+	}
+
 	if(cards.empty()) {
 		error = "aucune carte chargee depuis " + workdir +
 				" (expansions/*.cdb et repositories/**/*.cdb introuvables ou vides)";
@@ -160,6 +184,17 @@ bool CardDB::Load(const std::string& workdir, std::string& error) {
 const CardRow* CardDB::Find(uint32_t code) const {
 	auto it = cards.find(code);
 	return it == cards.end() ? nullptr : &it->second;
+}
+
+const std::string& CardDB::MaterialLine(uint32_t code) const {
+	static const std::string kEmpty;
+	auto it = material_lines.find(code);
+	return it == material_lines.end() ? kEmpty : it->second;
+}
+
+uint32_t CardDB::CodeByExactName(const std::string& name) const {
+	auto it = by_name.find(name);
+	return it == by_name.end() ? 0u : it->second;
 }
 
 void CardDB::NoteUnknown(uint32_t code) const {

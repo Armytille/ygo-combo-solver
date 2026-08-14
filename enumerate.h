@@ -101,6 +101,12 @@ struct EnumOptions {
 	// preuve d'absence portant sur un prompt de somme n'en est plus une (C9).
 	// Non nul, il pointe un compteur propre au Search appelant.
 	uint64_t* subsets_capped = nullptr;
+	// ORDRE HISTORIQUE (tailles croissantes), pour ATTRIBUER le correctif C9.
+	// L'ordre par defaut alterne depuis les deux bouts ; celui-ci restaure le
+	// parcours croissant qui, a cap = 24 sur 24 candidats, n'emettait que des
+	// singletons. Sert uniquement d'A/B : un correctif dont on ne peut pas
+	// eteindre l'effet n'est pas attribuable.
+	bool subsets_ascending = false;
 	// N'explore qu'une zone libre representative par type de zone. Faux par
 	// defaut : les fleches de lien et les colonnes peuvent tout changer.
 	bool canonical_zones = false;

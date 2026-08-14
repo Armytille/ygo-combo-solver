@@ -2225,40 +2225,54 @@ et non le facteur 1/8 que le plan de correctifs annonçait, lui aussi écrit sou
 `h_root = 1`. La correction du plan est notée ici plutôt que passée sous silence : elle a
 coûté un cadran mal centré (voir (d)).
 
-**(d) Le cadran α refait, et ce qu'il vaut.**
+**(d) Le cadran α refait et PROLONGÉ — le rerooter doux est réfuté.**
 
-`tools/s9_ab_alpha.ps1`, montage étalon 0 inchangé (racines imposées, politique vide,
-déterministe). Cartes cumulées sur les quatre racines comparées, témoin = aucun rerooter :
+Montage étalon 0 inchangé (racines imposées par `--approach`, politique vide par `--no-nrpa`,
+régime but seul par `--no-plan`) : l'A/B est DÉTERMINISTE, seule la fonction de coût change.
+Le contrôle `recul 0` rend **42 expansions, `b=0`, ÉPUISÉ dans les neuf bras** — une fonction
+de coût change l'ordre, pas l'ensemble atteignable.
 
-| bras | α | recul 10 | recul 20 | recul 30 | recul 45 | cumul | `rr` au contrôle |
-|---|---|---|---|---|---|---|---|
-| T | — | 6 | 5 | 4 | 5 | **20** | — |
-| A1 | 1 | 4 | 4 | 5 | 5 | 18 | 123 |
-| A2 | 2 | 6 | 3 | 3 | 5 | 17 | 118 |
-| A3 | 3 | 6 | 3 | 3 | 5 | 17 | 118 |
-| A5 | 5 | 6 | 4 | 3 | 5 | 18 | 83 |
-| A8 | 8 | 6 | 4 | 3 | 5 | 18 | **3** |
+Un premier cadran (α = 1/2/3/5/8) a été construit sur l'arithmétique fausse ci-dessus
+(`α_s9 = α_s8/8`) et couvrait donc **entièrement sous** le point où la session 8 avait vu son
+gain. Il a été refait et prolongé jusqu'à α = 28 — `tools/s9_ab_alpha_complet.ps1` — sur un
+**seul binaire**, parce que le gating de la nouveauté (audit 3.7) avait entre-temps changé le
+débit de +20 % : prolonger sur un autre binaire aurait comparé des bras qui n'explorent pas à
+la même vitesse.
 
-Le contrôle `recul 0` rend 42 expansions, `b=0`, ÉPUISÉ dans les **six** bras.
+**Le cadran PROLONGÉ, neuf bras sur un seul binaire, et ce qu'il établit.** Le cumul seul ne
+dit rien d'interprétable ; il faut le lire avec `rr`/expansion, c'est-à-dire avec le taux
+auquel le re-enracinement bat la prolongation. Témoin = 20 cartes cumulées.
 
-**Ce cadran est mal centré, et je le dis avant d'en tirer quoi que ce soit.** Il a été construit
-sur l'arithmétique fausse ci-dessus (α_s9 = α_s8/8). Ses équivalents session 8 vont de ~1,5 à
-~13 : il couvre **entièrement sous** le point où la session 8 avait vu son gain (α_s8 = 25,
-équivalent ~12,5 à 18,75). Il mesure la queue basse du mécanisme, pas son optimum.
+| α | 1 | 2 | 3 | 5 | 8 | 12 | 16 | 20 | 28 |
+|---|---|---|---|---|---|---|---|---|---|
+| cumul | 18 | 17 | 17 | 18 | 18 | **20** | **20** | **21** | **20** |
+| `rr`/expansion | 2,3–2,8 | 2,1–3,6 | 2,1–3,2 | 2,2–3,1 | 2,1–3,4 | 1,5–3,9 | 0,1–1,3 | 0,1–0,4 | **0,0** |
 
-Ce qu'il établit est donc étroit, mais net : **sur toute cette bande le rerooter doux perd**
-(17-18 contre 20), en cuvette peu profonde de minimum α = 2-3. C'est cohérent avec le bras H8
-de la session 8, le plus mauvais du cadran d'alors.
+Les deux lignes racontent **une seule** histoire, et elle est monotone.
 
-**Et la colonne `rr` du contrôle dit quelque chose que le cumul ne dit pas** : 123, 118, 118,
-83, **3**. Le re-enracinement cesse de battre la prolongation à mesure que α monte — à α = 8 il
-ne gagne plus que 3 fois sur la racine de contrôle. Le mécanisme *s'éteint* par le haut. Ce
-n'est pas une conjecture sur la suite du cadran, c'est la lecture directe du compteur que le
-piège 52 impose de lire avant de conclure : **le prolongement vers α = 12-28 risque de mesurer
-un mécanisme inerte, c'est-à-dire de retrouver le témoin**, ce qui serait une explication du
-« gain » marginal de la session 8 plutôt qu'une confirmation. Le script est écrit
-(`tools/s9_ab_alpha_haut.ps1`, α = 12/16/20/28) précisément pour trancher entre les deux, et
-il faut le lire avec `rr` sous les yeux (piège 46 : encadrer, pas atteindre).
+- **α ≤ 8 : le rerooter est SATURÉ.** Il se re-enracine 2 à 3 fois par expansion, c'est-à-dire
+  sur la majorité des arêtes engendrées. Le coût dégénère en mesure locale — et il **perd**
+  (17-18 contre 20).
+- **α ≥ 16 : le rerooter est INERTE.** À α = 28 il ne se déclenche plus du tout (`rr` = 2 et 8
+  sur des dizaines de milliers d'expansions).
+- **Et c'est exactement là que le cumul rejoint le témoin** : 20, 20, 21, 20.
+
+**Le « gain » de la session 8 est donc expliqué, et il n'en était pas un.** α_s8 = 25 correspond
+à α_s9 ≈ 12-19 — précisément la bande où le mécanisme s'éteint. Le 21 contre 20 n'est pas un
+rerooter qui travaille mieux : c'est un rerooter qui **se débranche**, la recherche qui redevient
+le témoin, et une carte d'écart qui est du bruit de run. Le seul point du cadran au-dessus du
+témoin se trouve dans le régime où le mécanisme ne fait plus rien.
+
+**Il n'existe aucun α où le rerooter doux gagne en travaillant.** Quand il agit il perd ; quand
+il ne perd plus, c'est qu'il n'agit plus. Le mécanisme est désactivé par défaut et le reste.
+
+*Ce que j'ai écrit à mi-parcours et qui était faux.* Sur la seule plage α ∈ [1, 8], `rr` ne
+bougeait pas, et j'en avais tiré une explication structurelle — « `hu` compose le long du chemin
+alors que `inv_w` est borné, donc prolonger ne peut plus gagner, quel que soit α ». La plage
+complète montre une transition nette entre 12 et 20 : l'affirmation « quel que soit α » était
+une extrapolation depuis un tiers du domaine. Le mécanisme d'extinction est bien celui décrit
+(la compétition entre un terme qui compose et un terme borné), mais le point de bascule est
+atteignable, et c'est le prolongement du cadran qui l'a montré — piège 46, encore.
 
 **(e) Six mécanismes d'élagage chiffrés pour la première fois.**
 
@@ -2344,15 +2358,24 @@ run de santé lui-même. `partition 4` : le travail est **cédé** à un autre w
 c'est exactement la distinction qui manquait à la session 8. `sous-ens. 1` : le plafond
 d'énumération mord une fois par passe, sur la ligne de référence, et personne ne le savait.
 
-**Ce que la session 9 a obtenu, et ce qu'elle n'a pas obtenu.** Obtenu : les trois correctifs
-bloquants, avec leur vérification ; six mécanismes d'élagage chiffrés ; un trou de complétude
-fermé ; dix-neuf défaillances silencieuses rendues bruyantes ; trois constantes cachées
-exposées. **Non obtenu** : la mission de fond — le graphe de recettes, le comptage dérivé du
-board cible, un `h` qui décroît — n'a pas été entamée. C'était le prix annoncé : aucune mesure
-n'était interprétable avant ces correctifs. Reste également à faire : la re-mesure de l'étalon A
-en mode but seul (le 2/4 de la passe LDS, que C1 paralysait), le prolongement du cadran α, l'A/B
-`--nrpa-level`, C7 (`host_fallbacks` structurellement nul, plus le drapeau `poisoned`), C10
-(`ResponseForbidden` échoue OUVERT), C17, C18, et toute la section E.
+**Ce que la session 9 a obtenu.** Les trois correctifs bloquants avec leur vérification ; six
+mécanismes d'élagage chiffrés ; un trou de complétude fermé ; dix-neuf défaillances silencieuses
+rendues bruyantes ; trois constantes cachées exposées ; **l'audit complet fermé** (section (i)) ;
+**le rerooter doux réfuté** sur un cadran de neuf bras (section (d)) ; et **le chantier 16
+ouvert, implémenté et mesuré** — comptage validé contre une vérité humaine, graphe de recettes
+observationnel dont la limite est établie comme structurelle, amorce par le texte de carte
+(sections (j) et (k)).
+
+**Ce qu'elle n'a pas obtenu.** Un `h` qui décroît *utilement* : le graphe observationnel
+n'ajoute que ~0,1 de gradient, et l'amorce par le texte, une fois débarrassée des routes mortes,
+ne donne un gradient que sur les cartes dont un matériau nommé est dans le deck. Les exigences
+d'archétype et de niveau ne sont pas traitées. Aucune conversion n'est attribuable au mécanisme.
+
+**Ce qui reste, nommément** : les exigences d'ARCHÉTYPE et de NIVEAU dans l'amorce (le substrat
+existe : `CardRow::setcodes`, `CardRow::level`) ; les nœuds OU à plusieurs fournisseurs (copie
+de nom, substituts de Fusion) ; l'A/B `--nrpa-level` ; et toute la section 6 de l'audit — les
+optimisations du chemin chaud, dont la calibration est connue (~250 µs par décision, dominée
+par `duel.Process()` et `arena.Restore()`).
 
 **(i) Le reste de l'audit — traité dans la même session.**
 
@@ -2450,6 +2473,314 @@ de la nouveauté, qui a été fait parce que c'était **aussi** une correction d
 Et les constantes de moindre valeur (`max_solutions` variable selon le site, `k <= 12`,
 `plan_window`, `repair_window`), exposées nulle part et non mesurées.
 
+**(j) Le chantier 16 — le comptage et le graphe de recettes, implémentés et mesurés.**
+
+C'est la mission de fond, et elle repose sur un diagnostic mesuré : *le verrou n'est plus
+l'algorithme de recherche, il est dans `h`*. Notre `h` compte les cartes cibles manquantes, et
+il ne bouge pas tant qu'aucune n'est posée — c'est-à-dire sur l'essentiel de la ligne. Un
+mécanisme de décomposition ne peut rien décomposer sur un paysage plat.
+
+**Ce qui rend la rétrosynthèse applicable ici, et qui n'était pas évident.** On ne peut pas
+inverser un ÉTAT DE DUEL — c'est ce qui avait fait écarter la recherche en arrière. Mais on
+n'en a pas besoin : il suffit d'inverser une INVOCATION. Et là, non seulement les règles du jeu
+donnent le template, mais **le core nous dit ce qui a été consommé** : `MSG_MOVE` porte
+`REASON_MATERIAL`, et sa charge utile contient la **zone d'origine** du matériau. Notre modèle
+rétro à un pas est donc plus facile que celui de la chimie — qui exige un réseau entraîné sur
+12 millions de réactions — et il est *observé*, pas prédit.
+
+**Les trois règles, et comment chacune est tenue dans le code.**
+
+1. *Le nœud est une EXIGENCE, pas une carte* : `Requirement{code, zone}`. La zone est
+   normalisée en six seaux (`NormalizeZone`) **des deux côtés** — à l'observation du matériau
+   et au test de présence ; les désaccorder rendrait toute exigence insatisfaisable et la
+   distance serait fausse dans le sens dangereux, c'est-à-dire plate à nouveau. Une carte qui
+   COPIE un nom devient un fournisseur de plus sous le même nœud, gratuitement : le code
+   observé est déjà le code **effectif**.
+2. *Le graphe ne PRUNE jamais* : `Distance` rend **1** pour un produit sans recette connue, et
+   **1** quand le budget de récursion s'épuise — jamais l'infini. Conséquence directe et
+   voulue : **graphe vide ⇒ distance = nombre de cartes manquantes = le `h` d'aujourd'hui**.
+   Activer le mécanisme ne peut donc pas rendre un but inatteignable. C'est ce qui le rend sûr,
+   et c'est la forme opérationnelle de l'évitement du piège 47.
+3. *La vérité vient de l'observation* : aucun texte de carte n'est lu. Une Fusion depuis la
+   zone Pendule, un substitut de Fusion et une invocation ordinaire s'enregistrent exactement
+   de la même façon.
+
+**Ce que le graphe change à `h`, concrètement.** Poser Leo Dancer au cimetière ne pose aucune
+carte cible — le `h` plat ne bouge pas. Sur le graphe, la distance à Liger Dancer passe de 2 à
+1, parce qu'un de ses matériaux est désormais satisfait. *C'est exactement la décroissance en
+cours de ligne qui manquait.*
+
+**Le mode `--recipes 0`, et pourquoi il existe.** Le graphe est alors **alimenté et mesuré mais
+n'entre pas dans le coût** : le run est identique au témoin par construction, et la colonne
+`hR` dit ce que le graphe *aurait* dit. C'est le piège 40 appliqué à soi-même — instrumenter
+avant de calibrer — et c'est ce qui permet de répondre à la vraie question (*ce `h` diffère-t-il
+du `h` plat ?*) avant la question dérivée (*fait-il gagner ?*). Un `rec=` à zéro signifierait
+que le graphe est vide et que tout bras `--recipes w` n'a rien mesuré (piège 52).
+
+**Coût, et où il est payé.** `RecipeDistance` relève cinq zones cachées par appel. Il n'est
+appelé **que dans `RunLevin`, au développement d'un nœud** — jamais dans les tirages, où
+l'audit (6.1) a montré que ce genre de bloc domine le chemin chaud. La table de présence est
+triée et sondée par recherche binaire, et la récursion est mémoïsée : sans mémo elle est
+exponentielle (`recettes × matériaux` par niveau, ~40⁶ dans le pire cas), ce qui ferait **pendre**
+le finisseur au lieu de le ralentir.
+
+**PRÉDICTION, écrite avant la mesure.** Le graphe n'apprend que des invocations **réussies**.
+Or sur l'étalon 0 la carte manquante est précisément celle qu'aucune ligne n'a jamais réussi à
+poser. Le graphe ne devrait donc connaître **aucune recette pour elle**, `Distance` devrait
+rendre son plancher de 1, et `hR` devrait valoir ≈ le nombre de cartes manquantes — c'est-à-dire
+**exactement le `h` plat**. Attendu : `rec=` élevé (les préfixes rejoués observent beaucoup
+d'invocations), `hR` ≈ 1, et aucune séparation entre les bras.
+
+Si c'est ce qui se produit, ce n'est pas un échec du graphe mais la mesure d'une limite
+précise : *la moitié OBSERVATIONNELLE seule ne peut rien dire de la carte qu'on n'atteint
+jamais*. La règle 3 dit « le texte n'est qu'une AMORCE, la vérité vient de l'observation » — je
+n'ai implémenté que la seconde moitié. Amorcer le graphe avec les matériaux nommés par le texte
+de carte donnerait une recette à la carte non atteinte, et c'est l'observation qui la
+corrigerait ensuite. C'est cela que la mesure doit trancher.
+
+**MESURE — la prédiction est confirmée, au chiffre près.** Bras `--recipes 0` sur l'étalon 0 :
+
+```
+  appr0 recul 0   42 exp.  best 7/8  rec=121 hR=1.0  b=0  EPUISE
+```
+
+Le graphe a bien observé (121 invocations, versées par les rejeux du préfixe d'approche) et sa
+distance vaut **exactement 1,0** — le nombre de cartes cibles manquantes, c'est-à-dire le `h`
+plat, à la décimale près. La règle 2 a fonctionné comme prévue : recette inconnue ⇒ plancher ⇒
+`h` inchangé, aucune régression possible.
+
+Aux racines profondes, le graphe observe massivement — `rec=` monte à 44 324 invocations — et
+`hR` vaut 4,1 / 5,0 / 5,1 / 5,0 là où le `h` plat vaut 4 / 5 / 6 / 5. **Le gradient ajouté est
+d'environ 0,1**, soit ~2 %.
+
+*Le mode « mesurer sans décider » est lui-même validé* : le bras `--recipes 0` rend des `best`
+**identiques** au témoin (7/6/5/4/5) et des expansions à 1,3 % près — l'écart est le coût des
+cinq requêtes de zone par nœud développé. Le mode fait donc ce qu'il promet : il chiffre ce que
+le graphe *dirait* sans rien changer à ce que la recherche *fait*.
+
+**Ce que cela établit, et c'est un résultat, pas un échec.** Le graphe observationnel apprend
+des invocations RÉUSSIES ; la carte qu'on cherche est celle qu'aucune ligne n'a jamais posée.
+Il ne peut donc rien en dire — *par construction, pas par manque de données*. Attendre plus de
+tirages n'y changerait rien : c'est la structure du signal qui est en cause.
+
+**D'où l'amorce par le texte, implémentée dans la foulée.** La première ligne du texte de carte
+est la ligne de matériaux, et son format est régulier :
+
+```
+Lunalight Liger Dancer : "Lunalight Leo Dancer" + 3 "Lunalight" monsters
+Number 41: Bagooska    : 2 Level 4 monsters
+```
+
+On n'en prend que les matériaux **nommés entre guillemets et résolus à une carte existante** :
+les exigences d'archétype (`3 "Lunalight" monsters`) et de niveau (`2 Level 4 monsters`) sont
+ignorées, parce qu'elles sont presque toujours faciles à satisfaire — elles ajouteraient du
+bruit sans gradient — et parce que les omettre **sous-estime** le coût, ce qui est la direction
+sûre au regard de la règle 2. La zone est un JOKER (`kZoneAny`) : le texte nomme un matériau
+sans dire d'où il vient, et c'est l'observation qui le précisera ensuite. `--no-seed-recipes`
+éteint l'amorce pour isoler sa contribution.
+
+Sur le cas qui commande tout — Liger Dancer exige NOMMÉMENT « Lunalight Leo Dancer » — l'amorce
+donne enfin une recette à la carte jamais atteinte, donc une distance supérieure au plancher,
+donc un `h` qui distingue les états. C'est exactement le nœud OU de la règle 1 : l'exigence est
+« un monstre du nom de Leo Dancer », que le vrai Leo Dancer satisfait, et qu'une carte ayant
+copié ce nom satisfait aussi.
+
+**LA ROUTE MORTE, et pourquoi elle a fait corriger l'amorce.** Une première trace donnait la
+chaîne `Liger ← Leo ← Panther Dancer` et une distance de 4 pour Liger. Deux erreurs s'y
+cachaient, et la seconde était de fond.
+
+*La première était de méthode* : ma trace hors solveur recursait dans le texte de n'importe
+quelle carte, alors que le code ne pose de recette que pour les cartes CANDIDATES (extra deck
+et cible). Sous le code réel, Panther Dancer n'a pas de recette et Liger vaut 3, pas 4. Une
+trace qui ne reproduit pas le code ne trace rien.
+
+*La seconde était de modèle, et c'est elle qui compte* : **Panther Dancer n'est pas dans le
+deck de l'étalon A.** Or c'est le seul matériau nommé par la ligne de Leo Dancer. La recette
+texte de Leo décrit donc une voie que ce deck **ne peut pas emprunter** — et Leo y est pourtant
+invocable, par substitut de Fusion, par copie de nom, ou par un effet qui ignore les matériaux.
+Le texte décrit UNE voie, pas LA voie.
+
+Compter une étape pour un matériau introuvable, ce n'est pas du bruit : c'est un coût fondé sur
+un chemin impossible, et il aurait faussé `h` dans le sens le plus trompeur — en récompensant
+la poursuite d'une route morte. L'amorce écarte donc toute recette nommant un matériau **absent
+de la decklist**, et le produit retombe au plancher : « on ne sait pas comment il arrive » est
+plus vrai que « il coûte le prix d'une route impossible ». C'est la règle 2 au sens strict — on
+n'invente pas de coût, et on ne déclare rien inatteignable non plus.
+
+| carte cible | `h` plat | distance amorcée (code corrigé) |
+|---|---|---|
+| Lunalight Liger Dancer | 1 | **2** |
+| Lunalight Leo Dancer | 1 | 1 (sa seule voie texte est morte dans ce deck) |
+| Number 41: Bagooska | 1 | 1 (« 2 Level 4 monsters » : exigence de niveau, ignorée) |
+
+Le gradient survit là où il est utile : Liger vaut 2 tant que Leo n'est pas là, et **1 dès que
+Leo est posé** — or poser Leo Dancer ne pose aucune carte cible, donc ne bouge pas le `h` plat.
+C'est exactement le trou que la session 8 avait identifié, et il est comblé sur ce cas.
+
+Il est aussi plus étroit qu'espéré, et la limite est nette : les exigences d'ARCHÉTYPE
+(`3 "Lunalight" monsters`) et de NIVEAU (`2 Level 4 monsters`) sont ignorées. Le substrat pour
+les traiter existe (`CardRow::setcodes`, `CardRow::level`) ; c'est le prochain pas.
+
+**Et cette omission a une conséquence qu'il fallait traiter dans le code, pas seulement noter.**
+Une recette amorcée, parce qu'elle omet ces exigences, est **systématiquement moins chère**
+qu'une recette réellement observée pour le même produit. Or `Distance` prend le `min` sur les
+recettes : l'amorce l'aurait donc emporté à tous les coups, et l'observation n'aurait **jamais**
+pu la corriger — ce qui retourne la règle 3 exactement à l'envers, en préférant une estimation
+tirée d'un texte à un fait constaté dans le duel.
+
+Les recettes portent donc un drapeau `primed`, et `Distance` **ignore les recettes amorcées dès
+qu'une invocation réelle du même produit a été observée**. Une recette d'abord amorcée puis
+constatée perd son drapeau : le texte disait vrai, elle devient une observation. C'est la règle
+3 tenue dans le bon sens — le texte amorce, l'observation tranche.
+
+*Validation croisée, gratuite* : l'amorce dérive « Lunalight Leo Dancer » (code 24550676) comme
+matériau nommé de Liger. C'est exactement la carte que l'opérateur avait choisie **à la main**
+comme `--hint 24550676` dans le montage de l'étalon A depuis la session 7ter. Comme pour le
+comptage, le mécanisme dérivé retrouve la connaissance de domaine écrite par un humain.
+
+**Le premier pas, fait avant le graphe : le comptage.** Le board cible seul impose une
+arithmétique — « 3× Liger Dancer » veut dire **trois invocations Fusion**. C'est un argument
+sur le multi-ensemble cible et la decklist, sans aucun modèle déclaratif. Il donne une borne de
+faisabilité et un `--summon-min` **dérivé** au lieu d'écrit à la main (`--derive-summon-min`).
+Deux gardes : on compte les **ÉVÉNEMENTS** d'invocation, jamais leurs déclencheurs (« trois
+Polymérisations » serait faux — Lunalight Wolf fusionne depuis la zone Pendule sans
+Polymérisation) ; et un manque de copies est rapporté comme un **DOUTE**, jamais comme une
+impossibilité, parce qu'une carte qui copie un nom satisfait un but jugé sur le code effectif
+sans être une copie physique.
+
+La contrainte dérivée écrit dans le **guide de recherche**, pas dans le vérificateur — et ce
+n'est pas un contournement : elle est *redondante* à la vérification, pour une raison exacte.
+Si le board final porte trois Liger Dancer, alors trois invocations Fusion ont nécessairement
+eu lieu, une invocation ne posant qu'une carte. Le vérificateur, qui compare le board final à
+la cible, l'a donc déjà vérifiée en vérifiant le board.
+
+**Le comptage est validé contre une vérité écrite à la main**, et c'est le meilleur contrôle
+disponible pour un mécanisme dérivé : le montage de l'étalon A porte depuis la session 8 un
+`--summon-min "54701958:3"` **tapé par l'opérateur**, choisi en regardant le combo. Le comptage,
+qui ne lit que le board cible et la decklist, produit :
+
+```
+  exiges  deck  code      mecanisme  carte
+  3       3     54701958  Fusion     Lunalight Liger Dancer
+  1       1     90590303  Xyz        Number 41: Bagooska the Terribly Tired Tapir
+
+  EVENEMENTS d'invocation exiges par le board seul :  3 Fusion  1 Xyz
+```
+
+Il retrouve **exactement** la contrainte humaine (3× Liger), et il ajoute celle que l'humain
+n'avait pas écrite (1× Bagooska). L'alias est résolu au passage — la cible était donnée en
+`90590304`, le code canonique est `90590303` — ce qui est précisément ce que la règle 1 exige :
+le nœud porte l'identité **effective**, pas l'exemplaire d'illustration. Le deck fournissant
+exactement 3 et 1, aucun doute de faisabilité n'est levé, ce qui est le bon verdict.
+
+**(k) L'A/B du graphe observationnel — et une conversion qu'il ne faut PAS lui attribuer.**
+
+Étalon 0, montage déterministe, témoin = aucun graphe :
+
+| bras | r10 | r20 | r30 | r45 | cumul | `hR` moyen | solutions |
+|---|---|---|---|---|---|---|---|
+| T (témoin) | 6 | 5 | 4 | 5 | 20 | — | 0 |
+| M `--recipes 0` | 6 | 5 | 4 | 5 | 20 | 4,8 | 0 |
+| P1 `--recipes 1` | 6 | 5 | 5 | 5 | 21 | 4,7 | **8** |
+| P2 `--recipes 2` | 6 | 5 | 5 | 5 | 21 | 4,6 | 0 |
+
+**Le +1 n'est pas une information de recette.** Puisque `hR` ≈ le `h` plat (le graphe n'ajoute
+que ~0,1), `--recipes w` revient à multiplier `h` par (1+w) : c'est un réglage de `--levin-h`
+déguisé, pas un apport du graphe. Et un écart de 1 carte sur quatre racines est dans la bande
+de bruit que tout le cadran α a montrée (17 à 21 pour un témoin à 20).
+
+**Le bras P1 a écrit 8 solutions sur l'étalon B — et ce n'est PAS attribuable au graphe.**
+C'est le résultat le plus spectaculaire de la session et il faut le désamorcer soigneusement,
+parce que la tentation de le revendiquer est exactement le genre d'erreur que ce dépôt traque.
+
+Trois raisons, dans l'ordre de force :
+
+1. **Les solutions viennent d'une phase que `--recipes` ne touche pas.** Les lignes `<-- BUT`
+   sont sur `appr0 recul 110`, c'est-à-dire la **phase 2 du finisseur**, fondée sur les tirages
+   (`RunNrpa`). `RecipeDistance` n'est appelée que dans `RunLevin`. L'algorithme qui a trouvé
+   ces lignes est *littéralement le même code* dans les quatre bras.
+2. **P2, même mécanisme à poids double, n'a rien trouvé.** Un effet qui disparaît quand on
+   renforce sa cause n'est pas un effet.
+3. **Piège 39, et il est bien pire qu'annoncé.** Sept runs de la MÊME commande à la MÊME graine
+   (888, 90 s, étalon B sans contraintes) :
+
+   | run | best | lignes atteignant le board |
+   |---|---|---|
+   | 1 | 8/8 | **10** |
+   | 2 | 7/8 | 0 |
+   | 3 | 7/8 | 0 |
+   | 4 | 7/8 | 0 |
+   | 5 | 8/8 | **153** |
+   | 6 | 7/8 | 0 |
+
+   Deux runs sur six atteignent la forme 8/8, et quand ils y arrivent le compte varie d'un
+   facteur 15. **Aucune comparaison à run unique sur l'étalon B ne veut rien dire** — y compris
+   le « 7/8, aucune conversion » que le §9.15 donnait comme caractéristique de l'étalon, et qui
+   était un run unique tombé du mauvais côté. C'est aussi la raison d'être de l'étalon 0
+   (racines imposées + `--no-nrpa`) : il est déterministe, et les conclusions de la section (d)
+   reposent sur lui, pas sur ce montage-ci.
+
+**Et le « fait » lui-même doit être requalifié — c'est le point le plus important de la
+section.** Une première rédaction annonçait « l'étalon B est converti, à un coût MEILLEUR que la
+référence (16/47/226 contre 19/56/276) ». C'est faux dans son sens, et la vérification est
+immédiate : **le montage de l'étalon B ne porte aucune contrainte.**
+
+| montage | `--resolve` / `--summon-min` / `--guard` |
+|---|---|
+| `s8_ab_reroot_butseul.ps1` | aucune |
+| `s8_ab_finisseur.ps1` | aucune |
+| `s9_ab_alpha_complet.ps1` | aucune |
+| `s9_recettes.ps1` | aucune |
+
+Aucun montage de l'étalon B, ni ceux de la session 8 ni les miens, n'exige les **handrips** —
+qui sont la raison d'être de cette ligne — ni ne tient la **garde** contre Nibiru. Le mot
+« rips » n'apparaît même pas dans le journal, parce qu'aucune résolution n'était demandée.
+
+Ce que ces dix lignes atteignent est donc une **correspondance de forme de board** : les huit
+codes sont sur le terrain. Elles ne rippent pas et ne gardent pas. Et le coût inférieur à celui
+de la référence ne dit pas qu'elles font mieux — **il dit qu'elles font moins** : la référence
+rippe et tient la garde, elles non. Lire 16/47/226 comme une amélioration de 19/56/276, c'est
+comparer un trajet complet à un raccourci qui saute les étapes.
+
+**Conséquence sur l'étalon lui-même, et elle porte au-delà de ce run.** « 7/8 » et « 8/8 » sur
+l'étalon B signifient « 7 ou 8 des codes cibles présents », pas « le combo fonctionne ». Comme
+métrique d'A/B — la même dans tous les bras — elle reste valide, et la réfutation du rerooter
+(section (d)) n'est pas touchée. Mais l'étalon B, tel qu'il est scripté depuis la session 8,
+**ne teste pas ce que l'étalon A teste** : ce dernier porte `--resolve`, `--summon-min` et
+`--hint`. Y ajouter les contraintes de ligne est un préalable avant d'en tirer quoi que ce soit
+sur la qualité des lignes trouvées.
+**(l) L'étalon B AVEC ses contraintes — et la question du §9.11, tranchée.**
+
+Le montage contraint (`tools/s9_etalon_b_contraint.ps1`) reprend le jeu de la session 7 : garde
+`5:Crystal Wing|Zalen@terrain+Junk Signal@main` avec extinction à `mainadv<=2`, les deux rips
+(`PSY-Framelord Omega@terrain:2`, `Trishula@terrain`), et `--no-activate` sur Assault Zone. La
+référence les satisfait toutes (Omega 2/2, Trishula 1/1).
+
+| montage, 90 s, graine 888 | best | tirages NRPA | fin de tour | garde |
+|---|---|---|---|---|
+| sans contraintes | 7/8 | 51 729 | 95 % | — |
+| **avec contraintes** | **3/8** | 265 840 | 60 % | 15 731 (6 %) |
+
+**Le montage sans contraintes surestimait de 7/8 à 3/8.** C'est l'écart entre « poser les huit
+codes » et « poser les huit codes en rippant deux fois avec Omega, une fois avec Trishula, et
+en tenant de quoi répondre à Nibiru dès la cinquième invocation ». Le solveur sans contraintes
+prenait le raccourci, et rien ne le lui interdisait.
+
+**La question laissée ouverte par le §9.11 est tranchée : la garde n'élague pas l'espace.** Elle
+coupe 15 731 tirages sur 265 840, soit **6 %**. Le §9.11 supposait que les fenêtres précoces
+étaient « RASÉES sans les negates gratuits, ~400 k tirages morts » — la mesure dit que la garde
+n'en est pas la cause.
+
+**Et le plafond de décisions n'est pas la borne qui mord.** 95 % des tirages du montage libre
+terminent à la fin du tour 1, pas au plafond de profondeur : le sampler joue des tours COMPLETS
+et n'assemble simplement pas le board dedans. Augmenter `--max-decisions` ne peut donc rien
+donner — c'est une borne qui ne coupe pas (piège 40), et il aura fallu brancher `turn_cuts` là
+où il travaille pour le savoir.
+
+*Note d'instrumentation* : `PrintCuts` affichait `contrainte 0, garde 0` — non parce que rien
+ne coupait, mais parce qu'il n'était branché que sur les passes LDS, où ces compteurs valent
+zéro par construction. Les contraintes coupent dans les TIRAGES. Un compteur imprimé au mauvais
+endroit est aussi trompeur qu'un compteur absent (prolongement du piège 52).
 **Pièges ajoutés.**
 
 55. **Un correctif se vérifie avec l'instrument qu'il installe, pas avec l'hypothèse qui l'a
@@ -2473,3 +2804,240 @@ Et les constantes de moindre valeur (`max_solutions` variable selon le site, `k 
     Aujourd'hui : `borne` (plafonds de profondeur/actions), `sous-ens.` (énumérations
     tronquées), les prompts réduits à la réponse par défaut, et l'arène empoisonnée. Vérifier
     les quatre avant d'écrire une preuve d'absence.
+60. **Lire un compteur sur la racine de CONTRÔLE, c'est le lire sur 42 nœuds.** J'ai conclu
+    « le rerooter s'éteint quand α monte » d'après `rr` au recul 0 — la racine qui épuise en
+    42 expansions et ne pèse rien dans la comparaison. Aux racines qui comptent, `rr` par
+    expansion est **constant** sur tout le cadran, et la conclusion s'inverse : le mécanisme
+    est saturé, pas éteint. Un compteur se lit là où le mécanisme travaille (piège 53 appliqué
+    aux instruments, pas seulement aux A/B).
+61. **Un instrument neuf doit être vérifié contre les cas où le mécanisme est CORRECT.** Mon
+    détecteur de débordement a allumé `!!NUM` sur toutes les lignes de toutes les racines :
+    la racine porte `hu = hv = +inf` PAR CONVENTION — elle n'a aucun ancêtre à prolonger — et
+    ses enfants doivent se re-enraciner. L'instrument accusait le mécanisme de sa propre
+    définition. Avant de croire une alarme qui se déclenche partout, chercher le cas nominal
+    qu'elle confond avec la panne.
+62. **Ne jamais tirer une loi d'un tiers du domaine.** Sur α ∈ [1, 8] le taux de
+    re-enracinement ne bougeait pas, et j'en avais conclu « quel que soit α » en donnant même
+    l'argument structurel qui l'expliquait. Le domaine complet montre une transition nette
+    entre 12 et 20. L'argument était juste, la portée était fausse — et c'est la portée qui
+    décide de ce qu'on peut écrire. Prolonger le cadran, toujours (piège 46), et se méfier
+    d'autant plus d'une explication SÉDUISANTE d'un plateau : elle rend l'extrapolation
+    confortable.
+63. **Une recette tirée du texte peut décrire une voie que CE deck ne peut pas emprunter.**
+    « Lunalight Leo Dancer » n'a qu'une ligne de matériaux, et elle nomme Panther Dancer — qui
+    n'est pas dans le deck de l'étalon A. Compter cette étape aurait donné un `h` fondé sur un
+    chemin impossible, c'est-à-dire récompensé la poursuite d'une route morte. Un matériau
+    nommé doit être confronté à la DECKLIST avant d'entrer dans une recette ; à défaut, le
+    produit retombe au plancher. (Trouvé par une question sur une trace, pas par un test.)
+64. **Une trace hors outil qui ne reproduit pas le code ne trace rien.** Mon script de
+    vérification recursait dans le texte de n'importe quelle carte ; le code ne pose de recette
+    que pour un ensemble de candidats. Il donnait 4 là où le solveur donne 2. Vérifier une
+    implémentation avec une ré-implémentation, c'est vérifier la ré-implémentation.
+65. **Le résultat spectaculaire est celui qu'il faut désamorcer en premier.** Un bras
+    `--recipes 1` a converti l'étalon B — 8 solutions là où le dépôt n'en avait jamais eu. Il
+    aurait suffi de l'annoncer. Trois vérifications le retirent au mécanisme : les solutions
+    viennent d'une phase que le drapeau ne modifie pas (`RunNrpa`, alors que la distance de
+    recettes n'entre que dans `RunLevin`) ; le bras à poids DOUBLE n'a rien trouvé ; et le
+    piège 39 suffit à expliquer l'écart. Avant d'attribuer un gain, vérifier que le mécanisme
+    a seulement PU le produire — c'est-à-dire qu'il s'exécute sur le chemin concerné.
+66. **Un coût INFÉRIEUR peut vouloir dire « en fait moins », pas « fait mieux ».** Dix lignes
+    atteignant le board de l'étalon B à 16/47/226 contre 19/56/276 pour la référence : j'y ai
+    lu une amélioration. Le montage de l'étalon B ne porte AUCUNE contrainte — ni `--resolve`
+    (les handrips, qui sont la raison d'être de la ligne), ni `--guard`. Ces lignes sont moins
+    chères parce qu'elles sautent le travail. Avant de comparer deux coûts, vérifier que les
+    deux font la MÊME CHOSE ; un coût ne se lit qu'à contraintes égales.
+67. **Un étalon peut mesurer autre chose que ce que son nom dit.** L'étalon B, tel qu'il est
+    scripté depuis la session 8, mesure une FORME DE BOARD (les codes présents), pas le combo :
+    aucun de ses montages n'exige les rips ni ne tient la garde, alors que l'étalon A porte
+    `--resolve`, `--summon-min` et `--hint`. Comme métrique d'A/B c'est valide — la même dans
+    tous les bras — mais « 8/8 » n'y veut pas dire « la ligne marche ».
+68. **Un compteur imprimé au MAUVAIS ENDROIT est aussi trompeur qu'un compteur absent.**
+    `PrintCuts` affichait fidèlement `contrainte 0, garde 0` — parce qu'il n'était branché que
+    sur les passes LDS, où ces compteurs valent zéro par construction. Les contraintes coupent
+    dans les TIRAGES. J'ai failli conclure « les contraintes ne coupent rien » d'un instrument
+    posé là où elles ne travaillent pas. Prolongement du piège 52 : imprimer ne suffit pas,
+    il faut imprimer LÀ OÙ LE MÉCANISME AGIT (piège 53 appliqué aux compteurs).
+69. **Un `printf` mal aligné produit des mesures, pas une erreur.** Une colonne `%s` manquante
+    a fait lire `b=209066130608` et `(null)` là où il fallait `b=0  EPUISE` — un run entier
+    d'A/B illisible sans que rien n'échoue. Le compilateur le disait (`warning C4473`) ; les
+    builds incrémentaux ne recompilaient pas le fichier, donc l'avertissement ne réapparaissait
+    pas. Compiler en `/v:normal` après une salve d'édition, et lire les avertissements.
+
+### 9.17 Session 10 : l'amorce mesurée là où elle agit — et le nœud d'exigence, qui n'était modélisé qu'à moitié
+
+**La mission** : les mesures laissées prêtes par la session 9, puis le chantier 16 là où il
+s'était arrêté. La première mesure a retiré la deuxième avant même d'être finie.
+
+**(a) L'A/B de l'amorce était monté sur le mauvais étalon, et la mesure le dit.**
+
+Le montage `tools/s9_recettes_amorce.ps1` tourne sur l'étalon B. Or l'amorce ne retient que
+les matériaux nommés entre guillemets, et le board de l'étalon B est fait de Synchros et de
+Liens — « 1 Tuner + 1+ non-Tuner monsters », « 2+ monsters » : aucun nom entre guillemets.
+L'en-tête du run le dit au premier coup d'œil, une fois qu'on le lit :
+
+```
+  amorce par le texte : 1 recette(s) posee(s), 1 produit(s) connus
+```
+
+**Une** recette, dans un graphe qui observe des dizaines de milliers d'invocations. Quatre bras
+sur un seul binaire, budget et graine identiques :
+
+| bras | r10 | r20 | r30 | r45 | cumul | `hR` (r10/r20/r30/r45) |
+|---|---|---|---|---|---|---|
+| SN `--no-seed-recipes` | 6 | 5 | 4 | 5 | 20 | 4,1 / 5,0 / 5,1 / 5,0 |
+| SA amorce nommée | 6 | 5 | 4 | 5 | 20 | 4,1 / 5,0 / 5,1 / 5,0 |
+| SP1 `--recipes 1` | 6 | 5 | 5 | 5 | 21 | 4,1 / 4,9 / 5,1 / 4,8 |
+| SP2 `--recipes 2` | 6 | 5 | 5 | 5 | 21 | 4,2 / 4,7 / 5,0 / 4,6 |
+
+SN et SA sont identiques **au dixième près sur chaque racine**, et les `best` le sont aussi.
+Le +1 de SP1/SP2 est celui que le §9.16 (k) avait déjà désamorcé : `hR` valant le `h` plat,
+`--recipes w` n'est qu'un réglage de `--levin-h` déguisé, et une carte d'écart tombe dans la
+bande de bruit que tout le cadran α a montrée (17 à 21 pour un témoin à 20).
+Ce n'est pas « l'amorce ne marche pas » : c'est « l'amorce n'a pas tourné », et l'A/B était
+incapable de le distinguer avant qu'on lise son en-tête. Piège 53 appliqué à un étalon plutôt
+qu'à un montage — mesurer un mécanisme LÀ OÙ IL AGIT vaut aussi pour le choix du cas de test.
+
+Le bras SN a par ailleurs reproduit exactement le bras M de la session 9 (`hR` 1,0 / 4,1 / 5,0 /
+5,1 / 5,0, cumul 20) : le témoin d'amorce était nécessaire précisément parce que le M de la
+session 9 avait été mesuré sur un binaire ANTÉRIEUR à l'amorce, et comparer SA à ce M-là aurait
+fait varier deux choses à la fois.
+
+**(b) Le nœud d'exigence n'était modélisé qu'à moitié — et l'autre moitié est celle qui porte
+le gradient.**
+
+La règle 1 dit « le nœud est une EXIGENCE, pas une carte ». L'implémentation de la session 9 ne
+savait exprimer qu'un seul genre d'exigence : *cette carte-là*. Le relevé des dix cartes de
+l'extra deck de l'étalon A dit ce que cela laisse dehors :
+
+| carte | ligne de matériaux | ce que la session 9 en tirait |
+|---|---|---|
+| Liger Dancer | `"Lunalight Leo Dancer" + 3 "Lunalight" monsters` | Leo seul |
+| Leo Dancer | `"Lunalight Panther Dancer" + 2 "Lunalight" monsters` | route morte (Panther absent) |
+| Sabre Dancer | `3 "Lunalight" monsters` | **rien** |
+| Perfume Dancer | `2 "Lunalight" monsters` | **rien** |
+| Bagooska *(cible)* | `2 Level 4 monsters` | **rien** |
+| Dugares | `2 Level 4 monsters` | **rien** |
+| Tiger King | `2 Level 4 Beast-Warrior monsters` | **rien** |
+| Cross-Sheep | `2 monsters with different names` | rien |
+| A Bao A Qu | `2+ monsters, including a Fiend monster` | rien |
+| Underworld Goddess | `4+ Effect Monsters` | rien |
+
+**Huit cartes sur dix ne nomment aucune carte.** L'amorce posait donc UNE recette sur l'étalon A
+et une sur l'étalon B — un mécanisme vivant et sans effet (piège 42), ce que la mesure (a)
+montre au dixième près.
+
+Et l'argument de la session 9 pour les écarter — « elles sont presque toujours faciles à
+satisfaire, donc du bruit sans gradient » — est faux dans l'autre sens. Une exigence CARDINALE
+est précisément ce qui décroît continûment : « 3 monstres Lunalight » perd une unité à chaque
+Lunalight posé, c'est-à-dire **avant qu'aucune carte cible ne touche le terrain**. C'est le trou
+du `h` plat, décrit à l'identique depuis le §9.14, et il se comble là.
+
+Trois genres d'exigence, donc (`ReqKind`) : carte nommée, archétype (`setcode`), niveau. Les
+deux derniers portent un COMPTE et se résolvent par dénombrement, sans récursion — aucun produit
+n'est nommé, il n'y a rien à fabriquer, seulement un compte à atteindre. Chaque exemplaire
+manquant coûte une unité, ce qui sous-estime (poser un monstre coûte au moins une action) :
+direction sûre au regard de la règle 2.
+
+Restent ignorés, et volontairement : type, attribut, race (`Beast-Warrior`, `Effect Monsters`,
+`including a Fiend monster`) et les contraintes de distinction (`2 monsters with different
+names`). Les omettre sous-estime.
+
+**L'archétype se résout sans table de noms.** Le texte dit « Lunalight », le core ne connaît que
+des setcodes numériques, et la correspondance vit dans `strings.conf`, hors de notre portée. On
+la retrouve **par le deck lui-même** : les cartes dont le nom contient le fragment doivent porter
+un setcode commun. Sur l'étalon A l'intersection est exactement `{0xdf}`, et le setcode retenu
+est imprimé avec son nombre de fournisseurs — un chiffre dérivé se vérifie, il ne se croit pas.
+
+**(c) LE DÉFAUT QUI RENDAIT L'AMORCE INERTE, et il n'était pas dans le parseur.**
+
+La zone d'une exigence amorcée est un JOKER : le texte nomme un matériau sans dire d'où il
+vient. Le joker de la session 9 signifiait « présent **n'importe où** », et la table de présence
+relève six zones — dont le DECK et l'EXTRA DECK.
+
+Conséquence, sur le seul cas où l'amorce avait quelque chose à dire : Liger Dancer exige
+nommément « Lunalight Leo Dancer », et **Leo dort dans l'extra deck en deux exemplaires**. Il
+était donc « présent » dès le premier nœud, la distance à Liger valait `1 + 0 = 1` — le
+plancher, c'est-à-dire exactement le `h` plat. Le tableau du §9.16 qui annonçait `Liger = 2`
+n'a jamais pu sortir du solveur : c'est une trace hors outil (piège 64, deuxième fois sur ce
+même mécanisme).
+
+Le joker signifie désormais « n'importe quelle zone où l'on peut PRENDRE un matériau » —
+terrain, main, cimetière, bannie. Une carte qui dort dans le deck ou l'extra n'est pas un
+matériau disponible : **il faut d'abord l'invoquer, et c'est exactement l'étape que le graphe
+doit compter.**
+
+Et pour que cela ne se reproduise pas en silence, l'en-tête imprime désormais la distance
+amorcée de chaque carte cible **depuis un terrain vide**, calculée par le `DistanceAll` que le
+finisseur appelle — pas par une trace.
+
+**(d) MESURE — l'amorce donne enfin un gradient, et le chiffre sort du solveur.**
+
+Étalon A, en-tête d'un run de cinq secondes (la table s'imprime avant toute recherche) :
+
+```
+   archetype « Lunalight » -> setcode 0xdf, 17 fournisseur(s) au deck
+   (1 recette(s) ecartee(s) : elles nomment un materiau absent de ce deck)
+   exigences posees : 1 nommee(s), 3 archetype(s), 3 niveau(x)
+amorce par le texte : 6 recette(s) posee(s), 6 produit(s) connus
+
+   carte cible                                    h plat   distance amorcee
+   Lunalight Liger Dancer                         1        5   <-- gradient
+   Number 41: Bagooska the Terribly Tired Tapir   1        3   <-- gradient
+```
+
+**Six recettes au lieu d'une**, et `h` cesse d'être plat : 5 et 3 là où il valait 1 ; sur la
+cible entière, **18 contre 4**. Le détail se vérifie à la main, et c'est le but de la table :
+Liger vaut `1 (l'invocation) + 1 (Leo, dont la recette texte est morte dans ce deck, donc
+plancher) + 3 (les trois monstres Lunalight)`. Bagooska vaut `1 + 2 (deux monstres de niveau 4)`.
+
+Le setcode est **déduit du deck** — les cartes dont le nom contient « Lunalight » portent toutes
+`0xdf`, et l'intersection le donne sans aucune table de noms. La route morte de Leo Dancer reste
+écartée (piège 63), ce qui est le comportement voulu et non un manque.
+
+**Santé** : diff avant/après **identique hors durées**. Le run de santé n'active pas `--recipes`,
+donc le nœud d'exigence ne doit s'y voir nulle part — et il ne s'y voit pas.
+
+**Ce qui n'est PAS mesuré, et il faut le dire.** L'A/B armé (`AN` sans amorce / `AA` nommée seule
+/ `AQ` complète / `AP1` pesée dans `h`) a été **interrompu en cours** : seul le témoin `AN` a
+rendu sa table, `hR` = 0,0 / 3,0 / 3,5 / 3,9 / 4,0, c'est-à-dire exactement le `h` plat, ce qui
+confirme au moins que le témoin est bien un témoin. *Que ce gradient fasse gagner reste une
+question ouverte* — et c'est la bonne question suivante, à poser avec `--levin-h`, jamais avec
+`--reroot-h` (réfuté, §9.16 (d)).
+
+**(e) MESURE — C1 vérifié sur l'étalon A, et le §9.15 (e) tombe.**
+
+Étalon A en mode but seul, 1 800 s, graine 888. La passe à écarts bornés :
+
+| écarts | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| états | 1 | 21 | 54 | 113 | 358 | 983 | 3 956 | 10 156 | 30 013 | 50 852 | 60 239 |
+
+Elle **croît**. Avant correction elle valait **26, constante à tous les niveaux**, et le §9.15 (e)
+avait pris ce plateau pour une propriété structurelle du mode but seul : sans plan, disait-il, la
+passe est « structurellement VIDE ». Elle ne l'était pas — un seul jeton de partition la
+paralysait.
+
+**Et le mode but seul atteint 2/4** (`best_approach_2of4.yrp`, 197 décisions), par le finisseur :
+c'est le résultat de la référence ARMÉE du répertoire (s7_luna_v6, 2/4). La conclusion « le
+répertoire valait la partie difficile » ne survit pas — les deux bras comparés par le §9.15 (e)
+différaient du répertoire **et** d'un mécanisme cassé.
+
+Deux réserves, notées plutôt que tues. La colonne `partition` reste à **0** dans toute cette
+passe : elle ne montre ni partage ni suppression, le mécanisme ne mord pas ici, et c'est la table
+des états qui porte la vérification. Et le run signale jusqu'à **247 prompts réduits à la réponse
+par défaut** — « ces branches n'ont jamais existé » : c'est le piège 59, cet espace-là n'a jamais
+été exploré, et aucune preuve d'absence ne peut en faire abstraction.
+
+*Fait annexe, versé au §9.16 (l).* Sur l'étalon A aussi, c'est la **fin de tour** qui coupe :
+86 % des tirages gloutons, 56 % des tirages NRPA, tandis que `contrainte` et `garde` restent à
+zéro. Même diagnostic que sur l'étalon B — le sampler joue des tours complets et n'assemble pas
+le board dedans.
+
+**(f) Le chantier 17 devient chiffrable sans être écrit.**
+
+`ForecastOptionGain` mine les sous-séquences fréquentes des coups joués du corpus et recalcule la
+borne de Levin comme si elles étaient atomiques — c'est le critère de sélection d'Alikhasi & Lelis
+(arXiv:2410.11262), appliqué à nos données. Deux conservatismes assumés pour que le chiffre soit
+une borne BASSE : le catalogue entier est supposé proposé à chaque décision, et aucune macro
+n'est créditée de raccourcir une ligne que le corpus a jouée. La mesure elle-même
+(`tools/s10_options.ps1`, 30 s) **reste à lire** : la session a été arrêtée avant.

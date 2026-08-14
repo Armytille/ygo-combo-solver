@@ -87,7 +87,7 @@ void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
 // enumeration tronquee doit pouvoir se distinguer d'une enumeration complete.
 template<typename F>
 void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
-				   uint64_t* capped = nullptr) {
+				   uint64_t* capped = nullptr, bool ascending = false) {
 	static thread_local std::vector<uint8_t> cur;
 	hi = (std::min)(hi, n);
 	if(lo > hi)
@@ -102,7 +102,7 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 			return;
 		}
 		uint32_t k;
-		if(from_low || klo == khi) {
+		if(ascending || from_low || klo == khi) {
 			k = klo;
 			++klo;
 		} else {
@@ -410,7 +410,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 							  c.label = "choisir " + std::to_string(k) +
 										" carte(s)";
 					  },
-					  opt.subsets_capped);
+					  opt.subsets_capped, opt.subsets_ascending);
 		if(cancelable) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
@@ -594,7 +594,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  if(opt.labels)
 							  c.label = "somme " + std::to_string(k);
 					  },
-					  opt.subsets_capped);
+					  opt.subsets_capped, opt.subsets_ascending);
 		return;
 	}
 

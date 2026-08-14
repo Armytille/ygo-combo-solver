@@ -100,7 +100,8 @@ combosolver.exe gabarit.yrpX --scriptdir <scripts> `
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
 `--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
 `--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
-`--nrpa-level`, `--max-subsets`, `--verbose`).
+`--nrpa-level`, `--max-subsets`, `--recipes`, `--no-seed-recipes`,
+`--no-seed-quant`, `--derive-summon-min`, `--verbose`).
 La graine des tirages est dérivée du temps et imprimée — la redonner via
 `--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
 divergent quand même (l'ordre des échanges entre workers dépend du timing) —
