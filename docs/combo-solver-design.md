@@ -3161,3 +3161,24 @@ nouveau, désigné par l'instrument et absent de l'audit). La périphérie est d
 et les médianes restent dues. Le coût de l'instrument n'a été chiffré que sur un run. Et PGO
 n'a pas été tenté (LTO d'abord, mesuré seul — PGO est le candidat suivant, cas d'école sur un
 profil aussi stable).
+
+**(f) Poursuite dans la même session : le rejeu depuis l'ancêtre partagé.** Le levier désigné
+en (c) a été implémenté séance tenante : la pile de plongée de `RunLevin` reconnaît désormais
+l'ancêtre le plus profond du nœud extrait (elle ne reconnaissait que le parent direct), et ne
+rejoue que le suffixe de chaîne. Sémantiquement neutre — le contrôle déterministe passe à
+l'identique (`recul 0` : 42 exp., b=0, ÉPUISÉ) — pour Process/expansion 62,2 → 57,8 (−7 %) et
++4,6 % d'expansions à temps égal en agrégat sur les cinq racines de l'étalon 0, dont +31,8 %
+sur `recul 45` (runs uniques). Le gain est réel mais plus modeste qu'espéré : sur ce montage,
+les sauts de file partagent des préfixes courts — le rejeu reste le coût dominant, et le
+chantier « checkpoints hors pile LIFO » reste ouvert.
+
+**(g) Revue adversariale de clôture.** Un agent relecteur a challengé les deux commits de la
+session sur six points (temps exclusif du profileur, flush thread_local, injectivité de
+`MixBytes`, hypothèse de `kHiddenFlags`, rejeu par ancêtre — invariant pile d'arène/pile de
+plongée reconstruit à la main —, terminaison du rejeu de suffixe) : **aucun défaut trouvé**.
+Une observation PRÉEXISTANTE versée au dossier : dans `advance()` du finisseur, `Adv::Goal` est
+traité comme `Adv::Dead` — un nœud-but n'a jamais d'enfants, même sous `--optimize`/anytime, là
+où `DescendGuided`/`DescendRepair` documentent explicitement continuer APRÈS le but (piège 35).
+À trancher en session suivante : soit c'est voulu (le finisseur s'arrête au but par
+construction), soit la récupération d'après-but est structurellement absente du finisseur et
+personne ne l'a mesuré.
