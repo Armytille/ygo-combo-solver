@@ -370,6 +370,36 @@ double CorpusAgreement(const NrpaPolicy& pol, const NrpaResidual* res,
 					   const std::vector<NrpaRun>& runs, float bias_known,
 					   float shrink, double* argmax_frac = nullptr);
 
+// PREVISION DE COUT DE RECHERCHE, calculee sur des lignes DEJA RESOLUES.
+//
+// La garantie de Levin Tree Search borne le nombre d'expansions par d/pi(sol),
+// ou pi est le PRODUIT des probabilites de la politique le long de la ligne.
+// C'est exactement la grandeur mesuree en session 7bis (masse), et c'est donc
+// elle qui gouverne le cout du finisseur — pas le classement.
+//
+// sqrt-LTS (arXiv:2412.05196) decompose implicitement la recherche en q
+// sous-taches ancrees sur des INDICES (« un indice peut etre donne des qu'une
+// sous-tache est resolue »). Notre code produit deja ces indices a chaque
+// noeud : le nombre de cartes du board cible posees, qui est la composante
+// haute de PolicyStep::ctx. Une recherche decomposee sur ces q points coute,
+// au mieux, la SOMME des bornes par segment au lieu du produit global.
+//
+// Cette fonction calcule les deux, sur les lignes du corpus, avant d'ecrire la
+// moindre ligne d'algorithme : elle rend log10 de la borne monolithique et
+// log10 de la borne decomposee. L'ecart des deux EST le gain que sqrt-LTS peut
+// rendre au mieux — le papier ajoute au-dessus un facteur lie a l'incertitude
+// du rerooter, donc c'est un plafond, pas une promesse.
+struct CostForecast {
+	double log10_mono = 0;    // log10 de d/pi sur la ligne entiere
+	double log10_decomp = 0;  // log10 de somme_i d_i/pi_i
+	double segments = 0;      // q moyen (points d'indice + 1)
+	double worst_seg_log10 = 0;   // le segment le plus cher, log10 de d_i/pi_i
+	size_t lines = 0;
+};
+CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
+								const std::vector<NrpaRun>& runs,
+								float bias_known, float shrink);
+
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
 // Une politique de cette forme est une fonction du couple (contexte, ensemble
@@ -588,6 +618,24 @@ struct SearchConfig {
 	// but : il re-monte les reculs profonds sans preferer les branches qui
 	// ripent ou qui posent. 0 = Levin pur.
 	float levin_h = 1.0f;
+	// sqrt-LTS (arXiv:2412.05196) : re-enraciner la recherche du finisseur a
+	// chaque INDICE. Le cout de Levin d(n)/pi(n) est remplace par le cout
+	// enracine lambda/pi(n ; n_k) ou n_k est l'ancetre-indice le plus proche —
+	// la probabilite repart de 1 a chaque indice, au lieu de se multiplier sur
+	// toute la ligne. Notre indice est deja calcule a chaque noeud : le nombre
+	// de cartes du board cible posees CHANGE.
+	//
+	// Le min sur les ancetres de l'article se reduit ici a un seul terme, et
+	// c'est EXACT et non une approximation : a poids uniformes sur les indices,
+	// pour n_j precedant n_k, lambda/pi(n;n_j) >= (1/pi(n_k|n_j)) *
+	// lambda/pi(n;n_k) >= lambda/pi(n;n_k) — l'ancetre-indice le PLUS PROCHE
+	// minimise toujours. Un seul lambda par noeud suffit donc.
+	//
+	// Prevision mesuree avant implementation (ForecastSearchCost, corpus
+	// sF_final) : borne monolithique 10^26 a 10^60 expansions selon la
+	// politique, borne decomposee sur les 18 segments 10^5,8 a 10^12,5.
+	// false = cout de Levin d'avant, bit pour bit.
+	bool levin_reroot = false;
 	// Poids d'une resolution exigee (--resolve) dans le gradient des tirages.
 	// A 100 (une carte cible), les lignes 8/8 SANS rip gagnent la course
 	// d'adaptation contre les lignes rip-partielles (mesure session 4 :
@@ -746,6 +794,10 @@ struct SearchStats {
 	uint64_t guard_cuts = 0;        // branches coupees par la garde (--guard)
 	// --- objectif de cout anytime ---
 	uint64_t burn_cuts = 0;         // tirages coupes par la borne brulees
+	// sqrt-LTS : nombre de noeuds developpes qui ont RE-ENRACINE la recherche
+	// (un indice y est tombe). Sans ce compteur, un rerooting inactif serait
+	// indiscernable d'un rerooting inutile — piege 40.
+	uint64_t reroots = 0;
 	uint64_t goal_hits = 0;         // atteintes du but (re-atteintes comprises)
 	// --- reparation ---
 	// Resynchronisations semantiques : etats dont le digest a retrouve un point

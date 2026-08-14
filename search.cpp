@@ -1872,9 +1872,19 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		uint32_t depth;                  // decisions reelles (choix multiples)
 		float logpi;                     // log du produit des probabilites
 		std::vector<uint8_t> response;   // reponse appliquee depuis le parent
+		// --- sqrt-LTS (cfg.levin_reroot) ---
+		// log de pi(n | n_k) : la probabilite RELATIVE a l'ancetre-indice le
+		// plus proche. C'est elle qui repart de zero a chaque indice, et c'est
+		// tout le mecanisme.
+		float seg_logpi = 0.0f;
+		// lambda/pi(n ; n_k) = somme des 1/pi(n_bar | n_k) sur le segment.
+		double lam = 1.0;
+		// Cartes du board cible posees chez le PARENT : un indice tombe quand
+		// le noeud n'en a pas le meme compte (le board a change de sous-but).
+		uint16_t placed_parent = 0;
 	};
 	std::vector<LNode> nodes;
-	nodes.push_back({ -1, 0, 0.0f, {} });
+	nodes.push_back({ -1, 0, 0.0f, {}, 0.0f, 1.0, 0xffffu });
 	// Cout de Levin : d(n)/pi(n), en log pour la stabilite. Le noeud de
 	// moindre cout est developpe en premier — c'est la garantie du papier :
 	// nombre d'expansions borne par la probabilite de la solution sous la
@@ -2067,10 +2077,24 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// `board_scratch` est le board du noeud (dernier advance en mode
 		// controle). A 0, Levin pur.
 		float hgoal = 0;
+		uint32_t got = 0;
+		if(cfg.levin_h > 0 || cfg.levin_reroot)
+			got = CommonCodes(board_scratch.codes, target.codes);
 		if(cfg.levin_h > 0) {
-			const uint32_t got = CommonCodes(board_scratch.codes, target.codes);
 			hgoal = static_cast<float>(target.codes.size() - got) +
 					static_cast<float>(resolve_target - ResolveProgress(resolved));
+		}
+		// sqrt-LTS : ce noeud est-il un INDICE ? La racine en est toujours un
+		// (sans quoi les noeuds situes avant le premier indice n'auraient aucun
+		// ancetre re-enracineur). Au re-enracinement, le segment repart : la
+		// probabilite relative revient a 1, donc lambda/pi revient a 1.
+		double base_lam = nodes[idx].lam;
+		float base_seg = nodes[idx].seg_logpi;
+		if(cfg.levin_reroot &&
+		   (idx == 0 || got != nodes[idx].placed_parent)) {
+			base_lam = 1.0;
+			base_seg = 0.0f;
+			++stats.reroots;
 		}
 
 		// Softmax de la politique sur les choix — les MEMES logits que les
@@ -2104,9 +2128,27 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			child.logpi = nlogpi + static_cast<float>(std::log(
 				(std::max)(logit[i] / sum, 1e-30)));
 			child.response = ro_choices[i].response;
-			const double lcost =
-				std::log(static_cast<double>(child.depth) + 1.0) +
-				static_cast<double>(cfg.levin_h) * hgoal - child.logpi;
+			double lcost;
+			if(cfg.levin_reroot) {
+				child.seg_logpi = base_seg + static_cast<float>(std::log(
+					(std::max)(logit[i] / sum, 1e-30)));
+				// lambda/pi(enfant ; n_k) = lambda/pi(parent ; n_k) +
+				// 1/pi(enfant | n_k). Le terme ajoute est borne par le cout du
+				// SEGMENT, pas par celui de la ligne entiere : c'est ce qui
+				// evite le sous-debordement qui rend d/pi inexploitable ici.
+				const double inv = std::exp(-static_cast<double>(child.seg_logpi));
+				child.lam = base_lam + (std::isfinite(inv) ? inv : 1e300);
+				child.placed_parent = static_cast<uint16_t>(got);
+				// Cout sqrt-LTS (Eq. 14) : lambda/pi - 1, en log pour rester
+				// commensurable avec le terme PHS* d'heuristique. Les poids de
+				// re-enracinement etant uniformes, leur diviseur est une
+				// constante : le best-first y est invariant.
+				lcost = std::log((std::max)(child.lam - 1.0, 1e-300)) +
+						static_cast<double>(cfg.levin_h) * hgoal;
+			} else {
+				lcost = std::log(static_cast<double>(child.depth) + 1.0) +
+						static_cast<double>(cfg.levin_h) * hgoal - child.logpi;
+			}
 			nodes.push_back(std::move(child));
 			pq.push({ lcost, static_cast<uint32_t>(nodes.size() - 1) });
 		}
@@ -2363,6 +2405,84 @@ double CorpusAgreement(const NrpaPolicy& pol, const NrpaResidual* res,
 	if(argmax_frac)
 		*argmax_frac = n ? static_cast<double>(top) / static_cast<double>(n) : 0.0;
 	return n ? total / static_cast<double>(n) : 0.0;
+}
+
+CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
+								const std::vector<NrpaRun>& runs,
+								float bias_known, float shrink) {
+	CostForecast out;
+	std::vector<double> p;
+	double sum_mono = 0, sum_decomp = 0, sum_q = 0, sum_worst = 0;
+	for(const NrpaRun& r : runs) {
+		if(r.steps.empty())
+			continue;
+		// Segment courant : profondeur et log-probabilite cumulees depuis le
+		// dernier indice. Un indice = la composante « cartes posees » du
+		// contexte augmente (une sous-tache du but conjonctif vient de tomber).
+		double seg_logpi = 0, total_logpi = 0;
+		uint32_t seg_depth = 0, total_depth = 0;
+		uint16_t last_placed = static_cast<uint16_t>(r.steps.front().ctx / 16);
+		// Bornes accumulees : somme des d_i/pi_i, en log10 par segment puis
+		// somme en lineaire via le max (les termes couvrent des ordres de
+		// grandeur enormes, sommer naivement perdrait tout).
+		double best_log10 = -1e300, worst_log10 = -1e300;
+		std::vector<double> seg_log10;
+		auto close_segment = [&] {
+			if(!seg_depth)
+				return;
+			const double l = std::log10(static_cast<double>(seg_depth)) -
+							 seg_logpi / std::log(10.0);
+			seg_log10.push_back(l);
+			worst_log10 = (std::max)(worst_log10, l);
+			best_log10 = (std::max)(best_log10, l);
+			seg_logpi = 0;
+			seg_depth = 0;
+		};
+		for(const PolicyStep& s : r.steps) {
+			const uint16_t placed = static_cast<uint16_t>(s.ctx / 16);
+			if(placed != last_placed) {
+				close_segment();
+				last_placed = placed;
+			}
+			p.resize(s.keys.size());
+			double mx = -1e300;
+			for(size_t i = 0; i < s.keys.size(); ++i) {
+				double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
+				p[i] = w + (s.known[i] ? bias_known : 0.0f);
+				mx = (std::max)(mx, p[i]);
+			}
+			double sm = 0;
+			for(double& x : p) { x = std::exp(x - mx); sm += x; }
+			const double lp = std::log((std::max)(p[s.chosen] / sm, 1e-300));
+			seg_logpi += lp;
+			total_logpi += lp;
+			++seg_depth;
+			++total_depth;
+		}
+		close_segment();
+		if(seg_log10.empty())
+			continue;
+		// Somme des bornes par segment, en log10 stable (log-sum-exp base 10).
+		double acc = 0;
+		for(double l : seg_log10)
+			acc += std::pow(10.0, l - worst_log10);
+		const double decomp = worst_log10 + std::log10(acc);
+		const double mono = std::log10(static_cast<double>(total_depth)) -
+							total_logpi / std::log(10.0);
+		sum_mono += mono;
+		sum_decomp += decomp;
+		sum_q += static_cast<double>(seg_log10.size());
+		sum_worst += worst_log10;
+		++out.lines;
+	}
+	if(out.lines) {
+		const double n = static_cast<double>(out.lines);
+		out.log10_mono = sum_mono / n;
+		out.log10_decomp = sum_decomp / n;
+		out.segments = sum_q / n;
+		out.worst_seg_log10 = sum_worst / n;
+	}
+	return out;
 }
 
 double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,

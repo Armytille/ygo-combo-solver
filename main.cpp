@@ -177,6 +177,8 @@ struct Options {
 	double ctx_shrink = -1.0;
 	// Temperature de l'echantillonnage NRPA (1.0 = comportement d'avant).
 	double nrpa_temp = 1.0;
+	// sqrt-LTS : re-enraciner le finisseur a chaque indice (chantier 10).
+	bool levin_reroot = false;
 	// Contraintes de ligne, brutes, resolues en codes une fois la base de
 	// cartes chargee.
 	std::vector<std::string> summon_specs;      // "5:Zalen|Crystal Wing"
@@ -610,6 +612,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--adapt-passes") {
 			const char* v = next("--adapt-passes"); if(!v) return false;
 			o.adapt_passes = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--reroot") {
+			o.levin_reroot = true;
 		} else if(a == "--nrpa-temp") {
 			const char* v = next("--nrpa-temp"); if(!v) return false;
 			o.nrpa_temp = std::atof(v);
@@ -3091,6 +3095,37 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 			std::printf("\n");
 		}
 	}
+	// PRÉVISION DE COÛT — l'instrument qui décide si sqrt-LTS vaut d'être
+	// écrit. La borne LTS (d/pi) est calculée sur les lignes DÉJÀ RÉSOLUES du
+	// corpus, puis comparée à la somme des bornes par segment délimité par les
+	// indices que le solveur produit déjà (cartes du board cible posées).
+	// L'écart est le gain maximal du rerooting, connu AVANT d'implémenter.
+	{
+		std::printf("  prevision de cout de recherche (borne LTS, log10 "
+					"d'expansions) :\n");
+		std::printf("      %-22s %10s %12s %8s %12s\n", "politique",
+					"monolithe", "decompose", "segments", "pire segment");
+		struct Arm { const char* name; uint32_t passes; float k; };
+		const Arm arms[] = {
+			{ "vierge (repertoire)", 0, -1.0f },
+			{ "adaptee 4 passes", 4, -1.0f },
+			{ "adaptee + contexte", 4, 1.0f },
+		};
+		for(const Arm& a : arms) {
+			NrpaPolicy probe;
+			NrpaResidual res;
+			AdaptCorpus(probe, &res, out, a.passes, defaults.nrpa_alpha,
+						defaults.nrpa_bias_known, a.k);
+			const CostForecast f = ForecastSearchCost(
+				probe, &res, out, defaults.nrpa_bias_known, a.k);
+			std::printf("      %-22s %9.1f  %11.1f  %7.1f  %11.1f\n", a.name,
+						f.log10_mono, f.log10_decomp, f.segments,
+						f.worst_seg_log10);
+		}
+		std::printf("      (le decompose est le MEILLEUR cas du rerooting : le "
+					"papier ajoute\n       un facteur pour l'incertitude du "
+					"rerooter — c'est un plafond.)\n");
+	}
 	{
 		NrpaPolicy probe;
 		NrpaResidual res;
@@ -4189,6 +4224,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.material_req = cons.material_req;
 	cfg.hint_cards = cons.hints;
 	cfg.levin_h = static_cast<float>(opt.levin_h);
+	cfg.levin_reroot = opt.levin_reroot;
 	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
 	// Optimisation de cout anytime : la recherche continue apres la premiere
 	// solution (chaque solution resserre la borne), l'ensemble par worker est
