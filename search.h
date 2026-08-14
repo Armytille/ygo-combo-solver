@@ -228,6 +228,11 @@ struct PolicyStep {
 	std::vector<uint8_t> known;   // au repertoire ?
 	std::vector<uint8_t> hinted;  // engage une carte --hint ?
 	size_t chosen = 0;
+	// CONTEXTE de la decision (chantier 5ter) : nombre de cartes du board
+	// cible deja posees. Descripteur SEMANTIQUE (pas positionnel : deux lignes
+	// ne posent pas les memes questions au meme indice, piege 21) et disponible
+	// des deux cotes — au tirage comme au relevé d'une ligne de corpus.
+	uint16_t ctx = 0;
 };
 struct NrpaRun {
 	double score = -1;
@@ -250,6 +255,76 @@ struct NrpaShared {
 // RunLevin les consomme, et les workers les fusionnent (moyenne des poids).
 using NrpaPolicy = std::unordered_map<uint64_t, float>;
 
+// --- politique a DEUX NIVEAUX (chantier 5ter, inspire de MCPS 2510.06381) ---
+//
+// Le plafond mesure en session 7 (accord du corpus 44 % -> 66 %, palier des la
+// premiere passe, 70 % au mieux sur une ligne SEULE) n'est pas un defaut de
+// signal : c'est la REPRESENTATION. Un poids par plan_key est aveugle a l'etat,
+// or la meme identite semantique revient a des dizaines d'endroits d'une meme
+// ligne avec des choix differents — aucun jeu de poids ne peut reproduire cela.
+//
+// Enrichir la cle du contexte, seul, echangerait un plafond contre une famine :
+// chaque case contextuelle verrait une fraction des mises a jour. MCPS repond a
+// exactement ce dilemme en COMBINANT plusieurs estimateurs d'un meme coup au
+// lieu d'en choisir un, ponderes par leur evidence. On garde donc les DEUX
+// niveaux :
+//
+//     w_eff(coup, ctx) = (1 - s) * w_global[coup] + s * w_ctx[coup, ctx]
+//     s = n / (n + k)   ou n = nombre de mises a jour de la case contextuelle
+//
+// Limites : n = 0 -> w_global exactement (aucune penalite de fragmentation, la
+// case neuve ne dit rien) ; n >> k -> w_ctx (dependance a l'etat pleine) ;
+// k < 0 -> mecanisme ETEINT, comportement d'avant bit pour bit.
+//
+// Ecart assume avec MCPS : ses trois estimateurs sont des moyennes de recompense
+// sur des ensembles de playouts qui se recouvrent, et il les pondere par les
+// effectifs bruts (beta = n/N, variance minimale sous independance). Ici les
+// deux niveaux sont EMBOITES — le global agrege tous les contextes, son
+// effectif domine toujours — et une ponderation par effectifs bruts
+// n'accorderait jamais la main au contextuel. D'ou la retenue par un k calibre,
+// et non par le rapport des effectifs. C'est une combinaison convexe de deux
+// logits de MEME echelle : elle ne change pas la temperature du softmax, donc
+// l'A/B mesure la dependance a l'etat et rien d'autre.
+struct CtxWeight {
+	float w = 0;
+	uint32_t n = 0;
+};
+using NrpaResidual = std::unordered_map<uint64_t, CtxWeight>;
+
+// Le descripteur de CONTEXTE, calcule a l'identique au tirage et au relevé.
+// Deux axes, tous deux semantiques et bon marche : combien de cartes du board
+// cible sont posees (0 -> 8, le combo se construit) et combien de cartes
+// restent en main (5 -> 0, les ressources se depensent). Le premier seul ne
+// separe pas assez : mesure sur le corpus, 8 cases pour ~165 decisions par
+// ligne, +4,3 points d'accord seulement. La main est l'axe orthogonal naturel
+// — deux moments a meme board mais a main differente ne posent pas les memes
+// questions.
+inline uint16_t ContextKey(uint32_t placed, uint32_t hand) {
+	if(placed > 15) placed = 15;
+	if(hand > 15) hand = 15;
+	return static_cast<uint16_t>(placed * 16u + hand);
+}
+
+inline uint64_t CtxKey(uint64_t key, uint16_t ctx) {
+	return key ^ ((static_cast<uint64_t>(ctx) + 1) * 0x9e3779b97f4a7c15ull);
+}
+
+// Poids effectif d'un coup sous la politique a deux niveaux. `shrink` < 0
+// eteint le niveau contextuel (la fonction rend alors pol[key] exactement).
+inline float EffectiveWeight(const NrpaPolicy& pol, const NrpaResidual* res,
+							 uint64_t key, uint16_t ctx, float shrink) {
+	auto it = pol.find(key);
+	const float wg = (it == pol.end()) ? 0.0f : it->second;
+	if(!res || shrink < 0.0f)
+		return wg;
+	auto ic = res->find(CtxKey(key, ctx));
+	if(ic == res->end())
+		return wg;
+	const float s = static_cast<float>(ic->second.n) /
+					(static_cast<float>(ic->second.n) + shrink);
+	return (1.0f - s) * wg + s * ic->second.w;
+}
+
 // REJEU D'ADAPTATION du corpus (chantier 5bis, arXiv:2401.10431) : releve une
 // ligne de solution sous forme de SEQUENCE DE DECISIONS de politique — a chaque
 // prompt multi-choix de notre joueur, l'ensemble des plan_key LEGAUX et l'indice
@@ -270,10 +345,12 @@ using NrpaPolicy = std::unordered_map<uint64_t, float>;
 // l'echantillonnage, sans quoi Adapt() calculerait un gradient sous une
 // distribution qui n'est pas celle des tirages. Renvoie le nombre d'etapes non
 // identifiees (sautees : on ne sait pas quel choix la ligne a pris).
+// `target` sert au CONTEXTE de chaque etape (cartes du board cible deja
+// posees) : le meme descripteur que celui calcule au tirage.
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
-					 NrpaRun& out);
+					 const BoardKey& target, NrpaRun& out);
 
 // Probabilite moyenne (log) que `pol` donne aux coups CHOISIS par les lignes
 // du corpus, sous les memes biais que l'echantillonnage. C'est l'instrument
@@ -281,20 +358,51 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 // moyenne des -log(nb de choix legaux) ; s'il ne monte pas apres les passes,
 // le mecanisme est inerte et il est inutile de payer un run pour l'apprendre
 // (piege 40).
-double CorpusAgreement(const NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
-					   float bias_known);
+// Rend la moyenne GEOMETRIQUE de p(coup joue) — exp de la log-vraisemblance
+// moyenne. `argmax_frac`, si fourni, recoit la FRACTION d'etapes ou le coup du
+// corpus est celui que la politique classe premier : c'est la seule des deux
+// qui se compare au plafond de CorpusCoherence. Les deux ensemble separent
+// « la politique se trompe partout un peu » de « elle a raison presque
+// partout et s'effondre sur quelques etapes » — une moyenne geometrique est
+// ecrasee par une poignee de p proches de zero, et lue seule elle ferait
+// conclure a un echec la ou il n'y en a pas.
+double CorpusAgreement(const NrpaPolicy& pol, const NrpaResidual* res,
+					   const std::vector<NrpaRun>& runs, float bias_known,
+					   float shrink, double* argmax_frac = nullptr);
+
+// PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
+//
+// Une politique de cette forme est une fonction du couple (contexte, ensemble
+// des coups legaux) : deux etapes qui presentent le MEME ensemble de choix dans
+// le MEME contexte sont indiscernables pour elle, quoi qu'on mette dans les
+// poids. Si le corpus y joue des coups differents, l'ecart est IRREDUCTIBLE —
+// aucune passe, aucun k, aucun enrichissement de poids ne le comblera.
+//
+// On groupe donc les etapes par (contexte, ensemble legal) et on rend la
+// fraction d'etapes qui jouent le coup MAJORITAIRE de leur groupe : c'est
+// exactement ce qu'atteindrait la meilleure politique deterministe de cette
+// famille. Comparer ce plafond a l'accord obtenu dit s'il faut continuer a
+// enrichir le contexte, ou si le corpus se contredit lui-meme.
+// `use_ctx` a false ignore le contexte : la difference des deux plafonds
+// chiffre ce que le descripteur apporte, independamment de l'apprentissage.
+double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
+					   size_t* groups = nullptr);
 
 // Un pas d'adaptation NRPA sur une sequence (le gradient de Cazenave : +alpha
 // au coup joue, -alpha*p a chacun des legaux). Libre plutot que membre pour que
 // le relevé du corpus et les workers appliquent EXACTEMENT la meme mise a jour
 // — un instrument qui mesure autre chose que ce que le run subit ne mesure
-// rien.
-void AdaptRun(NrpaPolicy& pol, const NrpaRun& run, float alpha, float bias_known,
-			  float hint_bias);
+// rien. `res` non nul : le niveau contextuel recoit le MEME gradient, sur sa
+// propre case (coup, contexte) ; les deux niveaux estiment la meme quantite a
+// des granularites differentes.
+void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
+			  float alpha, float bias_known, float hint_bias, float shrink,
+			  float temp = 1.0f);
 
 // `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
-void AdaptCorpus(NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
-				 uint32_t passes, float alpha, float bias_known);
+void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
+				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
+				 float bias_known, float shrink);
 
 // --- archive d'etats (Go-Explore, arXiv:2004.12919) ------------------------
 //
@@ -451,6 +559,21 @@ struct SearchConfig {
 	// l'injection, prime par coup contre gradient discriminatif. 0 = inactif.
 	const std::vector<NrpaRun>* nrpa_adapt_runs = nullptr;
 	uint32_t nrpa_adapt_passes = 0;
+	// Politique a DEUX NIVEAUX (chantier 5ter) : retenue du niveau contextuel,
+	// s = n/(n+k). k negatif = mecanisme ETEINT (comportement d'avant, la case
+	// contextuelle n'est ni lue ni ecrite). k = 0 : le contexte prend la main
+	// des la premiere mise a jour ; k grand : il faut beaucoup d'evidence.
+	float ctx_shrink = -1.0f;
+	// TEMPERATURE de l'echantillonnage (GNRPA, arXiv:2003.10024) : les logits
+	// sont divises par tau avant le softmax. C'est le seul levier connu qui
+	// agisse sur la MASSE et non sur le CLASSEMENT — or la mesure de la session
+	// 7bis dit que le classement etait deja bon (coup du corpus 1er dans 96 %
+	// des cas a politique vierge) et que c'est la masse qui manque (44 % de
+	// probabilite moyenne, soit 0,44^160 sur une ligne entiere). tau < 1
+	// concentre, tau = 1 = comportement d'avant. L'adaptation utilise la MEME
+	// temperature, sans quoi le gradient ne serait pas celui de la
+	// distribution echantillonnee.
+	float nrpa_temp = 1.0f;
 	// GNRPA a repetitions limitees (arXiv:2401.10420) : nombre de fois ou la
 	// meilleure sequence peut etre RE-TROUVEE (meme score MATERIEL — la part
 	// nouveaute du score decroit a chaque rejeu, l'egalite stricte ne se
@@ -793,7 +916,7 @@ private:
 	// la persistance entre redemarrages) et echange la meilleure sequence avec
 	// les autres workers (cfg.nrpa_shared).
 	double NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng);
-	void Adapt(Policy& pol, const NrpaRun& best) const;
+	void Adapt(Policy& pol, const NrpaRun& best);
 	// Enumere le prompt courant dans `out` (adversaire : "ne rien faire" seul ;
 	// prompt non enumerable : reponse par defaut). false = branche morte.
 	bool FillChoices(ChoiceList& out);
@@ -911,6 +1034,9 @@ private:
 	uint64_t archive_min_score = 0;
 	// Politique finale du run NRPA (exportee pour le finisseur).
 	Policy final_policy;
+	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).
+	// Vide et jamais consulte quand le mecanisme est eteint.
+	NrpaResidual ctx_weights;
 
 	// Tampons reutilises des chemins chauds (une allocation par decision est
 	// une allocation de trop a des dizaines de millions de decisions par run).

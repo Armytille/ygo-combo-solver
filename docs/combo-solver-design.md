@@ -1732,13 +1732,17 @@ du signal, prime par coup contre gradient discriminatif.
 **44,3 % à politique vierge → 65,2 % en UNE passe → 66,2 % à seize.** Le mécanisme MORD (le
 prior, lui, ne déplaçait rien d'observable) mais il sature immédiatement : au-delà d'une
 passe, rien. Sur une SEULE ligne (la 259) : 44,9 % → 58,1 / 62,2 / 65,9 / 68,6 / **70,2 %** —
-plus lent, et il finit au même palier. **Le plafond n'est donc pas le désaccord entre lignes
-du corpus : c'est la REPRÉSENTATION.** Un poids par `plan_key` est aveugle à l'état, alors
-qu'une même identité sémantique revient à des dizaines d'endroits d'une même ligne avec des
-choix différents ; aucun jeu de poids ne peut reproduire une politique dépendante de l'état.
-C'est la limite de fond du transfert de politique tel qu'il est représenté ici — elle borne
-le prior par poids ET l'adaptation, et elle explique après coup pourquoi le premier était
-neutre.
+plus lent, et il finit au même palier.
+
+> **RECTIFICATION (session 7bis, §9.14) — la lecture ci-dessus était fausse, l'instrument
+> mesurait autre chose que ce qu'on lui faisait dire.** Cet « accord » est une moyenne
+> GÉOMÉTRIQUE de p(coup joué). Une poignée d'étapes à p ≈ 0 l'écrase, et elle fait passer
+> pour médiocre une politique qui classe en réalité le bon coup PREMIER dans 93 % des cas.
+> La conclusion « le plafond est la REPRÉSENTATION » qui suivait ici est donc retirée : voir
+> §9.14, où la mesure comparable (fraction d'étapes où le coup du corpus est premier) est
+> confrontée à un plafond calculé. Ce qui reste vrai de ce paragraphe : le prior par poids
+> et l'adaptation sont tous deux neutres sur les deux étalons. Ce qui est faux : la raison
+> qu'on en donnait.
 
 **Étalon 2 (les fenêtres `--fire` ouvertes, graine 888, 300 s/fenêtre, corpus `sF_final`,
 4 passes) — ensembles de conversion IDENTIQUES, mais la recherche BOUGE.** Bras témoin :
@@ -1768,12 +1772,8 @@ DISPERSION, pas à un run.
 **Verdict et réglage.** `--adapt <f|dossier>` (répétable) et `--adapt-passes <n>` (défaut 4 —
 sur le palier mesuré ; 0 coupe le mécanisme en gardant le relevé, c'est le bras témoin).
 Comme `--prior`, le drapeau reste OPT-IN et HORS de la commande recommandée : il est vivant,
-il ne rend rien sur les deux étalons. Les deux voies du chantier 5 sont désormais closes
-ensemble, et pour la même raison de fond — la politique NRPA est un sac de poids par coup.
-Le levier qui resterait n'est plus un mode d'injection mais un changement de
-REPRÉSENTATION : mettre du contexte dans la clé (`plan_key` × phase / × nombre d'invocations
-faites / × progrès de rips), ce qui rendrait la politique dépendante de l'état — à mesurer
-d'abord sur la courbe d'accord, qui dira en quelques secondes si le plafond de 66 % monte.
+il ne rend rien sur les deux étalons. (La *raison* qu'on en donnait ici — « la politique NRPA
+est un sac de poids par coup » — est corrigée au §9.14.)
 
 **(c) Chantier 6 — les racines croisées `--fire` : CLOS SUR STRUCTURE, sans run.** L'idée
 (« les lignes converties d'une fenêtre servent d'`--approach` aux fenêtres voisines ») bute
@@ -1797,3 +1797,117 @@ du chantier 5, changement de représentation) ; l'escalade par fenêtre `--fire`
 6bis) ; le partage périodique de la POLITIQUE entre workers (chantier 4, toujours le plus
 ancien non-fait) ; le LTS à frontière partagée (chantier 7) ; le miroir de zones (chantier 8,
 profil d'abord) ; fermer k=5 et la relaxation SMT/ILP pour 18 brûlées (§9.10-9.11).
+
+### 9.14 Session 7bis : la politique savait déjà — ce qui manquait était la MASSE, pas la connaissance
+
+**Le point de départ** : une étude arXiv du corpus Cazenave, lancée pour trouver comment
+franchir le « plafond de représentation » que le §9.13 venait de diagnostiquer. Elle a livré
+un mécanisme (MCPS, arXiv:2510.06381 — combiner plusieurs estimateurs d'un même coup pondérés
+par leur évidence, au lieu d'en choisir un). Ce mécanisme a été implémenté, mesuré — **et il
+perd**. Mais l'instrumentation qu'il a fallu construire pour le mesurer a montré que le
+diagnostic du §9.13 était faux, et a chiffré le vrai.
+
+**Chantier 5ter — la politique à DEUX NIVEAUX : implémentée, mesurée, PERDANTE, désactivée.**
+`w_eff(coup, ctx) = (1-s)·w_global + s·w_ctx` avec `s = n/(n+k)`, n l'évidence accumulée par
+la case contextuelle et `--ctx-shrink k` le cadran (k < 0 = éteint, comportement d'avant bit
+pour bit — santé identique vérifiée). Le contexte est sémantique et calculé à l'identique au
+tirage et au relevé : cartes du board cible posées × cartes restant en main (20 valeurs
+distinctes sur le corpus). L'écart assumé avec MCPS est documenté dans le code : ses
+estimateurs sont indépendants et pondérés par les effectifs bruts, les nôtres sont EMBOÎTÉS
+(le global agrège tous les contextes, son effectif domine toujours), d'où la retenue par un k
+calibré. **A/B étalon 2, trois bras, même graine, même budget : témoin 10/15 converties,
+k=64 → 9/15, k=1 → 7/15.** La perte est MONOTONE dans le cadran — c'est ce qui la rend
+crédible malgré le piège 39 : trois bras ordonnés par un seul réglage donnent trois résultats
+ordonnés. Mécanisme : dans une recherche par fenêtre, la politique apprend de ses propres
+tirages et cette donnée est RARE ; répartir l'évidence sur 20 contextes coûte plus que la
+précision de classement qu'elle achète. Défaut `--ctx-shrink -1` (éteint).
+
+**L'instrument qui a tout retourné : deux métriques au lieu d'une.** L'« accord du corpus »
+du §9.13 est une moyenne GÉOMÉTRIQUE de p(coup joué). Elle est écrasée par une poignée
+d'étapes à p ≈ 0, et lue seule elle fait passer pour médiocre une politique qui a raison
+presque partout. On lui a adjoint (a) la **fraction d'étapes où le coup du corpus est classé
+PREMIER** — la seule des deux qui se compare à quelque chose — et (b) un **plafond calculé** :
+en groupant les étapes par point de décision (contexte + ensemble des coups légaux) et en
+prenant le coup majoritaire de chaque groupe, on obtient ce qu'atteindrait une table parfaite,
+soit **96,1 % sans contexte (139 points distincts) et 97,3 % avec (243)**. Le corpus ne se
+contredit donc quasiment pas : l'écart au plafond, s'il y en a un, est un défaut
+d'apprentissage, pas une fatalité.
+
+**Ce que les deux métriques disent, et qui referme trois sessions de résultats neutres.**
+
+| politique | moy. géom. de p | coup du corpus classé 1er |
+|---|---|---|
+| **vierge** (biais du répertoire seul, 0 passe) | 44 % | **96 %** |
+| adaptation, 4 à 256 passes, α de 1,0 à 0,05 | 66-68 % | 93-94 % |
+| + niveau contextuel (k=1) | 72-74 % | 95-97 % |
+| + contexte = signature du point de décision | 74-75 % | 96-97 % |
+| *plafond de la famille* | — | *96,1 / 97,3 %* |
+
+**À politique VIERGE, le coup du corpus est déjà classé premier 96 % du temps — au plafond.**
+Le biais du répertoire (+1,5 aux coups de la ligne de référence) suffit. L'adaptation ne
+monte pas ce chiffre : elle le fait légèrement BAISSER (96 → 93 %) en échange de masse
+(44 → 66 %). Le prior par poids, l'adaptation par gradient et le contexte dans la clé
+agissaient donc tous les trois sur le CLASSEMENT — la seule chose que la politique possédait
+déjà. **C'est l'explication unique des trois résultats neutres ou négatifs des sessions 6
+et 7, et elle est chiffrée.**
+
+**La quantité qui manque, et son ordre de grandeur.** Ce qui est bas, c'est la MASSE : 44 % de
+probabilité moyenne sur le bon coup à politique vierge, 74 % au mieux. Or un tirage doit
+enchaîner ~160 décisions, et ce qui compte est le PRODUIT : 0,74^160 ≈ 10^-21. Une politique
+qui a raison 96 % du temps sur le classement ne rejoue pas pour autant une ligne de 160 coups
+— elle n'y arrivera jamais par échantillonnage. Le « 1 tirage sur 800 000 fait les trois
+rips » du §9.11 n'était pas un déficit de connaissance : c'était ce produit.
+
+**Le corollaire, qui explique aussi pourquoi l'escalade est le seul mécanisme qui ait jamais
+rendu.** Deux familles de leviers existent : ceux qui re-CLASSENT (prior, adaptation,
+contexte — tous mesurés neutres ou négatifs, et on sait maintenant pourquoi) et ceux qui
+imposent la MASSE. `--approach` appartient à la seconde : il ne suggère pas la ligne, il la
+REJOUE, probabilité 1 sur son préfixe, et ne rend la main à l'échantillonnage qu'au point de
+recul. C'est exactement le levier qui a produit 272 → 263 → 261 → 259. Toute mécanique de
+transfert de corpus qui se contente de re-pondérer les coups est prédite NEUTRE par cette
+mesure ; le seul candidat non essayé qui agisse sur la masse est la TEMPÉRATURE de GNRPA
+(arXiv:2003.10024) — diviser les logits par τ < 1 concentre la masse sans rien changer au
+classement. C'est le chantier 5quater — et la prédiction a été mise à l'épreuve dans la foulée.
+
+**Chantier 5quater — la TEMPÉRATURE (`--nrpa-temp`, GNRPA arXiv:2003.10024) : la première
+conversion jamais obtenue dans la bande précoce, mais elle ne se reproduit pas.** Les logits
+sont divisés par τ avant le softmax, à l'échantillonnage ET à l'adaptation (sans quoi le
+gradient ne serait pas celui de la distribution tirée). τ = 1 = comportement d'avant ; santé
+identique vérifiée. A/B étalon 2, cinq bras :
+
+| bras | converties | bande précoce (déc. 58-103) |
+|---|---|---|
+| témoin τ=1, graines 888 / 999 / 1234 | 10/15 chacune, **ensembles identiques** | aucune |
+| τ=0,5 graine 888 | **11/15** (sur-ensemble strict du témoin) | **déc. 89 — première jamais convertie** |
+| τ=0,25 graine 888 | 10/15, ensemble du témoin | aucune |
+| τ=0,5 graine 999 | 10/15, ensemble du témoin | aucune |
+| τ=0,5 graine 1234 | 10/15, ensemble du témoin | aucune |
+
+Ce que cela vaut, sans le surinterpréter : **le témoin est invariant sur trois graines** (même
+ensemble, mêmes crêtes, mêmes « manque : » — déjà vrai en session 6), ce qui rend la fenêtre
+supplémentaire de τ=0,5 à la graine 888 non attribuable au bruit d'échantillonnage : c'est un
+événement que le mécanisme a rendu possible. Mais **il ne se reproduit sur aucune des deux
+autres graines**, donc ce n'est pas un gain sur lequel compter. Ce qui EST solide : la
+température ne perd JAMAIS de fenêtre, sur trois graines et deux valeurs. Les 16 replays écrits
+par le bras gagnant ont été jugés depuis zéro, depuis leur en-tête cuit et sans drapeau :
+**16/16 rejoués, 0 retry, Omega@terrain 2/2, Trishula@terrain 1/1** (263-268 décisions,
+20 brûlées / 57-58 actions sur le board amputé). La fenêtre déc. 89 a donc bien été refermée
+pour de vrai — le mur de la bande précoce n'est pas une impossibilité, il est franchissable.
+Défaut `--nrpa-temp 1.0` (éteint), opt-in, hors commande recommandée jusqu'à confirmation.
+
+**Ce que la session 7bis a obtenu, et ce qu'elle n'a pas obtenu.** Pas de ligne sous 19/55/259,
+pas de gain fiable en conversions. Mais : (1) un diagnostic chiffré qui remplace trois
+hypothèses successivement réfutées — déficit de prior, verrou de séquence, plafond de
+représentation — par une grandeur mesurée, et qui a PRÉDIT le signe du seul mécanisme restant
+avant qu'on l'écrive ; (2) la première refermeture de la bande déc. 58-103, murée sur six runs
+antérieurs, vérifiée et rejouable ; (3) deux instruments réutilisables (fraction de classement
+premier, plafond par point de décision) qui rendent tout futur mécanisme de politique
+jugeable en millisecondes.
+
+**Non fait, et documenté comme tel** (session 7bis) : confirmer la température sur d'autres
+graines et essayer un τ VARIABLE (décroissant avec l'évidence, ou par contexte) — le gain
+existe, sa reproductibilité non ; la borne inférieure LP/IP par comptage d'opérateurs pour
+trancher 18 brûlées (arXiv:2404.07934, la forme concrète de la « relaxation SMT/ILP » que
+§9.10 porte depuis trois sessions) ; les landmarks généralisés appris depuis les plans résolus
+(arXiv:2508.21564) ; l'escalade par fenêtre `--fire` (chantier 6bis) ; chantiers 4, 7, 8
+inchangés.

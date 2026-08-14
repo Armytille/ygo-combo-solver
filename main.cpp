@@ -172,6 +172,11 @@ struct Options {
 	// premier tirage. --adapt-passes 0 desactive le mecanisme (A/B).
 	std::vector<std::string> adapt_files;
 	uint32_t adapt_passes = 4;
+	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
+	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
+	double ctx_shrink = -1.0;
+	// Temperature de l'echantillonnage NRPA (1.0 = comportement d'avant).
+	double nrpa_temp = 1.0;
 	// Contraintes de ligne, brutes, resolues en codes une fois la base de
 	// cartes chargee.
 	std::vector<std::string> summon_specs;      // "5:Zalen|Crystal Wing"
@@ -365,6 +370,17 @@ void Usage() {
 		"                     par coup (mesure NEUTRE, session 6).\n"
 		"  --adapt-passes <n> passes d'adaptation par ligne (defaut 4 ; 0 coupe\n"
 		"                     le mecanisme sans toucher au releve — c'est l'A/B)\n"
+		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
+		"                     t < 1 concentre la masse sur les coups les mieux\n"
+		"                     classes SANS changer le classement — le seul\n"
+		"                     levier de masse connu (GNRPA 2003.10024).\n"
+		"  --ctx-shrink <k>   politique a DEUX NIVEAUX : un poids par coup ET un\n"
+		"                     poids par (coup, contexte), melanges en convexe\n"
+		"                     s = n/(n+k) ou n est l'evidence de la case\n"
+		"                     contextuelle. Le contexte est le nombre de cartes\n"
+		"                     du board cible deja posees. k negatif (defaut) =\n"
+		"                     eteint, comportement d'avant. La courbe d'accord\n"
+		"                     imprimee par --adapt calibre k sans depenser un run.\n"
 		"  --fire <carte>     TEST ADVERSE : ajoute la carte a la main adverse\n"
 		"                     et la fait JOUER a chaque fenetre ou elle est\n"
 		"                     legale (un essai par fenetre) ; la recherche doit\n"
@@ -594,6 +610,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--adapt-passes") {
 			const char* v = next("--adapt-passes"); if(!v) return false;
 			o.adapt_passes = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--nrpa-temp") {
+			const char* v = next("--nrpa-temp"); if(!v) return false;
+			o.nrpa_temp = std::atof(v);
+		} else if(a == "--ctx-shrink") {
+			const char* v = next("--ctx-shrink"); if(!v) return false;
+			o.ctx_shrink = std::atof(v);
 		} else if(a == "--tt-mb") {
 			const char* v = next("--tt-mb"); if(!v) return false;
 			o.tt_mb = static_cast<size_t>(std::atoi(v));
@@ -2863,7 +2885,7 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 // L'A/B est donc propre : --prior et --adapt injectent au meme endroit, la
 // seule difference mesurable est prime-par-coup contre gradient discriminatif.
 void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
-					const std::vector<PlanStep>& plan,
+					const std::vector<PlanStep>& plan, const BoardKey& target,
 					std::vector<NrpaRun>& out) {
 	if(opt.adapt_files.empty())
 		return;
@@ -2935,7 +2957,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					NrpaRun run;
 					size_t unknown =
 						LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX,
-									  eo, repertoire, run);
+									  eo, repertoire, target, run);
 					if(!run.steps.empty()) {
 						total_steps += run.steps.size();
 						total_unknown += unknown;
@@ -2972,24 +2994,117 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	// run de 600 s pour l'apprendre. Le nombre de poids dit combien de coups
 	// distincts le corpus touche.
 	SearchConfig defaults;
-	std::printf("  accord du corpus (p moyen du coup joue) :");
-	for(uint32_t n : { 0u, 1u, 2u, 4u, 8u, 16u }) {
-		NrpaPolicy probe;
-		AdaptCorpus(probe, out, n, defaults.nrpa_alpha, defaults.nrpa_bias_known);
-		const double a =
-			CorpusAgreement(probe, out, defaults.nrpa_bias_known);
-		std::printf("  %up=%.1f%%", n, 100.0 * std::exp(a));
+	{
+		size_t ctx_span = 0;
+		std::map<uint16_t, size_t> by_ctx;
+		for(const NrpaRun& r : out)
+			for(const PolicyStep& s : r.steps)
+				++by_ctx[s.ctx];
+		ctx_span = by_ctx.size();
+		std::printf("  contextes distincts : %zu (board cible pose x main "
+					"restante)\n", ctx_span);
 	}
-	std::printf("\n");
+	// LE PLAFOND, mesure avant toute courbe. Deux etapes qui presentent le MEME
+	// ensemble de coups legaux dans le MEME contexte sont indiscernables pour
+	// une politique de cette famille ; si le corpus y joue des coups
+	// differents, l'ecart est IRREDUCTIBLE. On rend donc la fraction d'etapes
+	// qui jouent le coup majoritaire de leur point de decision : c'est ce
+	// qu'atteindrait une TABLE parfaite sur ces points — une borne superieure
+	// (le modele a poids PARTAGES entre points de decision ne l'atteint pas
+	// forcement), mais une borne qui dit tout de suite si le corpus se
+	// contredit ou si c'est l'apprentissage qui cale.
+	{
+		size_t g0 = 0, g1 = 0;
+		const double c0 = CorpusCoherence(out, false, &g0);
+		const double c1 = CorpusCoherence(out, true, &g1);
+		std::printf("  plafond de la famille : %.1f%% sans contexte (%zu points "
+					"de decision distincts) -> %.1f%% avec (%zu)\n",
+					100.0 * c0, g0, 100.0 * c1, g1);
+	}
+	// La courbe d'accord, en TROIS dimensions : passes x pas d'adaptation x
+	// niveau contextuel. Le pas y entre parce que la mise a jour NRPA
+	// (+alpha au coup joue, -alpha*p a chacun) EST la montee de gradient de la
+	// log-vraisemblance du corpus sous softmax : trop grand, elle oscille
+	// autour de l'optimum au lieu de l'atteindre. C'est la recette « slow and
+	// long adaptation » de Montparnasse (2505.02110), ici mesurable en
+	// millisecondes au lieu d'un run.
+	const float alphas[] = { 1.0f, 0.5f, 0.2f, 0.1f, 0.05f };
+	for(int lvl = 0; lvl < 2; ++lvl) {
+		const float k = lvl ? 1.0f : -1.0f;
+		std::printf("  accord du corpus — niveau contextuel %s :\n",
+					lvl ? "ACTIF (k=1)" : "eteint");
+		std::printf("      %-8s", "passes");
+		for(float al : alphas)
+			std::printf("  a=%-6.2f", al);
+		std::printf("\n");
+		for(uint32_t n : { 0u, 1u, 4u, 16u, 64u, 256u }) {
+			std::printf("      %-8u", n);
+			for(float al : alphas) {
+				NrpaPolicy probe;
+				NrpaResidual res;
+				AdaptCorpus(probe, &res, out, n, al, defaults.nrpa_bias_known, k);
+				double am = 0;
+				const double a = CorpusAgreement(probe, &res, out,
+												 defaults.nrpa_bias_known, k, &am);
+				std::printf("  %4.0f/%3.0f%%", 100.0 * std::exp(a), 100.0 * am);
+			}
+			std::printf("\n");
+		}
+	}
+	// Contexte pousse a l'extreme : la SIGNATURE du point de decision lui-meme
+	// (contexte + ensemble des coups legaux). Le niveau contextuel devient
+	// alors une quasi-table sur les points de decision — il doit atteindre le
+	// plafond. Ce que ce bras mesure n'est pas un reglage utilisable mais une
+	// REPONSE : si lui seul touche le plafond, alors reproduire le corpus exige
+	// de le MEMORISER, et aucune representation qui generalise ne le fera.
+	{
+		std::vector<NrpaRun> sig_runs = out;
+		std::vector<uint64_t> sorted;
+		for(NrpaRun& r : sig_runs) {
+			for(PolicyStep& s : r.steps) {
+				sorted = s.keys;
+				std::sort(sorted.begin(), sorted.end());
+				uint64_t sig = (s.ctx + 1) * 0x9e3779b97f4a7c15ull;
+				for(uint64_t k : sorted)
+					sig = (sig ^ k) * 0x100000001b3ull;
+				s.ctx = static_cast<uint16_t>(sig ^ (sig >> 32) ^ (sig >> 16));
+			}
+		}
+		std::printf("  accord du corpus — contexte = SIGNATURE du point de "
+					"decision (memorisation) :\n      %-8s", "passes");
+		for(float al : alphas)
+			std::printf("  a=%-6.2f", al);
+		std::printf("\n");
+		for(uint32_t n : { 0u, 1u, 4u, 16u, 64u, 256u }) {
+			std::printf("      %-8u", n);
+			for(float al : alphas) {
+				NrpaPolicy probe;
+				NrpaResidual res;
+				AdaptCorpus(probe, &res, sig_runs, n, al,
+							defaults.nrpa_bias_known, 1.0f);
+				double am = 0;
+				const double a = CorpusAgreement(probe, &res, sig_runs,
+												 defaults.nrpa_bias_known, 1.0f,
+												 &am);
+				std::printf("  %4.0f/%3.0f%%", 100.0 * std::exp(a), 100.0 * am);
+			}
+			std::printf("\n");
+		}
+	}
 	{
 		NrpaPolicy probe;
-		AdaptCorpus(probe, out, opt.adapt_passes, defaults.nrpa_alpha,
-					defaults.nrpa_bias_known);
-		std::printf("  retenu : %u passe(s), %zu poids initiaux%s\n",
-					opt.adapt_passes, probe.size(),
-					opt.adapt_passes
-						? ""
-						: "   <-- adaptation DESACTIVEE (bras temoin de l'A/B)");
+		NrpaResidual res;
+		AdaptCorpus(probe, &res, out, opt.adapt_passes, defaults.nrpa_alpha,
+					defaults.nrpa_bias_known,
+					static_cast<float>(opt.ctx_shrink));
+		std::printf("  retenu : %u passe(s), retenue k=%.1f%s, %zu poids "
+					"globaux + %zu contextuels\n",
+					opt.adapt_passes, opt.ctx_shrink,
+					opt.ctx_shrink < 0 ? " (niveau contextuel ETEINT)" : "",
+					probe.size(), res.size());
+		if(!opt.adapt_passes)
+			std::printf("  (--adapt-passes 0 : releve fait, adaptation "
+						"DESACTIVEE — bras temoin de l'A/B)\n");
 	}
 }
 
@@ -3176,7 +3291,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 	// Rejeu d'adaptation (--adapt, chantier 5bis) : meme corpus, meme point
 	// d'injection, signal discriminatif au lieu d'une prime par coup.
 	std::vector<NrpaRun> adapt_runs;
-	BuildAdaptRuns(opt, db, scripts, plan, adapt_runs);
+	BuildAdaptRuns(opt, db, scripts, plan, target, adapt_runs);
 
 	// --- 3. Etiquetage par joueur : le rejeu augmente ne peut pas consommer
 	// la liste plate (les fenetres nouvelles decalent tout).
@@ -3624,6 +3739,9 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 							fcfg.nrpa_adapt_runs = &adapt_runs;
 							fcfg.nrpa_adapt_passes = opt.adapt_passes;
 						}
+						// Politique a deux niveaux (chantier 5ter).
+						fcfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
+						fcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
 								   base_seed + w * 0x9E3779B97F4A7C15ull + 1);
@@ -4047,7 +4165,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// Rejeu d'adaptation (--adapt, chantier 5bis) : le corpus entre non plus
 	// en primes par coup mais en gradient sur ses propres carrefours.
 	std::vector<NrpaRun> adapt_runs;
-	BuildAdaptRuns(opt, db, scripts, plan, adapt_runs);
+	BuildAdaptRuns(opt, db, scripts, plan, target, adapt_runs);
 
 	// --- 4. Recherche, par approfondissement progressif du nombre d'ecarts.
 	SearchConfig cfg;
@@ -4319,6 +4437,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						wcfg.nrpa_adapt_runs = &adapt_runs;
 						wcfg.nrpa_adapt_passes = opt.adapt_passes;
 					}
+					// Politique a deux niveaux (chantier 5ter).
+					wcfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
+					wcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 					Search s(local, la, start_yrp, wcfg);
 					// Graine distincte par worker : sans cela les seize tirent
 					// exactement la meme sequence de lignes.

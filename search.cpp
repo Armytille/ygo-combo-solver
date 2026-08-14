@@ -1556,6 +1556,17 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// fils : c'est ce qui rend un tirage NRPA plusieurs fois moins cher
 			// qu'un tirage glouton (qui avance/mesure/restaure chaque fils).
 			PolicyStep step;
+			// CONTEXTE de la decision (chantier 5ter) : cartes du board cible
+			// deja posees. Le meme descripteur que celui releve sur les lignes
+			// de corpus — il est SEMANTIQUE, donc comparable d'une ligne a
+			// l'autre, contrairement a la profondeur.
+			// Le descripteur coute une requete de zone par decision : il ne se
+			// paie que si le niveau contextuel est allume.
+			if(cfg.ctx_shrink >= 0.0f)
+				step.ctx = ContextKey(
+					CommonCodes(here.codes, target.codes),
+					duel.Count(static_cast<uint8_t>(cfg.target_player),
+							   LOCATION_HAND));
 			step.keys.reserve(choices.size());
 			step.known.reserve(choices.size());
 			step.hinted.reserve(choices.size());
@@ -1577,10 +1588,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();
-				auto it = pol.find(key);
-				double w = (it == pol.end()) ? 0.0 : it->second;
-				logit[i] = w + (known ? cfg.nrpa_bias_known : 0.0f) +
-						   (hinted ? cfg.hint_bias : 0.0f);
+				double w = EffectiveWeight(pol, &ctx_weights, key, step.ctx,
+										   cfg.ctx_shrink);
+				logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
+							(hinted ? cfg.hint_bias : 0.0f)) /
+						   (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f);
 				mx = (std::max)(mx, logit[i]);
 				step.keys.push_back(key);
 				step.known.push_back(known ? 1 : 0);
@@ -1616,17 +1628,20 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	}
 }
 
-void AdaptRun(NrpaPolicy& pol, const NrpaRun& run, float alpha, float bias_known,
-			  float hint_bias) {
+void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
+			  float alpha, float bias_known, float hint_bias, float shrink,
+			  float temp) {
+	const double inv_t = 1.0 / (temp > 1e-3f ? temp : 1e-3f);
+	const bool two_level = res && shrink >= 0.0f;
 	std::vector<double> p;
 	for(const PolicyStep& s : run.steps) {
 		p.resize(s.keys.size());
 		double mx = -1e300;
 		for(size_t i = 0; i < s.keys.size(); ++i) {
-			auto it = pol.find(s.keys[i]);
-			double w = (it == pol.end()) ? 0.0 : it->second;
-			p[i] = w + (s.known[i] ? bias_known : 0.0f) +
-				   (i < s.hinted.size() && s.hinted[i] ? hint_bias : 0.0f);
+			double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
+			p[i] = (w + (s.known[i] ? bias_known : 0.0f) +
+					(i < s.hinted.size() && s.hinted[i] ? hint_bias : 0.0f)) *
+				   inv_t;
 			mx = (std::max)(mx, p[i]);
 		}
 		double sum = 0;
@@ -1634,18 +1649,31 @@ void AdaptRun(NrpaPolicy& pol, const NrpaRun& run, float alpha, float bias_known
 		pol[s.keys[s.chosen]] += alpha;
 		for(size_t i = 0; i < s.keys.size(); ++i)
 			pol[s.keys[i]] -= static_cast<float>(alpha * p[i] / sum);
+		if(!two_level)
+			continue;
+		// Le niveau contextuel recoit le MEME gradient, sur la case
+		// (coup, contexte). Son compteur mesure l'evidence accumulee dans CE
+		// contexte : c'est lui qui decide, via s(n), quand il prend la main.
+		(*res)[CtxKey(s.keys[s.chosen], s.ctx)].w += alpha;
+		for(size_t i = 0; i < s.keys.size(); ++i) {
+			CtxWeight& c = (*res)[CtxKey(s.keys[i], s.ctx)];
+			c.w -= static_cast<float>(alpha * p[i] / sum);
+			++c.n;
+		}
 	}
 }
 
-void AdaptCorpus(NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
-				 uint32_t passes, float alpha, float bias_known) {
+void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
+				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
+				 float bias_known, float shrink) {
 	for(uint32_t pass = 0; pass < passes; ++pass)
 		for(const NrpaRun& r : runs)
-			AdaptRun(pol, r, alpha, bias_known, 0.0f);
+			AdaptRun(pol, res, r, alpha, bias_known, 0.0f, shrink);
 }
 
-void Search::Adapt(Policy& pol, const NrpaRun& best) const {
-	AdaptRun(pol, best, cfg.nrpa_alpha, cfg.nrpa_bias_known, cfg.hint_bias);
+void Search::Adapt(Policy& pol, const NrpaRun& best) {
+	AdaptRun(pol, &ctx_weights, best, cfg.nrpa_alpha, cfg.nrpa_bias_known,
+			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
@@ -1778,8 +1806,9 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	// fois p(choisi) ~ 1 a une etape, la mise a jour y vaut alpha(1-p) ~ 0 —
 	// les passes saturent au lieu d'exploser.
 	if(cfg.nrpa_adapt_runs && cfg.nrpa_adapt_passes)
-		AdaptCorpus(pol, *cfg.nrpa_adapt_runs, cfg.nrpa_adapt_passes,
-					cfg.nrpa_alpha, cfg.nrpa_bias_known);
+		AdaptCorpus(pol, &ctx_weights, *cfg.nrpa_adapt_runs,
+					cfg.nrpa_adapt_passes, cfg.nrpa_alpha, cfg.nrpa_bias_known,
+					cfg.ctx_shrink);
 	while(!BudgetExhausted() &&
 		  (cfg.anytime || solutions.size() < cfg.max_solutions)) {
 		NrpaRun best;
@@ -1789,12 +1818,24 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 		final_policy = pol;
 		if(cfg.nrpa_restart_keep <= 0.0f) {
 			pol.clear();
+			ctx_weights.clear();
 		} else {
 			for(auto it = pol.begin(); it != pol.end();) {
 				it->second *= cfg.nrpa_restart_keep;
 				// Purge des poids negligeables : la table reste bornee.
 				if(it->second > -0.01f && it->second < 0.01f)
 					it = pol.erase(it);
+				else
+					++it;
+			}
+			// Le niveau contextuel suit la MEME attenuation. Le compteur, lui,
+			// survit : c'est l'evidence accumulee dans ce contexte, pas une
+			// magnitude apprise — un redemarrage n'invalide pas le fait que
+			// cette case ait ete visitee.
+			for(auto it = ctx_weights.begin(); it != ctx_weights.end();) {
+				it->second.w *= cfg.nrpa_restart_keep;
+				if(it->second.w > -0.01f && it->second.w < 0.01f)
+					it = ctx_weights.erase(it);
 				else
 					++it;
 			}
@@ -2189,11 +2230,12 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
-					 NrpaRun& out) {
+					 const BoardKey& target, NrpaRun& out) {
 	size_t unknown = 0, ri = 0;
 	uint8_t ptype = 0;
 	std::vector<uint8_t> payload;
 	int player = -1;
+	BoardKey here;
 	out.score = 0;
 	out.steps.clear();
 
@@ -2259,6 +2301,15 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 				arena.Pop();
 				if(pick < choices.size()) {
 					PolicyStep step;
+					// Le CONTEXTE, calcule comme au tirage : cartes du board
+					// cible deja posees a cet instant de la ligne.
+					ComputeBoardKeyInto(duel,
+										static_cast<uint8_t>(target_player),
+										here);
+					step.ctx = ContextKey(
+						CommonCodes(here.codes, target.codes),
+						duel.Count(static_cast<uint8_t>(target_player),
+								   LOCATION_HAND));
 					step.keys.reserve(choices.size());
 					step.known.reserve(choices.size());
 					for(const Choice& c : choices) {
@@ -2284,28 +2335,65 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 	return unknown;
 }
 
-double CorpusAgreement(const NrpaPolicy& pol, const std::vector<NrpaRun>& runs,
-					   float bias_known) {
+double CorpusAgreement(const NrpaPolicy& pol, const NrpaResidual* res,
+					   const std::vector<NrpaRun>& runs, float bias_known,
+					   float shrink, double* argmax_frac) {
 	double total = 0;
-	size_t n = 0;
+	size_t n = 0, top = 0;
 	std::vector<double> p;
 	for(const NrpaRun& r : runs) {
 		for(const PolicyStep& s : r.steps) {
 			p.resize(s.keys.size());
 			double mx = -1e300;
 			for(size_t i = 0; i < s.keys.size(); ++i) {
-				auto it = pol.find(s.keys[i]);
-				double w = (it == pol.end()) ? 0.0 : it->second;
+				double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
 				p[i] = w + (s.known[i] ? bias_known : 0.0f);
 				mx = (std::max)(mx, p[i]);
 			}
 			double sum = 0;
 			for(double& x : p) { x = std::exp(x - mx); sum += x; }
 			total += std::log((std::max)(p[s.chosen] / sum, 1e-30));
+			bool first = true;
+			for(size_t i = 0; i < p.size(); ++i)
+				if(i != s.chosen && p[i] > p[s.chosen]) { first = false; break; }
+			top += first ? 1 : 0;
 			++n;
 		}
 	}
+	if(argmax_frac)
+		*argmax_frac = n ? static_cast<double>(top) / static_cast<double>(n) : 0.0;
 	return n ? total / static_cast<double>(n) : 0.0;
+}
+
+double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
+					   size_t* groups) {
+	// signature du point de decision -> (coup joue -> nombre de fois)
+	std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint32_t>> seen;
+	std::vector<uint64_t> sorted;
+	size_t total = 0;
+	for(const NrpaRun& r : runs) {
+		for(const PolicyStep& s : r.steps) {
+			sorted = s.keys;
+			std::sort(sorted.begin(), sorted.end());
+			uint64_t sig = use_ctx ? (s.ctx + 1) * 0x9e3779b97f4a7c15ull : 0;
+			for(uint64_t k : sorted)
+				sig = (sig ^ k) * 0x100000001b3ull;
+			++seen[sig][s.keys[s.chosen]];
+			++total;
+		}
+	}
+	if(groups)
+		*groups = seen.size();
+	if(!total)
+		return 0.0;
+	size_t majority = 0;
+	for(const auto& [sig, choices] : seen) {
+		uint32_t best = 0;
+		for(const auto& [k, n] : choices)
+			best = (std::max)(best, n);
+		majority += best;
+	}
+	return static_cast<double>(majority) / static_cast<double>(total);
 }
 
 void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
