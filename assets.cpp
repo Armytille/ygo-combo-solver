@@ -162,6 +162,16 @@ const CardRow* CardDB::Find(uint32_t code) const {
 	return it == cards.end() ? nullptr : &it->second;
 }
 
+void CardDB::NoteUnknown(uint32_t code) const {
+	std::lock_guard<std::mutex> lk(unknown_mx);
+	unknown.insert(code);
+}
+
+std::vector<uint32_t> CardDB::UnknownCodes() const {
+	std::lock_guard<std::mutex> lk(unknown_mx);
+	return std::vector<uint32_t>(unknown.begin(), unknown.end());
+}
+
 uint32_t CardDB::Canonical(uint32_t code) const {
 	const CardRow* r = Find(code);
 	return (r && r->alias) ? r->alias : code;
@@ -220,7 +230,15 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 	while(name.rfind("./", 0) == 0)
 		name.erase(0, 2);
 
-	auto slurp = [](const fs::path& p) -> std::vector<char> {
+	// `bad_read` distingue « le fichier n'est pas la » de « le fichier est la et
+	// je n'ai pas su le lire ». Confondre les deux faisait tomber le chargeur au
+	// depot SUIVANT et charger la MEME carte depuis une autre version du jeu de
+	// scripts : une erreur d'E/S fabriquait exactement le decalage de jeux de
+	// scripts que ce depot redoute le plus, sans jamais atteindre l'ensemble
+	// `misses` qui l'aurait signale (4.7).
+	bool bad_read = false;
+	std::string bad_path;
+	auto slurp = [&](const fs::path& p) -> std::vector<char> {
 		FILE* fp = std::fopen(p.string().c_str(), "rb");
 		if(!fp)
 			return {};
@@ -228,8 +246,14 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 		long size = std::ftell(fp);
 		std::fseek(fp, 0, SEEK_SET);
 		std::vector<char> buf(size > 0 ? static_cast<size_t>(size) : 0);
-		if(!buf.empty() && std::fread(buf.data(), 1, buf.size(), fp) != buf.size())
+		if(buf.empty() ||
+		   std::fread(buf.data(), 1, buf.size(), fp) != buf.size()) {
+			// Fichier vide OU lecture courte : dans les deux cas le fichier
+			// EXISTE et ne donne pas son contenu. On ne se rabat pas.
 			buf.clear();
+			bad_read = true;
+			bad_path = p.string();
+		}
 		std::fclose(fp);
 		// BOM UTF-8 : Lua ne le tolere pas en tete de chunk.
 		if(buf.size() >= 3 && static_cast<unsigned char>(buf[0]) == 0xEF &&
@@ -246,17 +270,24 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 			auto buf = slurp(p);
 			if(!buf.empty())
 				return buf;
+			if(bad_read)
+				break;   // ne PAS se rabattre sur une autre version
 		}
 	}
-	fs::path direct = fs::path(workdir) / name;
-	if(fs::is_regular_file(direct, ec)) {
-		auto buf = slurp(direct);
-		if(!buf.empty())
-			return buf;
+	if(!bad_read) {
+		fs::path direct = fs::path(workdir) / name;
+		if(fs::is_regular_file(direct, ec)) {
+			auto buf = slurp(direct);
+			if(!buf.empty())
+				return buf;
+		}
 	}
 	{
 		std::lock_guard<std::mutex> lock(misses_mutex);
-		misses.insert(name);
+		if(bad_read)
+			unreadable.insert(bad_path);
+		else
+			misses.insert(name);
 	}
 	return {};
 }

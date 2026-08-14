@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,11 +50,23 @@ public:
 	size_t Size() const { return cards.size(); }
 	const std::vector<std::string>& Sources() const { return sources; }
 
+	// Codes que le core a demandes et que la base ne connait pas. C'est le
+	// JUMEAU BASE DE DONNEES du decalage de jeux de scripts, et il est plus
+	// silencieux que lui : le core donne a la carte inconnue un corps vanille
+	// sans effet (duel.cpp), le deck se charge, le duel demarre, la ligne
+	// diverge — et il n'existait aucun equivalent de ScriptProvider::Misses()
+	// pour le signaler (4.6). Le mutex protege les appels concurrents du
+	// lecteur de cartes depuis les workers.
+	void NoteUnknown(uint32_t code) const;
+	std::vector<uint32_t> UnknownCodes() const;
+
 private:
 	bool LoadFile(const std::string& path);
 	std::unordered_map<uint32_t, CardRow> cards;
 	std::unordered_map<uint32_t, std::string> names;
 	std::vector<std::string> sources;
+	mutable std::mutex unknown_mx;
+	mutable std::set<uint32_t> unknown;
 };
 
 class ScriptProvider {
@@ -74,12 +87,22 @@ public:
 		std::lock_guard<std::mutex> lock(misses_mutex);
 		return misses;
 	}
+	// Fichiers PRESENTS que la lecture n'a pas rendus (E/S courte, taille nulle).
+	// Distincts des manquants : une lecture courte se deguisait en « absent » et
+	// faisait charger le MEME script depuis un depot de rang inferieur, donc une
+	// autre version — le decalage de jeux de scripts fabrique a partir d'une
+	// erreur d'E/S, et invisible parce qu'il n'atteignait jamais `misses` (4.7).
+	std::unordered_set<std::string> Unreadable() const {
+		std::lock_guard<std::mutex> lock(misses_mutex);
+		return unreadable;
+	}
 
 private:
 	std::string workdir;
 	std::vector<std::string> dirs;
 	mutable std::mutex misses_mutex;
 	std::unordered_set<std::string> misses;
+	std::unordered_set<std::string> unreadable;
 };
 
 } // namespace solver

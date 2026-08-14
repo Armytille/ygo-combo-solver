@@ -169,11 +169,33 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 		if(has_decks) {
 			for(uint32_t i = 0; i < home_count + opposing_count && cur.Ok(); ++i) {
 				Deck d;
-				for(uint32_t j = 0, n = cur.Get<uint32_t>(); j < n && cur.Ok(); ++j)
+				const uint32_t nm = cur.Get<uint32_t>();
+				for(uint32_t j = 0; j < nm && cur.Ok(); ++j)
 					d.main.push_back(cur.Get<uint32_t>());
-				for(uint32_t j = 0, n = cur.Get<uint32_t>(); j < n && cur.Ok(); ++j)
+				const uint32_t nx = cur.Get<uint32_t>();
+				for(uint32_t j = 0; j < nx && cur.Ok(); ++j)
 					d.extra.push_back(cur.Get<uint32_t>());
+				// Le compte annonce doit etre servi EN ENTIER. Un corps tronque
+				// rendait un deck court sans un mot, et la liste de reponses
+				// courte qui suit devient `ref_decisions`, c'est-a-dire le
+				// plafond de decisions de toute la recherche : un probleme
+				// d'octets se propageait en budget silencieusement reduit (4.5).
+				if(d.main.size() != nm || d.extra.size() != nx) {
+					error = "replay tronque : deck " + std::to_string(i) +
+							" annonce " + std::to_string(nm) + "+" +
+							std::to_string(nx) + " cartes, " +
+							std::to_string(d.main.size()) + "+" +
+							std::to_string(d.extra.size()) + " lues";
+					return false;
+				}
 				decks.push_back(std::move(d));
+			}
+			if(decks.size() != home_count + opposing_count) {
+				error = "replay tronque : " +
+						std::to_string(home_count + opposing_count) +
+						" deck(s) annonces, " + std::to_string(decks.size()) +
+						" lus";
+				return false;
 			}
 			if((flag & FLAG_NEWREPLAY) && !(flag & FLAG_HAND_TEST)) {
 				for(uint32_t i = 0, n = cur.Get<uint32_t>(); i < n && cur.Ok(); ++i)
@@ -183,11 +205,22 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 		// -- reponses du joueur
 		while(!cur.Eof()) {
 			uint8_t len = cur.Get<uint8_t>();
-			if(!len || !cur.Ok())
+			// `len == 0` est le terminateur normal ; une lecture qui echoue ne
+			// l'est pas.
+			if(!cur.Ok()) {
+				error = "replay tronque : en-tete de reponse illisible apres " +
+						std::to_string(responses.size()) + " reponse(s)";
+				return false;
+			}
+			if(!len)
 				break;
 			std::vector<uint8_t> r(len);
-			if(!cur.Read(r.data(), len))
-				break;
+			if(!cur.Read(r.data(), len)) {
+				error = "replay tronque : reponse " +
+						std::to_string(responses.size()) + " annoncee a " +
+						std::to_string(len) + " octets, corps absent";
+				return false;
+			}
 			responses.push_back(std::move(r));
 		}
 	} else {
@@ -197,11 +230,18 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 			if(!cur.Ok())
 				break;
 			uint32_t len = cur.Get<uint32_t>();
-			if(!cur.Ok())
-				break;
+			if(!cur.Ok()) {
+				error = "replay tronque : longueur du paquet " +
+						std::to_string(packets.size()) + " illisible";
+				return false;
+			}
 			std::vector<uint8_t> data(len);
-			if(len && !cur.Read(data.data(), len))
-				break;
+			if(len && !cur.Read(data.data(), len)) {
+				error = "replay tronque : paquet " +
+						std::to_string(packets.size()) + " annonce a " +
+						std::to_string(len) + " octets, corps absent";
+				return false;
+			}
 			if(msg == OLD_REPLAY_MODE) {
 				if(!yrp) {
 					auto nested = std::make_unique<Replay>();

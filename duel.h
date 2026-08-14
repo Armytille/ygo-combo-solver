@@ -119,6 +119,14 @@ private:
 	OCG_Duel handle{ nullptr };
 	std::vector<std::string> errors;
 	std::vector<uint8_t> processor_state;
+	// Requetes d'etat de processeur rendues VIDES par le core. Non nul, le
+	// digest perd sa composante de chaine : deux instants distincts d'une meme
+	// resolution se confondent et la branche du combo est elaguee des le debut
+	// — le patch C1 defait en silence (audit 18).
+	size_t empty_processor_states = 0;
+
+public:
+	size_t EmptyProcessorStates() const { return empty_processor_states; }
 };
 
 // Decoupe le tampon renvoye par OCG_DuelQueryLocation (prefixe par sa taille

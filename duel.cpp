@@ -38,6 +38,10 @@ void Duel::CardReaderThunk(void* payload, uint32_t code, OCG_CardData* data) {
 	const CardRow* row = self->db.Find(code);
 	if(!row) {
 		// Carte inconnue : le core sait faire, il ne lui donnera aucun effet.
+		// C'est precisement le probleme — une VANILLE MUETTE la ou le deck
+		// attend un effet. Releve pour le bilan, comme les scripts manquants
+		// (4.6) : sans cela le duel demarre, la ligne diverge, et rien ne le dit.
+		self->db.NoteUnknown(code);
 		data->code = code;
 		return;
 	}
@@ -217,8 +221,14 @@ const std::vector<uint8_t>& Duel::ProcessorState() {
 		data = static_cast<const uint8_t*>(
 			OCG_DuelQueryProcessorState(handle, &len));
 	}
-	// Le tampon appartient au core, donc a l'arene : on le recopie cote hote
-	// avant qu'une restauration ne le remplace.
+	// Un tampon nul ou vide DEFAIT le patch C1 en silence : sans la composante
+	// d'etat de processeur, deux instants distincts d'une meme resolution de
+	// chaine portent le meme digest, sont fusionnes par la table de
+	// transposition, et la branche du combo est elaguee des le debut. Le comptage
+	// rend la panne lisible au lieu de la laisser se deguiser en « il n'y a rien
+	// a trouver » (audit 18).
+	if(!data || !len)
+		++empty_processor_states;
 	processor_state.assign(data, data + (data ? len : 0));
 	return processor_state;
 }

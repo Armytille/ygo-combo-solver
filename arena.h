@@ -24,6 +24,7 @@
 // incrementale.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -40,6 +41,7 @@ struct ArenaStats {
 	size_t free_count = 0;
 	size_t host_fallbacks = 0; // allocations sorties de l'arene alors qu'elle
 							   // etait active (doit rester a zero)
+	bool poisoned = false;     // au moins un repli : l'etat n'est plus capture
 };
 
 // Une arene par thread : chaque worker explore son propre sous-arbre, les
@@ -55,6 +57,29 @@ public:
 	void* Allocate(size_t size);
 	void Free(void* ptr);
 	void* Reallocate(void* ptr, size_t old_size, size_t new_size);
+
+	// --- EMPOISONNEMENT ------------------------------------------------------
+	//
+	// Une allocation qui n'a pas tenu dans l'arene part sur le tas de l'hote.
+	// `Restore()` ne peut PAS la restaurer : a partir de cet instant l'etat du
+	// duel diverge de ce que la recherche croit avoir restaure, et tout ce que
+	// ce worker mesure ensuite — noeuds, board keys, solutions — porte sur un
+	// duel corrompu. Ce n'est donc pas une statistique, c'est une condition
+	// d'arret.
+	//
+	// Le compteur etait auparavant un `thread_local` lu depuis le thread
+	// PRINCIPAL : les replis des workers etaient structurellement invisibles et
+	// le rapport imprimait « aucune : tout l'etat est capture » par
+	// construction. Il est desormais membre et atomique, et le drapeau est
+	// COLLANT (C7).
+	void NoteFallback() {
+		fallbacks.fetch_add(1, std::memory_order_relaxed);
+		poisoned.store(true, std::memory_order_relaxed);
+	}
+	bool Poisoned() const { return poisoned.load(std::memory_order_relaxed); }
+	size_t Fallbacks() const {
+		return fallbacks.load(std::memory_order_relaxed);
+	}
 
 	bool Contains(const void* p) const {
 		auto a = reinterpret_cast<std::uintptr_t>(p);
@@ -160,6 +185,10 @@ private:
 	// pages ont change, jamais ce qu'elles contenaient.
 	std::vector<uint8_t> mirror;
 	size_t live_bytes = 0, alloc_count = 0, free_count = 0;
+	// Atomiques : ecrits par le thread proprietaire, lus par lui ET par le
+	// thread principal au bilan.
+	std::atomic<size_t> fallbacks{ 0 };
+	std::atomic<bool> poisoned{ false };
 	std::vector<uint8_t*> dirty_scratch;
 	CheckpointCost last_push, last_restore;
 };
@@ -174,7 +203,6 @@ Arena* CurrentArena();
 // Arene du thread, independamment des pauses : sert a router les liberations,
 // qui peuvent survenir hors de tout scope.
 Arena* OwnerArena();
-size_t ArenaHostFallbacks();
 
 // Rend l'arene active. A poser autour des appels au core et seulement autour
 // d'eux : le code hote doit allouer normalement.

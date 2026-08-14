@@ -63,7 +63,6 @@ thread_local size_t t_host_fallbacks = 0;
 
 Arena* CurrentArena() { return t_active; }
 Arena* OwnerArena() { return t_owner; }
-size_t ArenaHostFallbacks() { return t_host_fallbacks; }
 
 namespace detail {
 void NoteHostFallback() { ++t_host_fallbacks; }
@@ -525,7 +524,10 @@ ArenaStats Arena::Stats() const {
 	s.live_bytes = live_bytes;
 	s.alloc_count = alloc_count;
 	s.free_count = free_count;
-	s.host_fallbacks = t_host_fallbacks;
+	// Compteur MEMBRE, pas thread_local : les replis se produisent dans les
+	// workers et ce bilan se lit depuis le thread principal (C7).
+	s.host_fallbacks = fallbacks.load(std::memory_order_relaxed);
+	s.poisoned = poisoned.load(std::memory_order_relaxed);
 	return s;
 }
 
@@ -550,6 +552,11 @@ void* SolverAllocate(size_t n) {
 	if(auto* a = solver::CurrentArena()) {
 		if(void* p = a->Allocate(n))
 			return p;
+		// L'arene est pleine. On sert quand meme depuis le tas — refuser
+		// planterait le core — mais l'arene est desormais EMPOISONNEE : ce que
+		// ce worker mesurera ensuite porte sur un duel que Restore() ne sait
+		// plus reconstituer. Le drapeau est collant et fait avorter le worker.
+		a->NoteFallback();
 		solver::detail::NoteHostFallback();
 	}
 	void* p = std::malloc(n ? n : 1);
@@ -593,8 +600,12 @@ void operator delete[](void* p, const std::nothrow_t&) noexcept { SolverRelease(
 void* operator new(size_t n, std::align_val_t al) {
 	if(static_cast<size_t>(al) <= 16)
 		return SolverAllocate(n);
-	if(solver::CurrentArena())
+	if(auto* a = solver::CurrentArena()) {
+		// Meme consequence qu'un debordement : cet objet vit hors de
+		// l'instantane et Restore() ne le retablira pas (C7).
+		a->NoteFallback();
 		solver::detail::NoteHostFallback();
+	}
 	void* p = _aligned_malloc(n ? n : 1, static_cast<size_t>(al));
 	if(!p)
 		throw std::bad_alloc();

@@ -90,9 +90,17 @@ private:
 struct EnumOptions {
 	// Fusionne les choix portant sur des cartes de meme code au meme endroit.
 	bool dedup_by_code = true;
-	// Plafonne la taille des sous-ensembles enumeres (SELECT_CARD, SUM...).
-	// Au-dela, on echantillonne les extremes plutot que d'exploser.
+	// Plafonne le NOMBRE de sous-ensembles enumeres (SELECT_CARD, SUM...).
+	// Au-dela, on echantillonne les tailles extremes plutot que d'exploser.
+	// C'est ce nombre qui plafonne le facteur de branchement de TOUS les
+	// prompts de selection ; il etait ecrit en dur (24) a douze endroits, ce
+	// defaut de 64 n'etant jamais utilise. Voir --max-subsets (C16).
 	uint32_t max_subsets = 64;
+	// Incremente quand le plafond ci-dessus a coupe une enumeration : sans lui
+	// une selection tronquee est indiscernable d'une selection complete, et une
+	// preuve d'absence portant sur un prompt de somme n'en est plus une (C9).
+	// Non nul, il pointe un compteur propre au Search appelant.
+	uint64_t* subsets_capped = nullptr;
 	// N'explore qu'une zone libre representative par type de zone. Faux par
 	// defaut : les fleches de lien et les colonnes peuvent tout changer.
 	bool canonical_zones = false;
@@ -142,8 +150,25 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 // Une reponse ENREGISTREE contourne l'enumerateur, donc son filtre
 // d'activations interdites : ce test la rattrape (mode reparation, ou la
 // reponse de la reference est candidate a cout zero sans etre enumeree).
+//
+// TRI-ETAT (C10). L'ancienne version rendait `false` = AUTORISE sur tous ses
+// chemins d'echec, alors qu'elle decode une disposition de message ocgcore
+// codee en dur : une derive de format faisait cesser --no-activate et
+// --no-chain de filtrer, EN SILENCE, tout en restant crus.
+enum class Verdict { Allowed, Forbidden, Undecodable };
+Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
+						const std::vector<uint8_t>& response,
+						const EnumOptions& opt);
+
+// Enveloppe conservatrice : `Undecodable` compte comme INTERDIT — la branche
+// est retiree plutot qu'admise sans controle — et le cas est compte.
 bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 					   const std::vector<uint8_t>& response,
 					   const EnumOptions& opt);
+
+// Nombre de reponses que le decodeur n'a pas su lire. NON NUL = la disposition
+// des messages du core a derive : les filtres ne veulent plus rien dire et le
+// run doit etre jete. Imprime au bilan.
+uint64_t UndecodableResponses();
 
 } // namespace solver

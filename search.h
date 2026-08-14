@@ -257,11 +257,17 @@ using NrpaPolicy = std::unordered_map<uint64_t, float>;
 
 // --- politique a DEUX NIVEAUX (chantier 5ter, inspire de MCPS 2510.06381) ---
 //
-// Le plafond mesure en session 7 (accord du corpus 44 % -> 66 %, palier des la
-// premiere passe, 70 % au mieux sur une ligne SEULE) n'est pas un defaut de
-// signal : c'est la REPRESENTATION. Un poids par plan_key est aveugle a l'etat,
-// or la meme identite semantique revient a des dizaines d'endroits d'une meme
-// ligne avec des choix differents — aucun jeu de poids ne peut reproduire cela.
+// ATTENTION — CE DIAGNOSTIC A ETE RETIRE PAR LA SESSION 7bis (§9.13, encadre
+// RECTIFICATION ; §9.14). Il disait : « le plafond mesure en session 7 (accord
+// du corpus 44 % -> 66 %) n'est pas un defaut de signal, c'est la
+// REPRESENTATION ». L'instrument mesurait en fait autre chose — une moyenne
+// GEOMETRIQUE lue seule, ecrasee par une poignee de p proches de zero (piege
+// 44) ; au CLASSEMENT la politique etait deja a 96 % contre un plafond calcule
+// de 96,1/97,3 %. Ce qui manque est la MASSE, pas la representation.
+//
+// Le commentaire est conserve parce qu'il explique pourquoi ce chantier existe,
+// mais il ne doit plus servir de justification : le document a ete corrige, ce
+// commentaire ne l'avait pas ete (audit 7.1).
 //
 // Enrichir la cle du contexte, seul, echangerait un plafond contre une famine :
 // chaque case contextuelle verrait une fraction des mises a jour. MCPS repond a
@@ -425,14 +431,25 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // rien. `res` non nul : le niveau contextuel recoit le MEME gradient, sur sa
 // propre case (coup, contexte) ; les deux niveaux estiment la meme quantite a
 // des granularites differentes.
+//
+// La promesse ci-dessus n'etait PAS tenue jusqu'a la session 9 : `AdaptCorpus`
+// appelait cette fonction avec sept arguments pour huit, forcant hint_bias a 0
+// et laissant temp au defaut (audit 7.5/3.2). Le defaut de `temp` est conserve
+// ici pour les appels a un seul argument de distribution, mais AdaptCorpus,
+// lui, les EXIGE tous les deux.
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
 			  float temp = 1.0f);
 
 // `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
+// `hint_bias` et `temp` sont EXIGES, sans defaut : la session 8 les avait
+// omis a l'appel — sept arguments pour huit parametres — de sorte que le
+// gradient du corpus etait calcule sous une distribution differente de celle
+// que les tirages echantillonnent, precisement sur les coups indices (les
+// rips). Un defaut ici rendrait la meme omission a nouveau silencieuse.
 void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
-				 float bias_known, float shrink);
+				 float bias_known, float hint_bias, float shrink, float temp);
 
 // --- archive d'etats (Go-Explore, arXiv:2004.12919) ------------------------
 //
@@ -503,6 +520,72 @@ private:
 	uint64_t mask = 0;
 };
 
+// --- partition dynamique du travail entre workers ---------------------------
+//
+// Une case par POINT DE RECLAMATION DISTINCT, en adressage ouvert sur la cle
+// elle-meme. Remplace le tableau a index hache de la session 8, qui avait deux
+// defauts fatals et silencieux : deux points distincts pouvaient tomber sur la
+// meme case (le second etait alors interdit a tout le monde), et le tableau
+// etait dimensionne sur la taille du PLAN — donc a UNE case en mode but seul,
+// ou le plan est vide. Un jeton pour seize workers : toute deviation etait
+// supprimee et aucun compteur ne le disait.
+//
+// Deux regles :
+//   - la cle est stockee EN ENTIER, donc une case refusee l'est parce que le
+//     point est deja pris, jamais par collision ;
+//   - a saturation on echoue OUVERT (le point est accorde). Du travail refait
+//     coute du temps ; un point perdu serait un trou de completude — et une
+//     preuve d'absence fausse. Le compteur `overflow` le dit.
+class ClaimTable {
+public:
+	explicit ClaimTable(size_t want) {
+		size_t n = 1024;
+		while(n < want * 4)
+			n *= 2;
+		slots = std::vector<std::atomic<uint64_t>>(n);
+		for(auto& s : slots)
+			s.store(0, std::memory_order_relaxed);
+		mask = n - 1;
+	}
+	// true = ce worker prend le point ; false = un autre l'avait deja pris.
+	bool Claim(uint64_t key) {
+		if(!key)
+			key = kZeroSub;
+		uint64_t h = key * 0x9E3779B97F4A7C15ull;
+		h ^= h >> 29;
+		for(size_t i = 0; i < kProbe; ++i) {
+			std::atomic<uint64_t>& s = slots[(h + i) & mask];
+			uint64_t cur = s.load(std::memory_order_relaxed);
+			if(cur == key)
+				return false;
+			if(cur == 0) {
+				uint64_t expected = 0;
+				if(s.compare_exchange_strong(expected, key,
+											 std::memory_order_relaxed))
+					return true;
+				if(expected == key)
+					return false;   // course perdue sur le MEME point
+			}
+		}
+		overflow.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+	uint64_t Overflow() const {
+		return overflow.load(std::memory_order_relaxed);
+	}
+
+private:
+	// Une cle nulle est un digest legitime ; on la substitue pour garder 0 comme
+	// sentinelle de case libre. Confondre ces deux valeurs exigerait que les
+	// deux existent au meme niveau de reclamation — sans consequence de
+	// correction (au pire un point refuse a tort).
+	static constexpr uint64_t kZeroSub = 0x5bf03635e2c1a9d7ull;
+	static constexpr size_t kProbe = 16;
+	std::vector<std::atomic<uint64_t>> slots;
+	std::atomic<uint64_t> overflow{ 0 };
+	uint64_t mask = 0;
+};
+
 struct SearchConfig {
 	int target_player = 0;
 	uint32_t max_decisions = 24;      // profondeur, en decisions
@@ -527,8 +610,11 @@ struct SearchConfig {
 	// reclamant au deuxieme, tous les workers entrent dans les gros sous-arbres
 	// et s'y partagent le travail.
 	uint32_t claim_level = 1;
-	std::atomic<uint32_t>* claims = nullptr;
-	size_t claims_size = 0;
+	// La cle de reclamation est l'INDICE DE REFERENCE en reparation (une vraie
+	// partition de la ligne : un point, un jeton) et le DIGEST D'ETAT en
+	// transplantation, ou aucun indice lineaire n'existe — en mode but seul il
+	// n'y a meme pas de ligne. Voir ClaimTable.
+	ClaimTable* claims = nullptr;
 
 	// Transplantation : ordre de preference entre deux coups du repertoire.
 	// Sert uniquement a visiter d'abord ceux que la reference jouait tot.
@@ -636,6 +722,29 @@ struct SearchConfig {
 	// politique, borne decomposee sur les 18 segments 10^5,8 a 10^12,5.
 	// false = cout de Levin d'avant, bit pour bit.
 	bool levin_reroot = false;
+	// sqrt-LTS-H (session 8, chantier 11 — arXiv:2605.30664 §3.2, la meilleure
+	// des trois conceptions de rerooter de l'article sur CraftWorld, le domaine
+	// le plus proche du notre : materiaux consommes, impasse par consommation
+	// d'une piece, 306 224 expansions en LTS contre 2 515 en sqrt-LTS-H).
+	//
+	// Le rerooter DUR de `levin_reroot` exige un EVENEMENT discret (le nombre de
+	// cartes cibles posees change). Sur le cas Lunalight cet evenement ne tombe
+	// pas avant l'etape 76 sur 108 : le rerooter n'a aucun point ou mordre, et
+	// sqrt-LTS degenere en LTS sur les 70 % de ligne qui precedent. Le rerooter
+	// HEURISTIQUE n'a pas ce defaut — il donne un poids a CHAQUE noeud :
+	//
+	//     w_t = exp(-alpha * h(n_t) / h(racine))          (Eq. 7 de l'article)
+	//
+	// h etant notre distance au but (cartes cibles manquantes + resolutions
+	// manquantes). alpha est une temperature INVERSE : petit, les poids se
+	// ressemblent et le rerooter est conservateur ; grand, la masse se concentre
+	// sur les noeuds qui ont visiblement progresse. 0 = eteint.
+	//
+	// Le cout devient c(n) = min_{n_t < n} (1/w_t) * c^r_{n_t}(n), le min de
+	// l'article (Eq. 3) au lieu du seul ancetre-indice. On le tient en O(1) par
+	// une recurrence a deux termes (cf. RunLevin) : prolonger le meilleur ancetre
+	// courant, ou se re-enraciner sur le parent.
+	float reroot_h = 0.0f;
 	// Poids d'une resolution exigee (--resolve) dans le gradient des tirages.
 	// A 100 (une carte cible), les lignes 8/8 SANS rip gagnent la course
 	// d'adaptation contre les lignes rip-partielles (mesure session 4 :
@@ -761,7 +870,26 @@ struct SearchStats {
 	uint64_t transpositions = 0;    // fusions par la table
 	uint64_t dead_ends = 0;         // reponses rejetees par le core
 	uint64_t terminals = 0;
+	// Branches coupees par un PLAFOND (profondeur en decisions, budget
+	// d'actions) et non par l'espace lui-meme. Tant qu'il valait zero partout —
+	// il n'etait ecrit nulle part — une recherche dont toutes les branches
+	// avaient ete rabotees par la borne s'affichait "EPUISE", c'est-a-dire
+	// preuve d'absence. Non nul, le mot devient "EPUISE SOUS BORNE".
 	uint64_t edges_skipped = 0;
+	// Enumerations de sous-ensembles TRONQUEES par max_subsets. Meme nature que
+	// `edges_skipped` — des reponses legales que la recherche n'a jamais vues —
+	// mais du cote de l'enumerateur (C9/C16).
+	uint64_t subsets_capped = 0;
+	// Branches supprimees parce qu'un autre worker detenait le jeton du point
+	// (partition ClaimTable). Sans ce compteur, un verrouillage de la partition
+	// est indiscernable d'un espace de recherche vide — c'etait le cas.
+	uint64_t claim_denied = 0;
+	// Prompts que l'enumerateur n'a pas su ouvrir, reduits a LA reponse par
+	// defaut. Ce n'est pas un elagage : c'est un pan de l'espace qui n'a jamais
+	// existe. Le masque retient quels types de messages sont concernes, pour que
+	// le rapport nomme le prompt au lieu de dire seulement « il y en a » (3.5).
+	uint64_t forced_default = 0;
+	uint64_t forced_default_prompts = 0;
 	// Nombre d'etats DISTINCTS atteints a chaque profondeur : c'est la courbe
 	// qui decide si "exhaustif" est un mot realiste.
 	std::vector<uint64_t> distinct_by_depth;
@@ -798,6 +926,23 @@ struct SearchStats {
 	// (un indice y est tombe). Sans ce compteur, un rerooting inactif serait
 	// indiscernable d'un rerooting inutile — piege 40.
 	uint64_t reroots = 0;
+	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
+	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
+	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
+	// combien l'ont ete parce que la comparaison a bascule pour raison purement
+	// NUMERIQUE. `lam_saturated` : lambda epingle a 1e300, apres quoi
+	// log(lam-1) est constant pour toute la descendance et le best-first
+	// degenere. A non nul, le bras est a JETER, pas a interpreter — sans ces
+	// trois compteurs, un mecanisme qui s'est eteint tout seul se lisait comme
+	// un mecanisme qui a perdu (4.12).
+	uint64_t levin_overflow = 0;
+	uint64_t reroot_by_overflow = 0;
+	uint64_t lam_saturated = 0;
+	// h a la RACINE DE LA RECHERCHE COURANTE — le denominateur de l'Eq. 7. Il
+	// vaut ~1 dans le finisseur (l'etat de depart est deja a 7/8 cartes) et non
+	// |cible| : sans l'imprimer, le cadran alpha ne dit pas a quelle echelle il
+	// a ete parcouru. Zero = rerooter doux eteint.
+	double h_root = 0.0;
 	uint64_t goal_hits = 0;         // atteintes du but (re-atteintes comprises)
 	// --- reparation ---
 	// Resynchronisations semantiques : etats dont le digest a retrouve un point
@@ -817,7 +962,15 @@ struct SearchStats {
 	// diagnostic du handrip : separe « la politique ne rippe jamais »
 	// (echantillonnage, resolve_reached[0] > 0) de « le rip n'est jamais
 	// legal/possible ici » (jeu, resolve_reached[0] = 0).
+	// Quatre cases seulement, alors que le total exige peut aller jusqu'a 15
+	// (jusqu'a quatre entrees --resolve, chacune avec son min_count) : avec
+	// `--resolve X:3 --resolve Y:3`, l'histogramme rend les MEMES nombres qu'un
+	// tirage atteigne 4 ou 6 resolutions, c'est-a-dire exactement la
+	// discrimination pour laquelle il existe. `resolve_overflow` compte les
+	// franchissements au-dela de la 4e : a non nul, l'histogramme est tronque
+	// et il faut le lire comme tel (4.10).
 	uint64_t resolve_reached[4] = { 0, 0, 0, 0 };
+	uint64_t resolve_overflow = 0;
 	// Meilleure crete CONDITIONNEE aux resolutions COMPLETES : jusqu'ou les
 	// lignes qui ont fait TOUS les rips montent-elles ? Si elles plafonnent
 	// loin du board pendant que les lignes muettes font 8/8, les deux buts
@@ -828,7 +981,36 @@ struct SearchStats {
 	bool exhausted = false;         // espace epuise dans les bornes donnees
 	bool hit_time_limit = false;
 	bool hit_node_limit = false;
+	// Garde-fou MEMOIRE du finisseur (4 M noeuds enfiles), distinct du plafond
+	// de noeuds developpes : une racine tronquee par la memoire etait
+	// typographiquement indiscernable d'une racine normale (C5).
+	bool hit_memory_limit = false;
+	// L'arene du worker a debordé : tout ce qui a ete mesure APRES est faux
+	// (Restore() ne restaure pas les objets partis sur le tas de l'hote). Ce
+	// n'est pas un plafond, c'est une invalidation (C7).
+	bool arena_poisoned = false;
 };
+
+// Statut de fin de recherche, en un mot, pour les tables de racines. "EPUISE"
+// est une PREUVE D'ABSENCE et ne s'ecrit que si aucune borne n'a mordu :
+// `edges_skipped` non nul le degrade en "EPUISE SOUS BORNE" (C2), et les deux
+// plafonds qui n'apparaissaient nulle part sont nommes (C5).
+inline const char* SearchOutcome(const SearchStats& st) {
+	// En tete : une arene empoisonnee invalide TOUT le reste, y compris un
+	// eventuel « ÉPUISÉ ».
+	if(st.arena_poisoned)   return "!! ARENE CORROMPUE";
+	if(st.hit_time_limit)   return "budget";
+	if(st.hit_memory_limit) return "memoire";
+	if(st.hit_node_limit)   return "noeuds";
+	// Reste un seul cas non epuise : la recherche s'est arretee sur son quota de
+	// solutions. Il s'affichait comme une colonne VIDE, indiscernable d'un arret
+	// non explique.
+	if(!st.exhausted)       return "quota";
+	// Une enumeration tronquee retire des reponses LEGALES de l'espace : elle
+	// retire a « EPUISE » sa valeur de preuve exactement comme un plafond.
+	return (st.edges_skipped || st.subsets_capped) ? "EPUISE SOUS BORNE"
+												   : "EPUISE";
+}
 
 class Search {
 public:
@@ -1062,7 +1244,9 @@ private:
 	std::vector<uint64_t> atoms_scratch;
 	std::vector<Solution> solutions;
 	std::vector<std::vector<uint8_t>> path;
-	SearchStats stats;
+	// `mutable` : BudgetExhausted() est const et doit pouvoir poser le drapeau
+	// d'arene empoisonnee, qui est une condition d'arret et non une statistique.
+	mutable SearchStats stats;
 	std::chrono::steady_clock::time_point start;
 
 	// --- objectif de cout anytime ---

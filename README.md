@@ -76,11 +76,31 @@ combosolver.exe duel.yrpX --scriptdir <scripts> `
     --resolve "Trishula, Dragon of the Ice Barrier@terrain"
 ```
 
+# MODE BUT SEUL (session 8) : atteindre un board depuis une decklist, SANS
+# ligne de reference. Le replay positionnel n'est plus qu'un GABARIT de duel
+# (drapeaux, LP, taille de main, deck adverse) — il est imprime en tete du
+# rapport pour que ce soit verifiable et non promis. `--target` POSE le board
+# cible au lieu de l'editer depuis une capture ; `--no-ref` implique
+# `--no-plan`, qui ecarte le REPERTOIRE (les identites semantiques des coups de
+# la reference, servies en biais a la politique NRPA).
+combosolver.exe gabarit.yrpX --scriptdir <scripts> `
+    --deck "D:\ProjectIgnis\deck\Lunalight.ydk" `
+    --hand "57103969|57103969|57103969" `
+    --no-ref --target 54701958 --target 54701958 --target 54701958 `
+    --target "90590304@DEF" --max-decisions 700
+# `--no-plan` SEUL (reference intacte par ailleurs) est l'etalon de mesure : un
+# seul facteur change, et il chiffre ce que le repertoire valait.
+# Attention : sans plan, la passe « a ecarts bornes autour du plan » etait
+# structurellement VIDE (26 etats a tous les niveaux, mesure session 8) — mais
+# c'etait le defaut C1 (un seul jeton de partition pour seize workers), corrige
+# session 9. La mesure est A REFAIRE ; lire la colonne "partition".
+
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
 `--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
-`--no-burn-share`, `--verbose`).
+`--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
+`--nrpa-level`, `--max-subsets`, `--verbose`).
 La graine des tirages est dérivée du temps et imprimée — la redonner via
 `--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
 divergent quand même (l'ordre des échanges entre workers dépend du timing) —

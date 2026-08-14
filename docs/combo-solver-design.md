@@ -1091,8 +1091,14 @@ remplacé par un finisseur archive + LTS, en quatre pièces :
   borné par le rejeu (Process), pas par la file.
 - *Racines* : archive triée par score, reculs {15, 30} des 3 meilleures entrées, meilleur chemin
   global et ses reculs {5, 10, 20, 40, 60, 90} (l'approximation praticable du re-rooting √LTS,
-  arXiv:2412.05196), et les approches des sessions passées (`--approach`, reculs
-  {0, 10, 30, 60, 90, 120}). `--finisher mono|levin|ab` (ab = les deux à budget égal, la mesure).
+  arXiv:2412.05196), et les approches des sessions passées (`--approach`). `--finisher
+  mono|levin|ab` (ab = les deux à budget égal, la mesure).
+
+  > **Reculs d'`--approach` — valeurs à jour (corrigé session 9, audit 7.6).** Ce paragraphe
+  > annonçait {0, 10, 30, 60, 90, 120} ; le code sert **{0, 10, 20, 30, 45}** au finisseur LTS
+  > et **{60, 70, 80, 90, 110, 150}** en phase A2 (NRPA). Les reculs d'archive {15, 30} et de
+  > meilleur chemin {5, 10, 20, 40, 60, 90} correspondent, eux. Le §9.15 raisonne encore sur
+  > les valeurs documentées : ses tables « appr0 recul N » sont à lire avec les vraies.
 
 **L'A/B qui l'a jugé — et le verrou généralisé.** Sur les deux cas qui ont motivé le chantier,
 même run, budget égal (`--finisher ab`, graine 777, 600 s) :
@@ -1911,3 +1917,559 @@ trancher 18 brûlées (arXiv:2404.07934, la forme concrète de la « relaxation 
 §9.10 porte depuis trois sessions) ; les landmarks généralisés appris depuis les plans résolus
 (arXiv:2508.21564) ; l'escalade par fenêtre `--fire` (chantier 6bis) ; chantiers 4, 7, 8
 inchangés.
+
+### 9.15 Session 8 : le mode BUT SEUL, et le rerooter qu'on n'avait pas implémenté
+
+**La mission** : atteindre un board donné depuis une decklist, sans ligne de référence — et,
+pour y arriver, une revue d'état de l'art. C'est le premier chantier du projet dont la réponse
+n'était pas dans le dépôt. La revue complète est dans `docs/etat-de-lart-but-seul.md` ; ce qui
+suit n'en retient que ce qui a changé le code ou une décision.
+
+**(a) Ce que la revue a rapporté, et qui ne se devinait pas.**
+
+*Le domaine a un jumeau publié.* Le banc **CraftWorld** de arXiv:2605.30664 se décrit ainsi :
+« l'agent collecte des matériaux bruts, les transforme en objets intermédiaires eux-mêmes
+transformables en produits finaux ; **l'environnement peut se retrouver en impasse si l'on
+fabrique le mauvais objet, les objets étant consommés dès qu'ils entrent dans une recette** ».
+C'est le combo Yu-Gi-Oh en une phrase. Ses chiffres deviennent donc des ordres de grandeur
+crédibles, ce qu'aucun résultat sur Sokoban ne pouvait être : LTS 306 224 expansions,
+√LTS-L (grappes) 8 803, **√LTS-H (heuristique) 2 515**, hybride 1 348 — et la génération
+EXPLICITE de sous-buts par autoencodeur, 345 096, *pire que LTS*.
+
+*Notre `--reroot` n'est aucun des rerooters de l'article.* Le coût de √LTS est
+`c(n) = min_{n_t ≺ n} (1/w_t)·c^r_{n_t}(n)` — un minimum sur TOUS les ancêtres, chacun pondéré.
+Notre implémentation de la session 7ter ne considère qu'un ancêtre, le plus proche portant un
+INDICE, à poids uniformes : un rerooter **dur**. Les trois conceptions mesurées par l'article
+sont toutes **douces**, à poids partout non nuls. D'où un diagnostic mécanique de l'échec de
+7ter, indépendant de l'argument de régime : notre indice est « le nombre de cartes cibles
+posées a changé », or il ne tombe pas avant l'étape 76 sur 108 du cas Lunalight, et jamais sur
+la bande précoce du cas synchron. **Sans indice, il n'existe aucun point de re-enracinement et
+√LTS dégénère exactement en LTS.** Le rerooter dur est structurellement incapable de mordre
+dans un paysage plat — qui est précisément notre paysage. L'A/B perdant de 7ter avait donc
+deux causes, pas une.
+
+*Un résultat négatif obtenu sans dépenser un run.* Ståhlberg & Geffner (arXiv:2512.19355)
+mesurent trois variantes de HER en planification : le but relabellisé en sous-ENSEMBLE du but
+original bat le but relabellisé en état complet de 31 points (82,4 % contre 51,0 %), et le
+relabeling fabrique tout seul un curriculum. Mais leur domaine *Delivery* échoue : « tous les
+colis doivent être livrés au MÊME endroit […] la probabilité d'en livrer plusieurs dans une
+seule trajectoire est extrêmement faible, **les modèles apprennent à en livrer un seul** ».
+Notre étalon A vise **3× Liger Dancer** et notre meilleur résultat mesuré est **un** Liger,
+jamais deux. Même forme de but, même échec. *Le rejeu rétrospectif seul ne débloquera pas
+l'étalon A*, et on le sait avant de l'écrire. Second avertissement du même papier, sur le
+SIGNE : « toute trajectoire finissant en cul-de-sac est relabellisée en succès […] il n'y a
+donc aucune donnée sur la façon d'ÉVITER les culs-de-sac ». Chez nous une ligne qui brûle une
+pièce nécessaire vingt-cinq étapes plus tard est exactement cela : un répertoire rétrospectif
+non filtré apprendrait à foncer dans le mur.
+
+*Écarté sur structure, avec la raison.* La recherche bidirectionnelle (NBS, BAE\*, PEM-BAE\*,
+DIBBS et leurs descendants 2026) exige sans exception une **fonction de prédécesseurs** ;
+`ocgcore` ne peut pas en avoir — un état de duel est un tas Lua plus une pile de résolution
+plus des compteurs « une fois par tour », et « l'état d'avant » n'est pas calculable, seulement
+re-simulable. Les heuristiques de relaxation et le comptage d'opérateurs exigent un modèle
+déclaratif des actions ; nos actions sont des scripts Lua. L'apprentissage de sketches (Drexler
+et al.) exige PDDL et de petites instances du même domaine. Ce qui reste vivant de ces
+directions est le **graphe de recettes appris depuis les tirages** (les matériaux consommés
+sont observables à l'invocation) : ce n'est pas une recherche en arrière, c'est ce qui
+fournirait un `h` qui DÉCROÎT en cours de ligne — et donc ce qui armerait le rerooter
+heuristique, dont les poids sont fonction de `h`. Les deux chantiers n'en font qu'un.
+
+**(b) Le mode but seul, implémenté dans sa forme minimale.**
+
+- `--target "carte[@ATK|DEF]"`, répétable : le board cible est **posé**, plus édité depuis la
+  capture de la référence. La cascade de `--board-remove` de la session 7ter était elle-même
+  de l'information sur ce que la référence avait posé.
+- `--no-plan` : le répertoire est relevé, **imprimé**, puis jeté. Le relevé reste pour que la
+  mesure dise ce qu'on retire — un mécanisme neutralisé en silence n'est pas un bras témoin.
+- `--no-ref` : implique `--no-plan`, exige `--target` et `--deck`. Le replay positionnel est
+  dégradé au rang de **gabarit de duel** ; ses drapeaux, LP, taille de main et deck adverse
+  sont imprimés en tête du rapport, pour que « sans référence » soit vérifiable et non promis.
+- Le compteur `reroots` **est imprimé** dans la table du finisseur. Il existait depuis la
+  session 7ter et n'était lu nulle part : l'A/B de 7ter a donc été tranché sans savoir si le
+  mécanisme mordait (piège 40, sur notre propre instrument).
+
+**Une observation du mode — et sa RÉTRACTATION, dans la même session.** Sans plan, la passe
+« recherche à écarts bornés autour du plan » rend 26 états à tous les niveaux d'écart sur
+l'étalon B. On en avait tiré ici même une conclusion structurelle : « le mode but seul perd
+d'abord le mécanisme qui rendait le plus, c'est la définition du mode ». **C'est faux, et
+l'audit de fin de session l'a établi.** La partition entre workers de `DescendTransplant`
+réclame des jetons dans une table dimensionnée `plan.size() + 1` (`main.cpp:5637`), jamais
+relâchés ; avec `--no-plan` le plan est vide, donc **un seul jeton pour seize workers**, et
+`if(c.cost > 0 && !mine) continue;` (`search.cpp:1257`) supprime alors TOUTE déviation chez
+les quinze autres — et chez le gagnant lui-même dès son deuxième nœud. Les 26 états sont
+intégralement expliqués par ce défaut. Ce que le mode retire vraiment à cette passe reste
+donc INCONNU : la mesure est à refaire une fois la partition corrigée (plan de correctifs,
+chantier C1). Leçon, et elle est générale : *un chiffre spectaculairement bas est d'abord un
+suspect de bug, pas une découverte structurelle.*
+
+**(c) √LTS-H : le rerooter heuristique de l'article, transposé.**
+
+    w_t = exp(−α · h(n_t) / h(racine))            (Eq. 7 de arXiv:2605.30664)
+
+avec h = cartes cibles manquantes + résolutions manquantes, déjà calculé à chaque nœud du
+finisseur. Le min sur les ancêtres est tenu en O(1) par une récurrence à deux candidats —
+prolonger l'ancêtre qui minimisait déjà le coût chez le parent, ou se re-enraciner sur le
+parent. Le second est toujours disponible, donc il **borne** le coût : le mécanisme est
+numériquement stable par construction, là où d/π déborde. L'écart avec le min exact sur tous
+les ancêtres est unilatéral (jamais de sous-estimation) et majoré par ce terme.
+
+**α, et une erreur d'échelle trouvée par l'audit.** L'intention : à h constant — le paysage
+plat — tous les 1/w valent e^α et le re-enracinement l'emporte dès que le coût accumulé du
+segment dépasse ~e^α, donc **α est le logarithme du coût toléré par segment** ; et
+`ForecastSearchCost` ayant chiffré ce coût à 10^5,8-10^12,5 par segment, le cadran 8/15/25
+tombait dans la fenêtre α ∈ [13,4 ; 28,8]. **L'implémentation ne réalise pas ce calcul.**
+`h_root` y vaut `|cible| + Σ resolve` (`search.cpp:1900`), une constante du PROBLÈME, alors
+que l'Eq. 7 de l'article normalise par h à la RACINE DE LA RECHERCHE — laquelle, quand le
+finisseur part d'une approche 7/8, vaut 1. L'échelle effective est donc α/8 sur l'étalon B :
+le coût toléré par segment testé vaut e^1 à e^3, pas 10^5,8 à 10^12,5.
+
+Ce qui survit à la correction, et ce qui tombe. **Tombe** : « la prévision de coût a prédit le
+bon réglage » — c'est une coïncidence, pas une dérivation. **Survit** : le cadran est un
+cadran, α croissant allonge les segments, et les trois résultats restent ordonnés. La lecture
+qualitative (α petit ⇒ glouton ⇒ perte) est inchangée ; seule l'échelle numérique est à
+refaire, avec `h_root` évalué au nœud 0 de la recherche courante (chantier C3).
+
+Défaut `--reroot-h 0` (éteint), exclusif avec `--reroot`. Santé avant/après le chantier :
+**identique, 20 lignes de diff, toutes des mesures de durée**.
+
+**(d) Les mesures — et d'abord le montage, parce que c'est lui qui a changé le verdict.**
+
+*L'A/B bout-en-bout ne mesure presque rien, et il a fallu s'en apercevoir.* `--reroot` et
+`--reroot-h` ne touchent QU'À `RunLevin`, le finisseur. Tout ce qui précède — sonde, tirages
+NRPA, archive — est le même code dans tous les bras et ne diffère que par le timing des
+échanges entre workers. Deux bras bout-en-bout de 600 s sur l'étalon B (régime but seul,
+graine 888) le confirment : **témoin et `--reroot` rendent le même verdict, 7/8, aucune
+conversion, meilleure approche identique en substance.** C'est l'information attendue pour la
+partie (b) de la mission — √LTS dur, mesuré cette fois dans le bon régime, reste sans effet —
+mais elle a coûté deux fois vingt minutes pour un signal noyé dans le bruit des tirages.
+
+*Le bon instrument : racines ET politique identiques.* On sert la MÊME approche à tous les
+bras (`--approach`, cinq reculs déterministes 0/10/20/30/45), on donne au finisseur l'essentiel
+du budget (`--finisher-min`), et surtout on ajoute `--no-nrpa` : la politique servie au
+finisseur est alors VIDE dans tous les bras, donc identique (« politique 0 poids » au rapport).
+Racines identiques + politique identique ⇒ ce qui bouge ne peut venir que de la fonction de
+coût. Seule subsistance de bruit : les racines limitées par le BUDGET voient leur nombre
+d'expansions varier de quelques pour cent avec la charge — d'où la lecture sur le
+**recouvrement atteint**, pas sur les expansions.
+
+*Le contrôle de correction, qui valide l'implémentation.* La racine `recul 0` ÉPUISE son
+espace : **42 expansions dans tous les bras, sans exception.** Le rerooter change l'ORDRE
+d'expansion, pas l'ensemble atteignable — c'est exactement ce qu'on attend d'une fonction de
+coût, et cela exclut la classe de bugs qui perdrait des nœuds.
+
+*Ce que le compteur imprimé a révélé, et c'est le résultat le plus solide de la session.*
+
+| bras | recul 10 | recul 20 | recul 30 | recul 45 | cumul | re-enracinements |
+|---|---|---|---|---|---|---|
+| témoin (LTS) | 6/8 | 5/8 | 4/8 | 5/8 | 20 | — |
+| `--reroot` (dur) | 6/8 | 5/8 | 4/8 | 5/8 | 20 | **1 à 157** |
+| `--reroot-h 8` | 6/8 | **4/8** | **3/8** | 5/8 | **18** | 3 987 à 42 169 |
+| `--reroot-h 15` | 6/8 | 5/8 | 4/8 | 5/8 | 20 | 3 908 à 40 584 |
+| `--reroot-h 25` | 6/8 | 5/8 | **5/8** | 5/8 | **21** | 1 568 à 66 032 |
+| `--reroot-h 40` | 6/8 | 5/8 | 4/8 | 5/8 | 20 | **2 à 922** |
+| `--reroot-h 60` | 6/8 | 5/8 | 4/8 | 5/8 | 20 | **2 à 162** |
+
+**Le rerooter DUR ne se déclenche que 1 à 157 fois pour 3 400 à 9 400 expansions — environ
+2 %.** Le mécanisme tranché « perdant » en session 7ter était donc quasi INERTE, et personne
+ne pouvait le savoir : le compteur existait mais n'était imprimé nulle part. Le verdict de
+7ter n'était pas « √LTS perd », c'était « un mécanisme qui ne s'exécute pas ne rend rien » —
+la différence est entière, et elle valide la lecture donnée en (a) : sans indice, pas de point
+de re-enracinement.
+
+**Le rerooter DOUX mord partout, et le cadran est UNIMODAL À MAXIMUM ENCADRÉ.** 18 → 20 → 21
+→ 20 → 20 cartes cumulées pour α = 8 → 15 → 25 → 40 → 60, le témoin valant 20. Cinq bras
+ordonnés par un seul réglage, un maximum intérieur : c'est mieux qu'une monotonie qui
+s'arrêterait au dernier point testé, laquelle laisserait ouverte l'hypothèse « ça continue de
+monter ». La lecture est mécanique, et les DEUX bouts se comportent comme la théorie du
+mécanisme le prédit :
+
+- α trop petit ⇒ le re-enracinement sur le parent l'emporte toujours ⇒ la recherche devient
+  gloutonne sur la probabilité du dernier pas ⇒ **PERTE** (18 contre 20) ;
+- α trop grand ⇒ les segments ne se cassent plus ⇒ **le mécanisme devient inerte**, et le
+  compteur le montre : `rr` s'effondre de ~40 000 à **2-162** en α = 40/60, pendant que le
+  verdict converge exactement vers celui du témoin. C'est la vérification que le compteur
+  imprimé était censé rendre possible, et elle fonctionne.
+
+À α = 25, une racine passe de 4/8 à 5/8.
+
+**Ce que cela vaut, et ce que cela ne vaut pas.** Une racine gagnée sur quatre, à une graine :
+ce n'est pas un gain sur lequel compter, et le mécanisme reste OPT-IN, `--reroot-h 0` par
+défaut. Ce qui est solide : le cadran est un vrai cadran, avec un optimum intérieur encadré et
+deux régimes limites conformes à la théorie ; et le mécanisme ne perd jamais au-dessus de
+α = 15.
+
+**L'explication, et elle désigne le chantier suivant.** Le rerooter — dur ou doux — est une
+fonction de `h`. Notre `h` est le nombre de cartes cibles manquantes, et il est PLAT sur
+l'essentiel de la ligne. Un rerooter à poids quasi constants ne peut alors casser les segments
+qu'au coût accumulé : il fait ce que ferait un LTS à segments de taille fixe, ce qui explique
+qu'on retrouve le témoin au mieux et un gain marginal au bord. *Le rerooting ne peut pas
+rendre davantage tant que `h` reste plat* — et c'est la mesure qui établit que le verrou est
+en amont, dans l'heuristique, pas dans l'algorithme de recherche. C'est exactement ce que le
+graphe de recettes (chantier 16) fournirait.
+
+**(e) L'étalon A en mode but seul — ce que valait la référence, et pourquoi le chiffre n'est
+pas encore attribuable.**
+
+Montage : `tools/lunalight_butseul.ps1`, 1 800 s, graine 888, `--no-ref --target` ×4,
+`--max-decisions 700`, mêmes `--resolve`/`--summon-min`/`--hint` que le run de référence de la
+session 7ter (ce sont des connaissances de DOMAINE écrites à la main, pas du répertoire — au
+sens de Bonet & Geffner, un *sketch*). Zéro erreur de core (piège 47 vérifié).
+
+| | avec répertoire (s7_luna_v6) | mode BUT SEUL (s8_A_base) |
+|---|---|---|
+| tirages | 1 246 s, 12,66 M tirages, best 1/4 | 1 246 s, best **1/4** |
+| finisseur | 1/4 (une racine à 2/4) | 36 racines, **1/4** |
+| passe LDS | 2 038 555 états, 294 s, **2/4** | vide (défaut C1) |
+| board atteint | 1 Liger + Bagooska | **Bagooska seul** |
+
+**Le mode but seul pose Bagooska et aucun Liger ; la référence en posait un.** La carte perdue
+est exactement celle qui demande le combo profond — Bagooska est un Xyz accessible, Liger
+Dancer est au bout de la chaîne Kaleido Chick → Leo Dancer au cimetière → Fusion. C'est la
+forme attendue : le répertoire ne valait pas « un peu partout », il valait *la partie difficile*.
+
+**Mais ce chiffre n'est pas encore attribuable au répertoire, et il faut le dire.** Le 2/4 du
+run armé venait de la passe LDS ; or c'est précisément cette passe que le défaut C1 paralyse
+quand le plan est vide (`claims_size = 1`). Les deux bras ne diffèrent donc pas d'un seul
+facteur : ils diffèrent du répertoire ET d'un mécanisme cassé. **La mesure est à refaire après
+C1.** Elle est conservée ici parce qu'elle établit tout de même que le mode FONCTIONNE de bout
+en bout — duel synthétique, cible posée, 700 décisions, zéro erreur de core, board atteint et
+replay d'approche écrit — ce qui était le livrable (c) de la session.
+
+**Ce que la session 8 a obtenu, et ce qu'elle n'a pas obtenu.** Pas de ligne vers le board
+cible en mode but seul, ni sur A ni sur B. Mais : (1) une revue qui a **changé le programme du
+projet** — le problème a un jumeau publié (rétrosynthèse sous contrainte de matériaux de
+départ), un résultat négatif obtenu sans dépenser un run (le HER propositionnel ne débloquera
+pas 3× Liger), et une troisième famille de leviers identifiée, ceux qui touchent l'EXPOSANT ;
+(2) le mode but seul, implémenté et auditable ; (3) √LTS remis dans sa forme publiée et mesuré
+sur un montage DÉTERMINISTE, avec la découverte que le verdict de la session 7ter portait sur
+un mécanisme s'exécutant 2 % du temps ; (4) le diagnostic qui commande la suite — *le verrou
+n'est plus l'algorithme de recherche, il est dans `h`* ; (5) un audit systématique qui a
+retiré deux conclusions de cette session même, et dont le plan de correctifs
+(`docs/plan-correctifs.md`) ouvre la session 9.
+
+**Non fait, et documenté comme tel** (session 8) : les correctifs C1-C3, qui bloquent
+l'interprétation des mesures du mode ; le graphe de recettes (chantier 16) ; les options
+(chantier 17) ; la perte de Levin comme objectif (chantier 15) ; le descripteur grossier
+d'archive (chantier 14) ; le répertoire rétrospectif filtré (chantier 12) ; chantiers 4, 6bis,
+7, 8 inchangés.
+
+### 9.16 Session 9 : les instruments d'abord — trois correctifs qui retirent des conclusions, et six mécanismes chiffrés pour la première fois
+
+**La mission** : `docs/plan-correctifs.md`, points C1 à C3, avant toute nouvelle mesure. Deux
+d'entre eux invalidaient des conclusions publiées ; le troisième rendait illisible le cadran
+qui portait le seul résultat positif de la session 8. Ce qui suit est ce qui a été corrigé, ce
+que les instruments ont dit dès qu'ils ont existé, et ce que cela retire.
+
+**(a) C1 — la partition entre workers s'auto-verrouillait, et le mode BUT SEUL en mourait.**
+
+`DescendTransplant` réclamait une case par *hachage du digest d'état* dans un tableau
+dimensionné sur `plan.size() + 1`, jamais relâché. Deux défauts se composaient : deux états
+distincts pouvaient tomber sur la même case — le second était alors interdit à tout le monde —
+et **en mode but seul le plan est vide, donc `claims_size = 1`**. Un jeton pour seize workers.
+Toute déviation était supprimée, sans qu'aucun compteur ne le dise.
+
+La correction remplace le tableau par une `ClaimTable` en adressage ouvert **sur la clé
+entière** : une case refusée l'est parce que le point est déjà pris, jamais par collision. La
+clé est l'indice de référence en réparation (une vraie partition de la ligne, comme
+`RunRepair` le faisait déjà) et le digest d'état en transplantation, où aucun indice linéaire
+n'existe. À saturation elle **échoue OUVERT** : du travail refait coûte du temps, un point
+perdu serait un trou de complétude — et une preuve d'absence fausse.
+
+Et surtout : les branches cédées sont **comptées** (`claim_denied`) et imprimées. C'est la
+distinction que la session 8 n'avait pas — *partagé* et *supprimé* produisaient la même sortie.
+
+**(b) C2 — « ÉPUISÉ » n'était pas une preuve d'absence.**
+
+Neuf sites coupaient sur le plafond de profondeur ou d'actions sans rien incrémenter, puis
+`stats.exhausted` s'écrivait « ÉPUISÉ ». Le champ `SearchStats::edges_skipped` existait depuis
+des sessions et n'avait **jamais été écrit ni lu**. Il l'est désormais aux neuf sites, plus les
+deux sorties par le haut des boucles de tirage ; et `SearchOutcome()` refuse d'écrire
+« ÉPUISÉ » quand il est non nul — « EPUISE SOUS BORNE » à la place. Le même verdict couvre
+maintenant les deux plafonds qui n'apparaissaient nulle part (`noeuds`, `memoire`) et l'arrêt
+sur quota de solutions, qui s'affichait en colonne **vide**, indiscernable d'un arrêt inexpliqué.
+
+*Le contrôle de correction de la session 8 tient* : la racine `recul 0` de l'A/B déterministe
+rend **42 expansions, `b=0`, ÉPUISÉ** dans tous les bras mesurés cette session. La preuve de
+correction de la session 8 survit à son propre instrument — ce qui n'allait pas de soi.
+
+*Mais l'instrument mord ailleurs* : sur les racines profondes (reculs 20, 30, 45) il affiche
+`b = 1` à `7`. Le plafond coupe bel et bien, et aucun run antérieur ne pouvait le savoir.
+
+**(c) C3 — `h_root` ne réalisait pas l'Eq. 7, et la correction dit plus que prévu.**
+
+`h_root` valait `|cible| + Σ resolve_min` — une constante du PROBLÈME, soit 8 sur l'étalon B —
+là où l'Eq. 7 de arXiv:2605.30664 demande `h` à la racine de la **recherche courante**. Il est
+désormais évalué au nœud 0 (plancher à 1) et **imprimé** en colonne `h0=`.
+
+Le chiffre a immédiatement démenti l'hypothèse de travail du plan de correctifs, la mienne
+comprise. On attendait `h_root ≈ 1` uniformément, le finisseur partant d'un état « déjà à 7/8
+cartes ». Le relevé :
+
+| racine | recul 0 | recul 10 | recul 20 | recul 30 | recul 45 |
+|---|---|---|---|---|---|
+| `h0` mesuré | 1 | 4 | 5 | 6 | 5 |
+
+`h0 = 1` ne vaut que pour la racine `recul 0` — celle qui épuise en 42 expansions et ne pèse
+rien dans la comparaison. Les quatre racines effectivement comparées sont à 4, 5 et 6.
+
+**Ce que cela retire au cadran α de la session 8, et c'est plus grave qu'une échelle fausse.**
+Avec `h_root` constant à 8, un même α produisait le coefficient effectif `α/8` à *toutes* les
+racines, quelle que soit leur distance au but. Le cadran 8/15/25/40/60 n'a donc pas seulement
+été parcouru à la mauvaise échelle : **il mélangeait des racines auxquelles Eq. 7 prescrit des
+coefficients différents**. Corrigé, le coefficient est `α/h0` et s'adapte à chaque racine —
+une racine à 6 cartes manquantes reçoit une rampe plus douce qu'une racine à 4. C'est ce que
+la normalisation de l'article veut dire, et le mécanisme ne l'avait jamais fait.
+
+L'équivalence entre les deux échelles est `α_s9 = α_s8 · h0/8`, soit un facteur 0,5 à 0,75 —
+et non le facteur 1/8 que le plan de correctifs annonçait, lui aussi écrit sous l'hypothèse
+`h_root = 1`. La correction du plan est notée ici plutôt que passée sous silence : elle a
+coûté un cadran mal centré (voir (d)).
+
+**(d) Le cadran α refait, et ce qu'il vaut.**
+
+`tools/s9_ab_alpha.ps1`, montage étalon 0 inchangé (racines imposées, politique vide,
+déterministe). Cartes cumulées sur les quatre racines comparées, témoin = aucun rerooter :
+
+| bras | α | recul 10 | recul 20 | recul 30 | recul 45 | cumul | `rr` au contrôle |
+|---|---|---|---|---|---|---|---|
+| T | — | 6 | 5 | 4 | 5 | **20** | — |
+| A1 | 1 | 4 | 4 | 5 | 5 | 18 | 123 |
+| A2 | 2 | 6 | 3 | 3 | 5 | 17 | 118 |
+| A3 | 3 | 6 | 3 | 3 | 5 | 17 | 118 |
+| A5 | 5 | 6 | 4 | 3 | 5 | 18 | 83 |
+| A8 | 8 | 6 | 4 | 3 | 5 | 18 | **3** |
+
+Le contrôle `recul 0` rend 42 expansions, `b=0`, ÉPUISÉ dans les **six** bras.
+
+**Ce cadran est mal centré, et je le dis avant d'en tirer quoi que ce soit.** Il a été construit
+sur l'arithmétique fausse ci-dessus (α_s9 = α_s8/8). Ses équivalents session 8 vont de ~1,5 à
+~13 : il couvre **entièrement sous** le point où la session 8 avait vu son gain (α_s8 = 25,
+équivalent ~12,5 à 18,75). Il mesure la queue basse du mécanisme, pas son optimum.
+
+Ce qu'il établit est donc étroit, mais net : **sur toute cette bande le rerooter doux perd**
+(17-18 contre 20), en cuvette peu profonde de minimum α = 2-3. C'est cohérent avec le bras H8
+de la session 8, le plus mauvais du cadran d'alors.
+
+**Et la colonne `rr` du contrôle dit quelque chose que le cumul ne dit pas** : 123, 118, 118,
+83, **3**. Le re-enracinement cesse de battre la prolongation à mesure que α monte — à α = 8 il
+ne gagne plus que 3 fois sur la racine de contrôle. Le mécanisme *s'éteint* par le haut. Ce
+n'est pas une conjecture sur la suite du cadran, c'est la lecture directe du compteur que le
+piège 52 impose de lire avant de conclure : **le prolongement vers α = 12-28 risque de mesurer
+un mécanisme inerte, c'est-à-dire de retrouver le témoin**, ce qui serait une explication du
+« gain » marginal de la session 8 plutôt qu'une confirmation. Le script est écrit
+(`tools/s9_ab_alpha_haut.ps1`, α = 12/16/20/28) précisément pour trancher entre les deux, et
+il faut le lire avec `rr` sous les yeux (piège 46 : encadrer, pas atteindre).
+
+**(e) Six mécanismes d'élagage chiffrés pour la première fois.**
+
+Une ligne `elagage :` sous chaque passe, avec six compteurs qui existaient tous et dont aucun
+n'était imprimé (piège 52) :
+
+| colonne | mécanisme | statut avant |
+|---|---|---|
+| `contrainte` | `--summon-min` / `--material` | six incréments, zéro lecture |
+| `garde` | `--guard` | un incrément, zéro lecture |
+| `tour` | ligne débordant du tour 1 | agrégé dans `ModeStats`, puis abandonné |
+| `borne` | plafond décisions/actions | jamais incrémenté (C2) |
+| `partition` | branches cédées à un autre worker | n'existait pas (C1) |
+| `sous-ens.` | énumérations tronquées | n'existait pas (C9) |
+
+Et le tiers manquant de `reroots` : le compteur ne s'imprimait que dans la table des racines
+d'`--approach`, donc **jamais en mode but seul sans `--approach` — le mode que la session 8
+venait de construire**. Il est maintenant dans la table LTS principale et en phase 2, avec
+`h0=` à côté.
+
+**(f) C9 — un trou de complétude, confirmé en lisant le code.**
+
+Le plan le donnait `[rapporté]` ; c'est `[vérifié]`. `ForEachSubset` annonce en commentaire
+« on privilégie les tailles extrêmes » et énumère par taille **croissante** en s'arrêtant au
+plafond. Avec `cap = 24` et 24 candidats, les 24 émissions sont les 24 **singletons** — aucune
+paire, jamais. Sur `MSG_SELECT_SUM` (somme de niveaux, tributs) une sélection d'une seule carte
+ne satisfait presque jamais la contrainte : le prompt devenait stérile en silence, et toute
+preuve d'absence portant sur une invocation Synchro ou par tribut s'en trouvait affaiblie.
+
+Corrigé : les tailles alternent depuis les deux bouts (min, max, min+1, max-1…), et toute
+troncature est comptée (`subsets_capped`, colonne `sous-ens.`) puis retirée à « ÉPUISÉ » sa
+valeur de preuve, exactement comme un plafond de profondeur. Le paramètre lui-même, écrit en
+dur à douze endroits, est exposé (`--max-subsets`) — c'est lui qui plafonne le facteur de
+branchement de TOUS les prompts de sélection.
+
+**(g) Défaillances silencieuses et constantes cachées.**
+
+- **C8** — dix-neuf sites retournaient sur échec d'`Arena::Init` ou de `Duel::Setup` sans
+  imprimer `err`. Un bras d'A/B qui n'a jamais tourné affichait `0 solutions, 0 etats` :
+  indiscernable d'un bras qui a tourné et n'a rien trouvé. Tous passent par `WorkerAbort`, qui
+  nomme le site et le message.
+- **C11** — `AdaptCorpus` passait sept arguments pour huit paramètres : `hint_bias` forcé à 0 et
+  `temp` laissé au défaut. `--adapt` combiné à `--nrpa-temp` était donc incohérent, et le
+  gradient du corpus calculé sous une distribution différente de celle qui échantillonne —
+  précisément sur les coups indicés, c'est-à-dire les rips. Les deux paramètres sont désormais
+  **exigés sans défaut** : la même omission ne peut plus être silencieuse. Le chemin du RUN
+  passe les valeurs de la config ; le chemin du RAPPORT passe des constantes nommées
+  (`kReportHintBias`, `kReportTemp`), neutres et explicites, pour que les chiffres du §9.14
+  restent comparables — aligner les trois instruments du rapport sur le run reste à faire, et
+  re-mesure le §9.14.
+- **C12** — `--no-ref` dérivait quand même `max_decisions` de la référence. Le plafond vient
+  maintenant de la decklist (12 décisions par carte + 32) sous ce drapeau, et il est **imprimé
+  dans tous les cas**, avec sa provenance.
+- **C13** — trois encodages compacts clampaient sans avertir, dont deux gouvernent des grandeurs
+  qui ont servi à décider (le score d'archive ordonne les états conservés ; `ContextKey` borne
+  la segmentation lue par `ForecastSearchCost`, l'un des deux nombres qui ont décidé d'écrire
+  sqrt-LTS). Vérifiés une fois au démarrage.
+- **C14** — `LiftPlan` jetait sa valeur de retour sur le chemin `--fire` : un plan à 90 % de
+  trous servait de répertoire comme s'il était complet, et l'échec des fenêtres était imputé à
+  la recherche. Le nombre d'étapes non identifiées est imprimé, avec un avertissement au-delà
+  de la moitié.
+- **C15** — `nrpa_level = (budget > 180000.0) ? 3 : 2` changeait le coût d'un appel de niveau de
+  ~576 à ~13 824 tirages, c'est-à-dire **l'algorithme d'échantillonnage lui-même**, sans
+  qu'aucune mesure ne l'adosse — et le seuil tombait exactement sur la ligne de partage des
+  commandes comparées aux sessions 5-7 (600 s sans `--finisher-min` → niveau 3 ; le *même* run
+  avec `--finisher-min 420000` → niveau 2). Exposé (`--nrpa-level`), et le niveau effectif est
+  imprimé dans tous les cas. L'A/B des deux valeurs à budget égal reste à faire.
+
+**(h) Santé.** Diff avant/après du run de santé, correctifs C1-C16 compris (donc y compris le
+changement d'ordre d'énumération de C9, qui pouvait légitimement bouger le résultat) :
+**uniquement des durées, plus les lignes `elagage :` nouvellement ajoutées**. Identiques : 0
+MSG_RETRY, 273 digests, 210/273 coups identifiés, référence retrouvée à 0 écart, 209 solutions,
+19/56/272, « résiste à 12 déviations », 16 replays.
+
+Ce que la nouvelle ligne dit, dès le premier run :
+
+```
+elagage : contrainte 0, garde 0, tour 0, borne 4, partition 4, sous-ens. 1
+```
+
+Trois faits qu'aucun run antérieur ne pouvait produire. `borne 4` : le plafond coupe, dans le
+run de santé lui-même. `partition 4` : le travail est **cédé** à un autre worker, pas supprimé —
+c'est exactement la distinction qui manquait à la session 8. `sous-ens. 1` : le plafond
+d'énumération mord une fois par passe, sur la ligne de référence, et personne ne le savait.
+
+**Ce que la session 9 a obtenu, et ce qu'elle n'a pas obtenu.** Obtenu : les trois correctifs
+bloquants, avec leur vérification ; six mécanismes d'élagage chiffrés ; un trou de complétude
+fermé ; dix-neuf défaillances silencieuses rendues bruyantes ; trois constantes cachées
+exposées. **Non obtenu** : la mission de fond — le graphe de recettes, le comptage dérivé du
+board cible, un `h` qui décroît — n'a pas été entamée. C'était le prix annoncé : aucune mesure
+n'était interprétable avant ces correctifs. Reste également à faire : la re-mesure de l'étalon A
+en mode but seul (le 2/4 de la passe LDS, que C1 paralysait), le prolongement du cadran α, l'A/B
+`--nrpa-level`, C7 (`host_fallbacks` structurellement nul, plus le drapeau `poisoned`), C10
+(`ResponseForbidden` échoue OUVERT), C17, C18, et toute la section E.
+
+**(i) Le reste de l'audit — traité dans la même session.**
+
+Le plan de correctifs (C1-C18) était l'extrait priorisé d'un audit plus large. Le reste a été
+traité ici plutôt que reporté, parce que six de ses points sont de la même famille que C1 :
+des défaillances qui **produisent un chiffre plausible** au lieu de produire une erreur.
+
+*Ce qui corrompt ou biaise silencieusement une mesure.*
+
+- **L'arène qui déborde empoisonnait le duel en silence.** Une allocation qui ne tient pas dans
+  l'arène part sur le tas de l'hôte ; `Restore()` ne peut pas la restaurer, donc **tout ce que
+  le worker mesure ensuite porte sur un duel divergent**. La seule alarme était un compteur
+  `thread_local` lu depuis le thread principal, alors que les replis se produisent dans les
+  **workers** : le rapport écrivait « aucune : tout l'état est capturé » *par construction*.
+  Corrigé : compteur atomique membre d'`Arena`, drapeau `poisoned` **collant** qui fait avorter
+  la recherche via `BudgetExhausted()`, `ReportPoison` sur les neuf workers, et le statut
+  `!! ARENE CORROMPUE` passe **devant** « ÉPUISÉ » dans `SearchOutcome`.
+- **`ResponseForbidden` échouait OUVERT.** Tous ses chemins d'échec rendaient *autorisé*, sur
+  une disposition de message ocgcore codée en dur. Une dérive de format faisait cesser
+  `--no-activate` et `--no-chain` de filtrer — en silence, tout en restant crus. Tri-état
+  désormais : `Undecodable` est traité comme **interdit** (on retire la branche au lieu de
+  l'admettre sans contrôle) et compté ; non nul, le run est déclaré à jeter, code de sortie 1.
+- **Un replay tronqué se chargeait « avec succès ».** `LoadFromBuffer` rendait `true`
+  inconditionnellement ; un corps tronqué donnait un deck court et une liste de réponses
+  courte — et cette liste courte devient `ref_decisions`, c'est-à-dire **le plafond de
+  décisions de toute la recherche**. Un problème d'octets se propageait en budget
+  silencieusement réduit. Les trois boucles vérifient maintenant le compte annoncé et
+  échouent avec un message précis.
+- **Un code absent de `cards.cdb` devenait une vanille muette.** C'est le jumeau *base de
+  données* du décalage de scripts, et il était plus silencieux : `ScriptProvider::Misses()`
+  existait et s'imprimait, il n'y avait aucun équivalent côté cartes. `CardDB::UnknownCodes()`
+  comble le trou.
+- **Une lecture courte de script se déguisait en « fichier absent »** et faisait charger la
+  même carte depuis un dépôt de rang inférieur — donc **une autre version**. Le chargeur
+  fabriquait, à partir d'une erreur d'E/S, exactement le décalage de jeux de scripts que ce
+  dépôt redoute, sans jamais atteindre `misses`. `Unreadable()` est distinct de `Misses()`, et
+  le chargeur ne se rabat plus.
+- **`--summon n:X` était satisfait par vacuité** par le contrôle « vérifié avant écriture, qui
+  ne souffre pas d'exception » : une ligne qui atteint le board en moins de n invocations était
+  écrite comme conforme et comptée dans « N lignes atteignant le board », alors que la
+  contrainte autour de laquelle l'expérience est bâtie n'avait **jamais été exercée**. Elle
+  échoue désormais, avec un compte distinct des contraintes *violées*.
+- **`ProcessorState` vide défaisait le patch C1** — sans la composante d'état de processeur,
+  deux instants d'une même résolution de chaîne se confondent et la branche du combo est
+  élaguée dès le début. Compté et rapporté.
+
+*Ce qui rendait un A/B illisible.*
+
+- **`lam` saturait à 1e300 et `reroots` était gonflé par l'infini.** `seg_logpi` accumule des
+  log-probabilités ; passé ~709, `exp` déborde, `log(lam - 1)` devient **constant pour toute la
+  descendance** et le best-first √LTS dégénère. Symétriquement, quand `hu` part à l'infini, la
+  comparaison `ext_v <= new_u` bascule pour raison **purement arithmétique** et la branche
+  « re-enracinement » est prise *et comptée* — donc `stats.reroots`, dont le commentaire dit
+  qu'il est l'instrument de « à zéro le mécanisme est inerte », devenait non nul exactement
+  quand le calcul avait cassé. Trois compteurs séparés (`levin_overflow`, `reroot_by_overflow`,
+  `lam_saturated`) et un `!!NUM` dans la table : à non nul, **le bras est à jeter, pas à
+  interpréter**.
+- **Le plafond de profondeur du finisseur se repliait sur un 64 magique**, écrit cinq fois et
+  muet : deux bras comparés « à budget égal » pouvaient recevoir des budgets de **profondeur**
+  différents. `FinisherDepth()` centralise et compte.
+- **`WriteSolutions` jetait tout au-delà de la 16ᵉ solution sans dire combien il en avait.** Le
+  run de santé écrit 16 replays — sur **209 candidates**. Aux sites qui ne trient pas d'abord,
+  les seize retenues ne sont pas les moins chères, ce sont les seize **arrivées en premier**.
+- **`--novelty 0` n'éteignait pas la nouveauté côté NRPA** : `CollectAtoms` + `Observe`
+  tournaient inconditionnellement dans la boucle interne de `PolicyRollout` — quatre requêtes
+  au core, quatre tris et ~60-80 sondes de table **par décision** — pour un simple terme de
+  départage, et c'était aussi la principale allocation **non bornée** du run. Le bras témoin
+  « sans nouveauté » du contrôle A/B ne couvrait donc que les passes LDS. Gaté. Effet mesuré au
+  passage sur l'étalon 0 : **+20 % d'expansions à budget égal**, meilleurs par racine
+  identiques (6/5/4/5) — une observation isolée, à comparer à la dispersion (piège 39).
+
+*Six instruments de plus, tous déjà présents dans le code et jamais lus* : `dead_ends` et
+`terminals` (le symptôme n°1 du jeu de scripts décalé, muet exactement dans le mode où il se
+produirait), `novelty_novel`/`novelty_stale` (le run de santé dit **3 nouveaux sur 23** — le
+terme de départage est presque saturé), `novelty_atoms` (79), `expansions_by_depth` (le facteur
+de fusion réel de la table), et le compte de prompts **réduits à la réponse par défaut** —
+lesquels ne sont pas un élagage mais un pan d'espace qui n'a jamais existé.
+
+*Constantes exposées ou imprimées* : `--hint-bias` (le canal par lequel la connaissance du
+joueur entre dans l'échantillonnage ; son voisin `--nrpa-bias` existait, pas lui), le partage
+du budget entre phases (0,7 / 0,2 / 0,75 / 0,8 / plafond 240 s), et la portée **réelle** de
+`--tt-mb` (passes LDS seulement — ni `RunLevin`, ni `RunNrpa`) et de `--nrpa-lr` (phase de
+tirages seulement) documentée là où elle se lit.
+
+*Contradictions doc/code résolues* : le commentaire de `search.h` portait encore le diagnostic
+« le plafond est la REPRÉSENTATION » que le §9.13 a explicitement **rétracté** ; les reculs
+d'`--approach` documentés {0,10,30,60,90,120} ne sont pas ceux du code ({0,10,20,30,45} au LTS,
+{60,70,80,90,110,150} en phase A2) ; et la promesse « EXACTEMENT la même mise à jour » de
+`AdaptRun` était démentie par `AdaptCorpus`.
+
+**Ce qui reste, explicitement.** La section 6 de l'audit — les optimisations du chemin chaud
+(C19-C28 : jeux de drapeaux de requête séparés, `EntryOf` sur la pile, hachage 8 octets,
+`CommonCodes` calculé une fois, `LNode` en ligne, `path` en pile de tampons) — sauf le gating
+de la nouveauté, qui a été fait parce que c'était **aussi** une correction de `--novelty 0`.
+Et les constantes de moindre valeur (`max_solutions` variable selon le site, `k <= 12`,
+`plan_window`, `repair_window`), exposées nulle part et non mesurées.
+
+**Pièges ajoutés.**
+
+55. **Un correctif se vérifie avec l'instrument qu'il installe, pas avec l'hypothèse qui l'a
+    motivé.** `h_root` a été corrigé sous l'hypothèse « il vaut 1 dans le finisseur » ; la
+    colonne `h0=` que la correction même ajoutait a montré 4, 5 et 6. Le cadran construit sur
+    l'hypothèse était mal centré. Poser l'instrument, LIRE, puis dimensionner l'expérience.
+56. **Une table de partition à index haché n'est pas une partition.** Deux clés distinctes qui
+    se disputent une case produisent une SUPPRESSION, pas un partage ; et un dimensionnement
+    dérivé d'une autre grandeur (ici la taille du plan) devient nul quand cette grandeur
+    s'annule. Clé entière, échec OUVERT, compteur de refus.
+57. **Un filtre qui échoue OUVERT est pire qu'un filtre absent**, parce qu'il continue d'être
+    cru. `ResponseForbidden` rendait « autorisé » sur toute dérive de format ; l'arène rendait
+    de la mémoire hors instantané ; un replay tronqué se chargeait « avec succès ». Chaque fois,
+    la panne se déguise en résultat plausible. Règle : sur un chemin qui décode un format
+    externe ou qui garantit un invariant, l'échec doit être un TROISIÈME état, distinct du
+    succès ET du refus, et il doit être fatal ou compté — jamais silencieusement permissif.
+58. **Un compteur `thread_local` lu depuis un autre thread mesure zéro, toujours.**
+    `host_fallbacks` imprimait « aucune : tout l'état est capturé » par construction, pendant
+    seize workers. Avant de croire un compteur à zéro, vérifier QUI l'écrit et QUI le lit.
+59. **« ÉPUISÉ » n'est une preuve d'absence que si tout ce qui tronque l'espace est compté.**
+    Aujourd'hui : `borne` (plafonds de profondeur/actions), `sous-ens.` (énumérations
+    tronquées), les prompts réduits à la réponse par défaut, et l'arène empoisonnée. Vérifier
+    les quatre avant d'écrire une preuve d'absence.

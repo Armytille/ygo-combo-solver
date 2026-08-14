@@ -1,6 +1,7 @@
 #include "enumerate.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "ocgapi_constants.h"
@@ -68,17 +69,47 @@ void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
 }
 
 // Sous-ensembles de `n` elements de taille lo..hi, plafonnes, livres au
-// callback un par un — aucun stockage intermediaire. On privilegie les tailles
-// extremes : une selection minimale (economie de ressources) et une selection
-// maximale sont les deux qui portent l'essentiel de l'information.
+// callback un par un — aucun stockage intermediaire.
+//
+// LES TAILLES SONT PARCOURUES EN ALTERNANT DEPUIS LES DEUX BOUTS : lo, hi,
+// lo+1, hi-1... Une selection minimale (economie de ressources) et une
+// selection maximale sont les deux qui portent l'essentiel de l'information.
+//
+// Le commentaire d'origine annoncait deja ce parcours ; la boucle, elle,
+// montait de lo a hi et s'arretait au plafond. Avec cap = 24 et 24 candidats,
+// les 24 emissions etaient donc les 24 SINGLETONS — aucune paire, jamais. Sur
+// MSG_SELECT_SUM (somme de niveaux, tributs) une selection d'une seule carte ne
+// satisfait presque jamais la contrainte : le prompt devenait sterile sans que
+// rien ne le dise, et toute preuve d'absence portant sur une invocation
+// Synchro ou par tribut s'en trouvait affaiblie (C9).
+//
+// `capped`, non nul, recoit +1 quand le plafond a effectivement coupe : une
+// enumeration tronquee doit pouvoir se distinguer d'une enumeration complete.
 template<typename F>
-void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f) {
+void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
+				   uint64_t* capped = nullptr) {
 	static thread_local std::vector<uint8_t> cur;
 	hi = (std::min)(hi, n);
 	if(lo > hi)
 		return;
 	uint32_t emitted = 0;
-	for(uint32_t k = lo; k <= hi && emitted < cap; ++k) {
+	uint32_t klo = lo, khi = hi;
+	bool from_low = true;
+	while(klo <= khi) {
+		if(emitted >= cap) {
+			if(capped)
+				++*capped;
+			return;
+		}
+		uint32_t k;
+		if(from_low || klo == khi) {
+			k = klo;
+			++klo;
+		} else {
+			k = khi;
+			--khi;   // khi > klo >= 0 ici : pas de debordement
+		}
+		from_low = !from_low;
 		if(k == 0) {
 			f(nullptr, 0u);
 			++emitted;
@@ -89,8 +120,13 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f) {
 			cur[i] = static_cast<uint8_t>(i);
 		for(;;) {
 			f(cur.data(), k);
-			if(++emitted >= cap)
+			if(++emitted >= cap) {
+				// Le plafond mord : il reste soit des combinaisons de cette
+				// taille, soit des tailles entieres non visitees.
+				if(capped)
+					++*capped;
 				return;
+			}
 			// combinaison suivante en ordre lexicographique
 			int i = static_cast<int>(k) - 1;
 			while(i >= 0 && cur[i] == n - k + i)
@@ -373,7 +409,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  if(opt.labels)
 							  c.label = "choisir " + std::to_string(k) +
 										" carte(s)";
-					  });
+					  },
+					  opt.subsets_capped);
 		if(cancelable) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
@@ -556,7 +593,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  c.edge = EdgeOf(message, { h, k });
 						  if(opt.labels)
 							  c.label = "somme " + std::to_string(k);
-					  });
+					  },
+					  opt.subsets_capped);
 		return;
 	}
 
@@ -666,9 +704,19 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 	}
 }
 
-bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
-					   const std::vector<uint8_t>& response,
-					   const EnumOptions& opt) {
+// Tri-etat. Tous les chemins d'echec rendaient auparavant `false` = AUTORISE,
+// sur une disposition de message ocgcore codee en dur (`strides[5]`). Si le core
+// epingle decale un champ, le lecteur se desynchronise, `r.Ok()` tombe, et
+// --no-activate / --no-chain cessent purement et simplement de filtrer : la
+// reponse enregistree portant l'activation interdite est readmise a cout zero,
+// en silence. Un filtre qui echoue OUVERT sur derive de format est pire qu'un
+// filtre absent, parce qu'il continue d'etre cru (C10).
+//
+// Desormais : `Undecodable` est distinct d'`Allowed`, et les appelants le
+// traitent en erreur fatale plutot qu'en autorisation.
+Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
+						const std::vector<uint8_t>& response,
+						const EnumOptions& opt) {
 	// --no-chain : une reponse ENREGISTREE qui chaine une carte interdite est
 	// rattrapee ici (mode reparation, ou la reponse de la reference est
 	// candidate a cout zero sans passer par l'enumerateur).
@@ -677,7 +725,7 @@ bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 		int32_t v = 0;
 		std::memcpy(&v, response.data(), 4);
 		if(v < 0)
-			return false;   // "ne pas chainer"
+			return Verdict::Allowed;   // "ne pas chainer"
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		r.Get<uint8_t>();
@@ -685,28 +733,37 @@ bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 		r.Get<uint32_t>();
 		r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
-		if(forced || static_cast<uint32_t>(v) >= n || !r.Ok())
-			return false;
+		if(!r.Ok())
+			return Verdict::Undecodable;
+		// Une chaine FORCEE n'est pas un choix : le filtre ne s'y applique pas.
+		if(forced)
+			return Verdict::Allowed;
+		// Un indice hors borne n'est pas une derive de lecture : c'est une
+		// reponse qui ne designe rien dans CE prompt.
+		if(static_cast<uint32_t>(v) >= n)
+			return Verdict::Undecodable;
 		for(int32_t i = 0; i < v; ++i)
 			r.Skip(4 + kLocInfo + 8 + 1);
 		uint32_t code = r.Get<uint32_t>();
 		if(!r.Ok())
-			return false;
+			return Verdict::Undecodable;
 		if(opt.db)
 			code = opt.db->Canonical(code);
 		return std::find(opt.no_chain->begin(), opt.no_chain->end(), code) !=
-			   opt.no_chain->end();
+					   opt.no_chain->end()
+				   ? Verdict::Forbidden
+				   : Verdict::Allowed;
 	}
 	if(!opt.no_activate || opt.no_activate->empty())
-		return false;
+		return Verdict::Allowed;
 	if(message != MSG_SELECT_IDLECMD || response.size() != 4)
-		return false;
+		return Verdict::Allowed;
 	int32_t v = 0;
 	std::memcpy(&v, response.data(), 4);
 	uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
 	uint32_t s = static_cast<uint32_t>(v) >> 16;
 	if(t != 5)
-		return false;   // seule la famille "activer" est couverte
+		return Verdict::Allowed;   // seule la famille "activer" est couverte
 	// Rejouer le decodage du prompt jusqu'a l'entree designee.
 	Reader r(data, len);
 	r.Get<uint8_t>();
@@ -718,18 +775,41 @@ bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 	}
 	uint32_t n_act = r.Get<uint32_t>();
 	if(!r.Ok() || s >= n_act)
-		return false;
+		return Verdict::Undecodable;
 	for(uint32_t i = 0; i < s; ++i)
 		r.Skip(4 + 1 + 1 + 4 + 8 + 1);
 	uint32_t code = r.Get<uint32_t>();
 	r.Skip(1);
 	uint8_t loc = r.Get<uint8_t>();
 	if(!r.Ok())
-		return false;
+		return Verdict::Undecodable;
 	if(opt.db)
 		code = opt.db->Canonical(code);
 	auto it = opt.no_activate->find(code);
-	return it != opt.no_activate->end() && (it->second & loc) != 0;
+	return (it != opt.no_activate->end() && (it->second & loc) != 0)
+			   ? Verdict::Forbidden
+			   : Verdict::Allowed;
+}
+
+// Compatibilite : `Undecodable` compte comme INTERDIT, c'est-a-dire que la
+// branche est retiree au lieu d'etre admise sans controle. Le compteur global
+// dit combien de fois c'est arrive — a non nul, la disposition de message a
+// derive et les filtres ne veulent plus rien dire.
+std::atomic<uint64_t> g_undecodable{ 0 };
+
+bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
+					   const std::vector<uint8_t>& response,
+					   const EnumOptions& opt) {
+	const Verdict v = ResponseVerdict(message, data, len, response, opt);
+	if(v == Verdict::Undecodable) {
+		g_undecodable.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+	return v == Verdict::Forbidden;
+}
+
+uint64_t UndecodableResponses() {
+	return g_undecodable.load(std::memory_order_relaxed);
 }
 
 } // namespace solver

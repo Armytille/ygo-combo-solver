@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <queue>
 
 namespace solver {
@@ -160,6 +161,10 @@ Search::Search(Duel& d, Arena& a, const Replay& y, const SearchConfig& c)
 	: duel(d), arena(a), yrp(y), cfg(c) {
 	stats.distinct_by_depth.assign(cfg.max_decisions + 2, 0);
 	stats.expansions_by_depth.assign(cfg.max_decisions + 2, 0);
+	// L'enumerateur compte ses propres troncatures dans NOS stats : un
+	// sous-ensemble jamais emis est une branche absente de l'espace, au meme
+	// titre qu'une coupure de plafond (C9).
+	cfg.enumeration.subsets_capped = &stats.subsets_capped;
 	for(const ResolveReq& req : cfg.resolve_min)
 		resolve_total += req.min_count;
 	// Graine de la borne brulees : les meilleures brulees des phases
@@ -193,6 +198,14 @@ static inline uint64_t CostKey(uint32_t burned, uint32_t actions,
 }
 
 bool Search::BudgetExhausted() const {
+	// ARENE EMPOISONNEE : une allocation est sortie de l'arene, donc Restore()
+	// ne reconstitue plus le duel. Tout ce qui suivrait porterait sur un etat
+	// divergent — on arrete ici, et le worker le dit (C7). Une lecture atomique
+	// relachee par noeud, sur un chemin qui fait deja une lecture d'horloge.
+	if(arena.Poisoned()) {
+		stats.arena_poisoned = true;
+		return true;
+	}
 	if(stats.nodes >= cfg.max_nodes)
 		return true;
 	double ms = std::chrono::duration<double, std::milli>(
@@ -331,7 +344,14 @@ bool Search::FillChoices(ChoiceList& out) {
 		out.KeepOnlyLast();
 	if(out.empty()) {
 		// Prompt non enumerable : on tente la reponse par defaut plutot que de
-		// laisser la branche mourir.
+		// laisser la branche mourir. C'est une REDUCTION A UNE BRANCHE, et elle
+		// etait muette : un combo qui exige de declarer un nom de carte
+		// (ANNOUNCE_*), de choisir un compteur ou de trier est structurellement
+		// hors d'atteinte, et rien ne le signalait (3.5). Comptee par type de
+		// prompt pour que le rapport dise LEQUEL.
+		++stats.forced_default;
+		stats.forced_default_prompts |=
+			1ull << (prompt_type & 63);
 		Choice& c = out.Emit();
 		if(!DefaultResponse(prompt_type, prompt_payload.data(),
 							static_cast<uint32_t>(prompt_payload.size()),
@@ -427,10 +447,16 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 		}
 	}
 
-	if(depth >= cfg.max_decisions)
+	// Coupures de PLAFOND : ce n'est pas l'espace qui s'arrete ici, c'est la
+	// borne. Comptees, sans quoi "EPUISE" mentirait (C2).
+	if(depth >= cfg.max_decisions) {
+		++stats.edges_skipped;
 		return;
-	if(cfg.max_actions && total_actions >= cfg.max_actions)
+	}
+	if(cfg.max_actions && total_actions >= cfg.max_actions) {
+		++stats.edges_skipped;
 		return;
+	}
 
 	// Transposition. Le budget restant est stocke avec l'etat : un etat resolu
 	// avec peu de marge ne dispense pas de le reexplorer avec davantage.
@@ -775,6 +801,11 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	archive_min_score = ~0ull;
 	for(const ArchiveEntry& e : archive)
 		archive_min_score = (std::min)(archive_min_score, e.score);
+	// Tant que l'archive n'est pas pleine, tout etat merite d'y entrer : le
+	// plancher est donc nul, ce qui ANNULE l'early-out bon marche du haut de la
+	// fonction pendant tout le remplissage. C'est voulu — sans cela on
+	// refuserait des etats alors qu'il reste des cases libres — mais il faut le
+	// lire ainsi : l'early-out ne travaille qu'a archive pleine (audit §5).
 	if(archive.size() < cfg.archive_k)
 		archive_min_score = 0;
 }
@@ -851,10 +882,14 @@ bool Search::DescendGuided(uint32_t depth, uint32_t actions, uint32_t turns,
 		return false;
 	ArchiveObserve(here, depth, total_resolved);
 
-	if(depth >= cfg.max_decisions)
+	if(depth >= cfg.max_decisions) {
+		++stats.edges_skipped;
 		return false;
-	if(cfg.max_actions && total_actions > cfg.max_actions)
+	}
+	if(cfg.max_actions && total_actions > cfg.max_actions) {
+		++stats.edges_skipped;
 		return false;
+	}
 
 	uint32_t remaining = cfg.max_decisions - depth;
 	uint64_t key = Digest();
@@ -962,10 +997,14 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 		return false;
 	ArchiveObserve(here, depth, total_resolved);
 
-	if(depth >= cfg.max_decisions)
+	if(depth >= cfg.max_decisions) {
+		++stats.edges_skipped;
 		return false;
-	if(cfg.max_actions && total_actions > cfg.max_actions)
+	}
+	if(cfg.max_actions && total_actions > cfg.max_actions) {
+		++stats.edges_skipped;
 		return false;
+	}
 
 	// Elagage par nouveaute — jamais sur le prefixe pur (aucun ecart pris) :
 	// c'est lui qui garantit qu'a zero ecart la reference est retrouvee, et
@@ -1026,11 +1065,8 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	// sous-arbre lui appartient, les ecarts suivants ne sont plus contraints.
 	const uint32_t level = cfg_discrepancies - disc;   // 0 = aucun ecart pris
 	bool mine = true;
-	if(cfg.claims && level == cfg.claim_level && ref_index < cfg.claims_size) {
-		uint32_t expected = 0;
-		mine = cfg.claims[ref_index].compare_exchange_strong(
-			expected, 1, std::memory_order_relaxed);
-	}
+	if(cfg.claims && level == cfg.claim_level)
+		mine = cfg.claims->Claim(ref_index);
 
 	// Repertoire FENETRE : apres une premiere deviation, un coup que la
 	// reference joue a moins de `repair_window` decisions du point courant est
@@ -1072,8 +1108,11 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 			uint32_t cost = free_move(c.plan_key) ? 0u : 1u;
 			// Les deviations payantes restent soumises au budget et a la
 			// partition entre workers ; les coups fenetres, non.
-			if(cost == 1 && (disc == 0 || !mine))
+			if(cost == 1 && (disc == 0 || !mine)) {
+				if(disc > 0)
+					++stats.claim_denied;
 				continue;
+			}
 			cands.emplace_back(&c.response, cost);
 		}
 	}
@@ -1149,10 +1188,14 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 		return false;
 	ArchiveObserve(here, depth, total_resolved);
 
-	if(depth >= cfg.max_decisions)
+	if(depth >= cfg.max_decisions) {
+		++stats.edges_skipped;
 		return false;
-	if(cfg.max_actions && total_actions > cfg.max_actions)
+	}
+	if(cfg.max_actions && total_actions > cfg.max_actions) {
+		++stats.edges_skipped;
 		return false;
+	}
 
 	// Elagage par nouveaute. C'est ici qu'il travaille le plus : la table de
 	// transposition ne rattrapait que 15 % des etats a un ecart, parce qu'elle
@@ -1239,22 +1282,24 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	// Partition entre workers, au meme principe que RunRepair : on reclame au
 	// N-ieme ecart, pas au premier — devier tot ouvre un sous-arbre enorme que
 	// les autres workers doivent pouvoir partager.
+	//
+	// La cle est le DIGEST de l'etat : il n'y a pas d'indice lineaire ici, et en
+	// mode but seul il n'y a meme pas de ligne. Deux etats distincts au niveau
+	// de reclamation ouvrent deux sous-arbres disjoints — c'est la partition.
 	const uint32_t level = cfg_discrepancies - disc;
 	bool mine = true;
-	if(cfg.claims && level == cfg.claim_level) {
-		size_t slot = (key ^ (key >> 32)) % (cfg.claims_size ? cfg.claims_size : 1);
-		uint32_t expected = 0;
-		mine = cfg.claims[slot].compare_exchange_strong(
-			expected, 1, std::memory_order_relaxed);
-	}
+	if(cfg.claims && level == cfg.claim_level)
+		mine = cfg.claims->Claim(key);
 
 	arena.Push();
 	bool stop = false;
 	for(const Cand& c : cands) {
 		if(c.cost > disc)
 			continue;
-		if(c.cost > 0 && !mine)
+		if(c.cost > 0 && !mine) {
+			++stats.claim_denied;
 			continue;   // sous-arbre pris par un autre worker
+		}
 		duel.SetResponse(choices[c.index].response);
 		path.push_back(choices[c.index].response);
 		stop = DescendTransplant(depth + 1, total_actions, disc - c.cost,
@@ -1301,8 +1346,12 @@ bool Search::Rollout(uint64_t& rng) {
 		++stats.nodes;
 		if(resolved_this_step) {
 			const uint32_t rp = ResolveProgress(resolved);
-			for(uint32_t k = rp_prev; k < rp && k < 4; ++k)
-				++stats.resolve_reached[k];
+			for(uint32_t k = rp_prev; k < rp; ++k) {
+				if(k < 4)
+					++stats.resolve_reached[k];
+				else
+					++stats.resolve_overflow;   // histogramme tronque (4.10)
+			}
 			rp_prev = rp;
 		}
 
@@ -1395,6 +1444,9 @@ bool Search::Rollout(uint64_t& rng) {
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 	}
+	// Sortie par le HAUT de la boucle : le plafond de decisions a mordu, pas
+	// l'espace (C2).
+	++stats.edges_skipped;
 	return hit;
 }
 
@@ -1474,8 +1526,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		// long d'un tirage, chaque seuil n'est franchi qu'une fois.
 		if(resolved_this_step) {
 			const uint32_t rp = ResolveProgress(resolved);
-			for(uint32_t k = rp_prev; k < rp && k < 4; ++k)
-				++stats.resolve_reached[k];
+			for(uint32_t k = rp_prev; k < rp; ++k) {
+				if(k < 4)
+					++stats.resolve_reached[k];
+				else
+					++stats.resolve_overflow;   // histogramme tronque (4.10)
+			}
 			rp_prev = rp;
 		}
 
@@ -1521,17 +1577,26 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		// departage : entre deux lignes de meme materiel, celle qui a visite
 		// des faits inedits merite l'adaptation.
 		{
-			uint32_t partition = cfg.novelty_serialize
-				? CommonCodes(here.codes, target.codes) * 16u +
-					  ResolveProgress(resolved)
-				: 0u;
-			CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here,
-						 partition, atoms_scratch);
-			if(novelty.Observe(atoms_scratch, depth)) {
-				++stats.novelty_novel;
-				novel_states += 1;
-			} else {
-				++stats.novelty_stale;
+			// GATE. `--novelty 0` eteignait NoveltyCut (chemins DFS) mais PAS ce
+			// bloc : le terme `novel_states` restait dans le score et le cout
+			// etait integralement paye — quatre requetes au core, quatre tris et
+			// ~60-80 sondes de table PAR DECISION, pour un simple departage. Le
+			// bras temoin « sans nouveaute » du controle A/B ne couvrait donc que
+			// les passes LDS, jamais NRPA (3.7). C'est aussi la principale
+			// allocation NON BORNEE du run : `seen` croit sans limite, par worker.
+			if(cfg.novelty_patience) {
+				uint32_t partition = cfg.novelty_serialize
+					? CommonCodes(here.codes, target.codes) * 16u +
+						  ResolveProgress(resolved)
+					: 0u;
+				CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here,
+							 partition, atoms_scratch);
+				if(novelty.Observe(atoms_scratch, depth)) {
+					++stats.novelty_novel;
+					novel_states += 1;
+				} else {
+					++stats.novelty_stale;
+				}
 			}
 			// Les resolutions exigees (--resolve) pesent PLUS que des cartes
 			// cibles (cfg.resolve_weight) : a poids egal, les lignes 8/8 sans
@@ -1626,6 +1691,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 	}
+	// Sortie par le HAUT : plafond de decisions (C2).
+	++stats.edges_skipped;
 }
 
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
@@ -1665,10 +1732,10 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 
 void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
-				 float bias_known, float shrink) {
+				 float bias_known, float hint_bias, float shrink, float temp) {
 	for(uint32_t pass = 0; pass < passes; ++pass)
 		for(const NrpaRun& r : runs)
-			AdaptRun(pol, res, r, alpha, bias_known, 0.0f, shrink);
+			AdaptRun(pol, res, r, alpha, bias_known, hint_bias, shrink, temp);
 }
 
 void Search::Adapt(Policy& pol, const NrpaRun& best) {
@@ -1808,7 +1875,7 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	if(cfg.nrpa_adapt_runs && cfg.nrpa_adapt_passes)
 		AdaptCorpus(pol, &ctx_weights, *cfg.nrpa_adapt_runs,
 					cfg.nrpa_adapt_passes, cfg.nrpa_alpha, cfg.nrpa_bias_known,
-					cfg.ctx_shrink);
+					cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp);
 	while(!BudgetExhausted() &&
 		  (cfg.anytime || solutions.size() < cfg.max_solutions)) {
 		NrpaRun best;
@@ -1882,9 +1949,26 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// Cartes du board cible posees chez le PARENT : un indice tombe quand
 		// le noeud n'en a pas le meme compte (le board a change de sous-but).
 		uint16_t placed_parent = 0;
+		// --- sqrt-LTS-H (cfg.reroot_h) ---
+		// `hv` = c(n) = min sur les ancetres de (1/w_t) * c^r_{n_t}(n), la
+		// valeur qui ordonne la file. `hu` = le terme (1/w_t) * (1/pi(n|n_t))
+		// de l'ancetre qui realise ce min : c'est lui qui permet d'etendre la
+		// somme d'un cran sans reparcourir le chemin.
+		double hv = 0.0, hu = 0.0;
 	};
 	std::vector<LNode> nodes;
-	nodes.push_back({ -1, 0, 0.0f, {}, 0.0f, 1.0, 0xffffu });
+	nodes.push_back({ -1, 0, 0.0f, {}, 0.0f, 1.0, 0xffffu,
+					  std::numeric_limits<double>::infinity(),
+					  std::numeric_limits<double>::infinity() });
+	// h(racine) de l'Eq. 7 : l'echelle qui rend le rerooter doux invariant par
+	// changement d'unite de l'heuristique. C'est h A LA RACINE DE LA RECHERCHE
+	// COURANTE, pas une constante du probleme — la session 8 prenait
+	// |cible| + Sigma resolve_min, ce qui est h au depart du DUEL. Dans le
+	// finisseur la racine est un etat de recul deja a 7/8 cartes : h y vaut ~1,
+	// et le cadran alpha etait donc parcouru a une echelle huit fois trop
+	// grande. Evalue au developpement du noeud 0, qui precede toujours tout
+	// usage (il est enfile a cout nul et sort en premier). Plancher a 1.
+	double h_root = 1.0;
 	// Cout de Levin : d(n)/pi(n), en log pour la stabilite. Le noeud de
 	// moindre cout est developpe en premier — c'est la garantie du papier :
 	// nombre d'expansions borne par la probabilite de la solution sous la
@@ -1975,6 +2059,8 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// consomme par les rejeux.
 		if(stats.nodes >= cfg.max_nodes || nodes.size() > 4000000) {
 			stats.hit_node_limit = true;
+			if(nodes.size() > 4000000)
+				stats.hit_memory_limit = true;
 			break;
 		}
 		const uint32_t idx = pq.top().second;
@@ -2065,8 +2151,10 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		++stats.nodes;
 		const uint32_t ndepth = nodes[idx].depth;
 		const float nlogpi = nodes[idx].logpi;
-		if(ndepth >= cfg.max_decisions)
+		if(ndepth >= cfg.max_decisions) {
+			++stats.edges_skipped;
 			continue;
+		}
 		// Le noeud developpe rejoint la pile de plongee : ses enfants et ses
 		// freres se rejoueront en une restauration au lieu d'un rejeu complet.
 		arena.Push();
@@ -2078,12 +2166,23 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// controle). A 0, Levin pur.
 		float hgoal = 0;
 		uint32_t got = 0;
-		if(cfg.levin_h > 0 || cfg.levin_reroot)
+		if(cfg.levin_h > 0 || cfg.levin_reroot || cfg.reroot_h > 0)
 			got = CommonCodes(board_scratch.codes, target.codes);
-		if(cfg.levin_h > 0) {
+		if(cfg.levin_h > 0 || cfg.reroot_h > 0) {
 			hgoal = static_cast<float>(target.codes.size() - got) +
 					static_cast<float>(resolve_target - ResolveProgress(resolved));
 		}
+		// Eq. 7 : l'echelle est h a la racine de CETTE recherche (C3).
+		if(idx == 0 && cfg.reroot_h > 0) {
+			h_root = (std::max)(1.0, static_cast<double>(hgoal));
+			stats.h_root = h_root;
+		}
+		// sqrt-LTS-H : le poids de re-enracinement de CE noeud. La racine vaut
+		// 1 par convention de l'article ; ailleurs, plus le noeud est loin du
+		// but, plus se re-enraciner sur lui coute cher.
+		double inv_w = 1.0;
+		if(cfg.reroot_h > 0 && idx != 0)
+			inv_w = std::exp(static_cast<double>(cfg.reroot_h) * hgoal / h_root);
 		// sqrt-LTS : ce noeud est-il un INDICE ? La racine en est toujours un
 		// (sans quoi les noeuds situes avant le premier indice n'auraient aucun
 		// ancetre re-enracineur). Au re-enracinement, le segment repart : la
@@ -2129,7 +2228,48 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				(std::max)(logit[i] / sum, 1e-30)));
 			child.response = ro_choices[i].response;
 			double lcost;
-			if(cfg.levin_reroot) {
+			if(cfg.reroot_h > 0) {
+				// Eq. 3 de arXiv:2605.30664, tenue en O(1). Deux candidats
+				// seulement : PROLONGER l'ancetre qui minimisait deja le cout
+				// chez le parent, ou SE RE-ENRACINER sur le parent lui-meme.
+				// Le second est toujours disponible et vaut (1/w_parent)/pi :
+				// il BORNE le cout, ce qui rend le mecanisme numeriquement
+				// stable la ou d/pi deborde. L'ecart avec le min exact sur tous
+				// les ancetres est donc majore par ce terme, et unilateral (on
+				// ne sous-estime jamais).
+				const double pi_c = (std::max)(logit[i] / sum, 1e-30);
+				const double ext_u = nodes[idx].hu / pi_c;
+				const double ext_v = nodes[idx].hv + ext_u;
+				const double new_u = inv_w / pi_c;
+				// DEBORDEMENT. Quelques niveaux a pi_c ~ 1e-30 suffisent a
+				// envoyer hu a l'infini ; `ext_v <= new_u` devient alors faux
+				// pour une raison purement ARITHMETIQUE, la branche
+				// « re-enracinement » est prise, et stats.reroots — dont le
+				// commentaire dit qu'il est l'instrument de « a zero, le
+				// mecanisme est inerte » — devient non nul exactement quand le
+				// calcul a casse. On compte les deux separement (4.12).
+				const bool overflowed =
+					!std::isfinite(ext_v) || !std::isfinite(ext_u);
+				if(overflowed)
+					++stats.levin_overflow;
+				if(ext_v <= new_u) {
+					child.hv = ext_v;
+					child.hu = ext_u;
+				} else {
+					child.hv = new_u;
+					child.hu = new_u;
+					if(overflowed)
+						++stats.reroot_by_overflow;
+					// Le compteur ne dit plus « un indice est tombe » (avec ce
+					// rerooter chaque noeud en est un) mais « le
+					// re-enracinement a BATTU la prolongation » : a zero, le
+					// mecanisme est inerte et l'A/B ne mesure rien.
+					++stats.reroots;
+				}
+				child.placed_parent = static_cast<uint16_t>(got);
+				lcost = std::log((std::max)(child.hv, 1e-300)) +
+						static_cast<double>(cfg.levin_h) * hgoal;
+			} else if(cfg.levin_reroot) {
 				child.seg_logpi = base_seg + static_cast<float>(std::log(
 					(std::max)(logit[i] / sum, 1e-30)));
 				// lambda/pi(enfant ; n_k) = lambda/pi(parent ; n_k) +
@@ -2137,7 +2277,18 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				// SEGMENT, pas par celui de la ligne entiere : c'est ce qui
 				// evite le sous-debordement qui rend d/pi inexploitable ici.
 				const double inv = std::exp(-static_cast<double>(child.seg_logpi));
+				// SATURATION. `seg_logpi` est un float qui accumule des
+				// log-probabilites ; passe ~709 en valeur absolue, exp deborde
+				// et le garde substitue 1e300. A partir de la, log(lam - 1) est
+				// CONSTANT pour toute la descendance et le best-first sqrt-LTS
+				// degenere en son departage — l'A/B de --reroot mesurerait alors
+				// un mecanisme qui s'est eteint tout seul. Compte (4.12) ; a non
+				// nul, le bras est a jeter, pas a interpreter.
+				if(!std::isfinite(inv))
+					++stats.levin_overflow;
 				child.lam = base_lam + (std::isfinite(inv) ? inv : 1e300);
+				if(child.lam >= 1e300)
+					++stats.lam_saturated;
 				child.placed_parent = static_cast<uint16_t>(got);
 				// Cout sqrt-LTS (Eq. 14) : lambda/pi - 1, en log pour rester
 				// commensurable avec le terme PHS* d'heuristique. Les poids de
