@@ -2176,7 +2176,20 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 	// nombre d'expansions borne par la probabilite de la solution sous la
 	// politique.
 	using QE = std::pair<double, uint32_t>;
-	std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+	// Departage des ex aequo (cfg.lifo_ties) : std::greater sur la paire
+	// extrayait le plus PETIT indice — le noeud le plus ancien, le plus loin
+	// de la pile de plongee. En LIFO, l'ex aequo extrait est le dernier
+	// enfile : presque toujours un enfant du noeud qu'on vient de developper,
+	// dont le rejeu est UNE reponse depuis le sommet de pile.
+	struct QCmp {
+		bool lifo;
+		bool operator()(const QE& a, const QE& b) const {
+			if(a.first != b.first)
+				return a.first > b.first;
+			return lifo ? a.second < b.second : a.second > b.second;
+		}
+	};
+	std::priority_queue<QE, std::vector<QE>, QCmp> pq(QCmp{ cfg.lifo_ties });
 	pq.push({ 0.0, 0 });
 
 	std::vector<uint32_t> chain;
@@ -2275,6 +2288,10 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		for(int32_t i = static_cast<int32_t>(idx); i > 0; i = nodes[i].parent)
 			chain.push_back(static_cast<uint32_t>(i));
 		std::reverse(chain.begin(), chain.end());
+		// Aretes DEJA DEVELOPPEES de la chaine (tout sauf celle d'idx) : le
+		// denominateur du taux de rejeu — une pile qui absorbe tout en rejoue 0.
+		if(!chain.empty())
+			stats.replay_chain += chain.size() - 1;
 
 		// L'ANCETRE le plus profond present sur la pile de plongee — pas
 		// seulement le parent direct. Le profil (§9.18) a mesure ~80 Process
@@ -2310,6 +2327,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		if(parent >= 0 && at < 0) {
 			// Pile vide (ou sans ancetre commun) : rejeu depuis la racine,
 			// les coups forces se re-derivent.
+			++stats.dive_misses;
 			while(!dive.empty()) {
 				arena.Pop();
 				dive.pop_back();
@@ -2329,10 +2347,20 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				}
 				if(ci == chain.size())
 					break;
+				// Pile complete : l'etat courant est le prompt de chain[ci-1]
+				// (la racine pour ci = 0), un noeud deja developpe — donc un
+				// point de branchement possible des extractions futures.
+				if(cfg.dive_full) {
+					arena.Push();
+					dive.push_back({ ci == 0 ? 0u : chain[ci - 1], path.size(),
+									 actions, turns, summons, resolved });
+				}
 				const std::vector<uint8_t>& r = nodes[chain[ci]].response;
 				duel.SetResponse(r);
 				path.push_back(r);
 				++ci;
+				if(ci < chain.size())
+					++stats.replay_decisions;
 			}
 		} else {
 			// Depiler jusqu'a l'ancetre partage (chaque Pop restaure et
@@ -2365,6 +2393,8 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					duel.SetResponse(nodes[chain[ci]].response);
 					path.push_back(nodes[chain[ci]].response);
 					++ci;
+					if(ci < chain.size())
+						++stats.replay_decisions;
 					Adv a = advance(ci == chain.size());
 					if(a != Adv::Branch) {
 						dead = true;
@@ -2372,6 +2402,14 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					}
 					if(ci == chain.size())
 						break;
+					// Pile complete : on vient d'arriver au prompt de
+					// chain[ci-1], deja developpe — l'empiler pour que les
+					// sauts futurs atterrissent ici au lieu de la racine.
+					if(cfg.dive_full) {
+						arena.Push();
+						dive.push_back({ chain[ci - 1], path.size(),
+										 actions, turns, summons, resolved });
+					}
 				}
 			}
 		}

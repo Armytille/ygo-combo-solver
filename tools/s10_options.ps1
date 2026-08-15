@@ -25,10 +25,13 @@ param([string]$Corpus = 'solutions', [string]$Seed = '888')
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 $ref = "D:\ProjectIgnis\replay\synchron handrip 2.yrpX"
 
+# --start EST REQUIS (decouvert session 12) : --adapt n'est branche que sur les
+# chemins --start/--fire (BuildAdaptRuns). En mode reparation (--solve nu), le
+# flag etait accepte et IGNORE — la table ne s'imprimait jamais.
 $out = "s10_options"
 & .\bin\Release\combosolver.exe $ref `
     --scriptdir ..\deps\scripts_2026-04-13\script `
-    --solve --solve-ms 1000 --seed $Seed `
+    --start $ref --no-plan --solve-ms 1000 --seed $Seed `
     --adapt $Corpus --adapt-passes 4 `
     --no-chain Zalen --no-chain "Crystal Wing" `
     --outdir $out *> "$out.log"

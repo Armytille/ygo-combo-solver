@@ -743,6 +743,11 @@ struct Options {
 	// pur, aveugle au but — mesure : il re-monte les reculs profonds sans
 	// preferer les branches qui ripent).
 	double levin_h = 1.0;
+	// Rejeux du finisseur (session 12) : pile de plongee complete (GAGNANT —
+	// +92 % d'expansions a temps egal sur l'etalon 0, par defaut) et departage
+	// LIFO des ex aequo (refute seul, eteint). Voir SearchConfig.
+	bool dive_full = true;
+	bool lifo_ties = false;
 	// Poids d'une resolution exigee dans le gradient des tirages (defaut 250 ;
 	// 100 = l'ancien poids, une carte cible — mesure perdant : les lignes 8/8
 	// sans rip gagnaient la course d'adaptation contre les rip-partielles).
@@ -1118,6 +1123,12 @@ void Usage() {
 		"  --levin-h <x>      poids PHS* de la distance au but (cartes +\n"
 		"                     resolutions manquantes) dans le cout du finisseur\n"
 		"                     (defaut 1.0 ; 0 = Levin pur, aveugle au but)\n"
+		"  --no-dive-full     finisseur : ne plus empiler un niveau d'arene a\n"
+		"                     chaque noeud de chaine rejoue (retour au rejeu\n"
+		"                     d'avant session 12 — bras temoin d'A/B)\n"
+		"  --lifo-ties        finisseur : a cout de Levin EGAL, extraire le\n"
+		"                     noeud enfile en dernier (refute seul, eteint par\n"
+		"                     defaut — bras d'A/B)\n"
 		"  --resolve-weight <x> poids d'une resolution exigee dans le gradient\n"
 		"                     des tirages (defaut 250 ; 100 = une carte cible)\n"
 		"  --optimize         OPTIMISATION DE COUT anytime : la recherche ne\n"
@@ -1449,6 +1460,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--reroot-h") {
 			const char* v = next("--reroot-h"); if(!v) return false;
 			o.reroot_h = std::atof(v);
+		} else if(a == "--dive-full") {
+			o.dive_full = true;
+		} else if(a == "--no-dive-full") {
+			o.dive_full = false;
+		} else if(a == "--lifo-ties") {
+			o.lifo_ties = true;
 		} else if(a == "--no-plan") {
 			o.no_plan = true;
 		} else if(a == "--no-ref") {
@@ -5325,6 +5342,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.levin_h = static_cast<float>(opt.levin_h);
 	cfg.levin_reroot = opt.levin_reroot;
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
+	cfg.dive_full = opt.dive_full;
+	cfg.lifo_ties = opt.lifo_ties;
 	if(opt.hint_bias >= 0)
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
@@ -6192,11 +6211,23 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													  st.recipes_seen,
 												  st.recipe_h_sum /
 													  double(st.recipe_h_count));
+								// Taux de rejeu (9.18 (c) : le cout est le
+								// REJEU) : aretes rejouees / aretes de chaine,
+								// par expansion. Egaux, la pile n'absorbe
+								// rien ; 0.0, elle absorbe tout.
+								char rj[48] = "";
+								if(st.replay_chain && st.nodes)
+									std::snprintf(rj, sizeof(rj),
+												  " rj=%.1f/%.1f",
+												  double(st.replay_decisions) /
+													  double(st.nodes),
+												  double(st.replay_chain) /
+													  double(st.nodes));
 								std::printf("  %-14s %9llu exp. %7.1f s  best "
-											"%u/%zu%s%s%s  b=%llu  %s%s\n", lbl,
+											"%u/%zu%s%s%s%s  b=%llu  %s%s\n", lbl,
 											(unsigned long long)st.nodes,
 											st.ms / 1000.0, st.best_overlap,
-											target.codes.size(), rr, rf, rg,
+											target.codes.size(), rr, rf, rg, rj,
 											(unsigned long long)st.edges_skipped,
 											SearchOutcome(st),
 											fs.Solutions().empty()
@@ -6561,12 +6592,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											  (unsigned long long)st.recipes_seen,
 											  st.recipe_h_sum /
 												  double(st.recipe_h_count));
+							// Taux de rejeu — ici aussi (le piege 52 s'etait
+							// deja produit sur cette table, pour le rerooter).
+							char rj[48] = "";
+							if(st.replay_chain && st.nodes)
+								std::snprintf(rj, sizeof(rj), " rj=%.1f/%.1f",
+											  double(st.replay_decisions) /
+												  double(st.nodes),
+											  double(st.replay_chain) /
+												  double(st.nodes));
 							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
-										"%s%s%s  b=%llu  %s%s\n",
+										"%s%s%s%s  b=%llu  %s%s\n",
 										roots[i].label.c_str(),
 										(unsigned long long)st.nodes,
 										st.ms / 1000.0, st.best_overlap,
-										target.codes.size(), rr, rf, rg,
+										target.codes.size(), rr, rf, rg, rj,
 										(unsigned long long)st.edges_skipped,
 										SearchOutcome(st),
 										fs.Solutions().empty() ? ""
@@ -7494,9 +7534,22 @@ int main(int argc, char** argv) {
 						RunTransplantSolve(duel, *yrp, *yrp, topt, *arena_ptr,
 										   first, db, scripts, patience, cons);
 					}
-				} else
+				} else {
+					// --adapt n'est branche que sur les chemins --start/--fire
+					// (BuildAdaptRuns). L'accepter ici sans le lire serait un
+					// mecanisme silencieusement absent du chemin — la famille
+					// exacte du piege « verifier qu'il a PU produire l'effet ».
+					// C'est ainsi que la prevision des options (chantier 17) a
+					// attendu deux sessions : son script tournait en mode
+					// reparation, ou la table ne s'imprime jamais.
+					if(!opt.adapt_files.empty())
+						std::printf("\n!! --adapt est IGNORE en mode reparation "
+									"(sans --start/--fire) : le corpus\n   "
+									"n'entre que par le rejeu d'adaptation de la "
+									"transplantation.\n");
 					RunSolve(duel, *yrp, opt, *arena_ptr, first, db, scripts,
 							 patience, cons);
+				}
 			}
 		}
 

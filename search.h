@@ -1071,6 +1071,36 @@ struct SearchConfig {
 	// une recurrence a deux termes (cf. RunLevin) : prolonger le meilleur ancetre
 	// courant, ou se re-enraciner sur le parent.
 	float reroot_h = 0.0f;
+	// --- rejeux du finisseur (session 12) ---
+	// Le profil (9.18 (c)) a etabli que le cout de RunLevin est le REJEU du
+	// chemin a chaque saut de la file — 80 Process par expansion — pas le
+	// developpement des fils. Deux mecanismes l'attaquent, orthogonaux et
+	// debrayables chacun ; ils ne changent ni l'espace atteignable ni le cout
+	// de Levin d'un noeud, seulement l'ORDRE des ex aequo et le POINT DE
+	// DEPART des rejeux. Controle : etalon 0, recul 0 = 42 exp., b=0, EPUISE.
+	//
+	// Pile de plongee COMPLETE : empiler un niveau d'arene a CHAQUE noeud de
+	// chaine rejoue, pas seulement au noeud developpe. Le trafic de pages est
+	// quasi le meme — les pages sales d'un segment se REPARTISSENT entre les
+	// Push, seules les pages chaudes communes sont journalisees plusieurs
+	// fois — mais la pile detient ensuite la branche entiere : l'ancetre
+	// partage trouve est le vrai point de branchement, pas le dernier
+	// developpe survivant.
+	//
+	// PAR DEFAUT depuis la session 12 : etalon 0, rj (aretes rejouees/chaine)
+	// passe de ~12/12 a ~1,5/14, Process/expansion de 54,5 a 12,8, +92 %
+	// d'expansions a temps egal — memes 42 exp./b=0/EPUISE au controle, memes
+	// best par racine (l'ordre d'extraction est INCHANGE, seule la vitesse
+	// change). --no-dive-full pour l'A/B.
+	bool dive_full = true;
+	// Departage LIFO des ex aequo de la file : a cout de Levin EGAL, extraire
+	// le noeud enfile en DERNIER (l'enfant du noeud qu'on vient de
+	// developper). REFUTE seul (session 12) : les ex aequo exacts sont rares
+	// (les log-probabilites different par noeud), rj ne bouge pas, et l'ordre
+	// modifie visite des etats plus chers (90,4 contre 70,4 µs/Process) pour
+	// -20 % d'expansions ; neutre combine a dive_full. Reste disponible pour
+	// l'A/B, eteint par defaut.
+	bool lifo_ties = false;
 	// --- graphe de recettes (chantier 16) ---
 	// Non nul : le graphe est ALIMENTE par les invocations observees, et `h`
 	// devient la distance sur ce graphe au lieu du compte de cartes manquantes.
@@ -1295,6 +1325,18 @@ struct SearchStats {
 	// |cible| : sans l'imprimer, le cadran alpha ne dit pas a quelle echelle il
 	// a ete parcouru. Zero = rerooter doux eteint.
 	double h_root = 0.0;
+	// --- rejeux du finisseur (session 12) ---
+	// Le profil (9.18) a montre que le cout de RunLevin est le REJEU du chemin
+	// a chaque saut de la file, pas le developpement des fils. Ces trois
+	// compteurs mesurent ce que la pile de plongee ABSORBE et ce qu'elle
+	// laisse passer : `replay_decisions` = reponses rejouees (SetResponse sur
+	// des noeuds deja developpes) ; `replay_chain` = longueur cumulee des
+	// chaines des noeuds extraits (le denominateur : a 0 rejoue / chaine, la
+	// pile absorbe tout) ; `dive_misses` = extractions reparties de la RACINE
+	// faute d'ancetre commun sur la pile.
+	uint64_t replay_decisions = 0;
+	uint64_t replay_chain = 0;
+	uint64_t dive_misses = 0;
 	uint64_t goal_hits = 0;         // atteintes du but (re-atteintes comprises)
 	// --- reparation ---
 	// Resynchronisations semantiques : etats dont le digest a retrouve un point
