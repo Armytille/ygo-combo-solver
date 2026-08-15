@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -238,6 +239,21 @@ struct PolicyStep {
 struct NrpaRun {
 	double score = -1;
 	std::vector<PolicyStep> steps;
+	// Ligne PLATE (session 14, minage EN LIGNE) : la MEME ligne, mais toutes ses
+	// decisions a choix multiples sous forme ATOMIQUE — y compris celles qu'une
+	// macro a absorbees, qui ne produisent aucun `steps`. Remplie seulement
+	// quand `cfg.options_online` est branche ; vide sinon (cout nul).
+	//
+	// POURQUOI elle est indispensable au re-minage. Une ligne trouvee AVEC
+	// macros enregistre l'ID DE LA MACRO comme coup joue ; re-miner dessus
+	// produirait des macros de macros, dont la deuxieme cle n'est jamais
+	// proposee par un prompt (`choices[i].plan_key` est toujours atomique) —
+	// avortement systematique au premier pas. La hierarchie emergente que la
+	// compression promet s'obtient donc par RE-APLATISSEMENT : une macro minee
+	// sur `flat` peut couvrir ce qu'une macro precedente absorbait, et sortir
+	// plus longue qu'elle. C'est la meme hierarchie, realisee du cote du
+	// mineur plutot que du cote de l'executeur.
+	std::vector<PolicyStep> flat;
 };
 
 // Meilleure sequence GLOBALE, partagee entre les workers NRPA. Les redemarrages
@@ -532,6 +548,77 @@ struct OptionCatalog {
 OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 								size_t max_options, uint32_t min_support,
 								size_t max_len, uint32_t window, int ctx_tol);
+
+// --- MINAGE EN LIGNE DES OPTIONS (session 14, chantier 1) -------------------
+//
+// Precedent : Marvin (arXiv:1110.2736) memoise ses macros PENDANT la recherche
+// et les utilise dans le meme solve. Jusqu'ici notre catalogue etait mine UNE
+// fois, au demarrage, sur un corpus EXTERNE (`--adapt`) : un run parti de rien
+// restait nu jusqu'au bout, et la boucle du bootstrap demandait plusieurs runs
+// (9.20 (a)-(b)). Ici la boucle rentre DANS le run : les workers versent leurs
+// meilleures lignes a un corpus VIVANT, un mineur re-deroule periodiquement
+// `MineOptionCatalog` dessus (meme selection par perte de Levin,
+// arXiv:2410.11262), et le catalogue est echange a une FRONTIERE SURE.
+//
+// TROIS POINTS DE CONCEPTION, chacun impose par une contrainte du code :
+//
+//  1. FRONTIERE. Les workers lisent le catalogue en const, et `PolicyRollout`
+//     garde un pointeur BRUT dans `seqs[m]` le temps d'une macro active. Le
+//     rachat se fait donc entre deux iterations de niveau superieur (aucun
+//     tirage en vol dans ce worker), et l'ancien catalogue reste vivant tant
+//     qu'un worker le tient : un `shared_ptr<const>` par worker, jamais de
+//     delete sous les pieds de personne.
+//  2. LES POIDS APPRIS SURVIVENT au re-minage : l'id d'une macro est un HASH DE
+//     SON CONTENU (cf. MineOptionCatalog), donc une macro re-trouvee au tour
+//     suivant retrouve exactement son poids de politique. Rien a transferer.
+//  3. LE MINEUR NE BLOQUE PAS. Le worker qui reclame le tour copie le corpus
+//     sous verrou, RELACHE, mine, puis republie sous verrou. Le minage court
+//     dans le budget du run : sa duree est mesuree et imprimee (le juger est
+//     la condition de son maintien).
+//
+// DIVERSITE (chantier 2). En multi-runs elle venait des graines ; en une seule
+// traite elle doit venir de l'interieur. Le corpus vivant est donc un ensemble
+// borne avec QUOTA PAR WORKER : dedoublonnage par signature de ligne, au plus
+// `per_worker` lignes par worker, plafond global `max_pool` par eviction de la
+// pire. Sans quota, les seize workers — qui repartent tous de la meilleure
+// sequence partagee — rempliraient le corpus de la meme ligne.
+struct OnlineOptions {
+	std::mutex mu;
+	struct Entry {
+		uint64_t sig = 0;      // hash des coups joues : l'identite de la ligne
+		double score = 0;
+		uint32_t worker = 0;
+		NrpaRun run;           // ligne PLATE (NrpaRun::flat promue en `steps`)
+	};
+	std::vector<Entry> pool;
+	// Lignes de corpus EXTERNE (--adapt), si le run en a : elles participent au
+	// minage sans jamais etre evincees, et ne comptent dans aucun quota.
+	const std::vector<NrpaRun>* seed = nullptr;
+	size_t max_pool = 12;
+	size_t per_worker = 2;
+	size_t min_lines = 2;      // en dessous, rien a miner qui ait du support
+	// Catalogue courant. Nul = les workers tirent NUS (etat de depart d'un run
+	// sans --adapt : c'est exactement la mission « zero corpus externe »).
+	std::shared_ptr<const OptionCatalog> cat;
+	uint64_t gen = 0;
+	// Parametres de minage, repris des drapeaux --options*.
+	size_t max_options = 256;
+	uint32_t support = 2;
+	size_t max_len = 8;
+	uint32_t window = 0;
+	int ctx_tol = -1;
+	// Cadence.
+	double period_ms = 90000;
+	std::chrono::steady_clock::time_point next{};
+	bool mining = false;
+	// Instrument (piege 52 : un mecanisme dont on ne lit pas la vie ne se juge
+	// pas). `mine_ms_max` est la lecture qui decide s'il reste en ligne.
+	uint32_t rounds = 0;
+	double mine_ms_total = 0, mine_ms_max = 0;
+	uint64_t offered = 0, kept = 0, dups = 0;
+	size_t last_lines = 0, last_size = 0, last_maxlen = 0;
+	double last_avglen = 0, last_flat = 0, last_opt = 0;
+};
 
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
@@ -1237,10 +1324,40 @@ struct SearchConfig {
 	// (piege 35, la semantique des rollouts anytime). Sans --optimize : sans
 	// effet (le finisseur s'arrete au but, comportement historique).
 	bool finisher_post_goal = false;
+	// ARETES MACRO DANS LE FINISSEUR (session 14, chantier 3 — adoption
+	// complete d'Alikhasi & Lelis 2410.11262). Les macros ne vivaient que dans
+	// PolicyRollout ; or c'est RunLevin qui CONVERTIT (9.20 (d) : 32 lignes au
+	// board via le finisseur, 16 solutions ecrites). Ici une macro applicable
+	// devient une ARETE de l'arbre de Levin : elle coute log 1/pi_macro comme
+	// n'importe quelle arete, avance de k decisions pour UNE unite de
+	// profondeur, et une cle absente la fait AVORTER — arete morte, exactement
+	// comme au rollout. Rien n'est retire de l'espace : les aretes atomiques
+	// restent toutes presentes a cote.
+	//
+	// LE CONTROLE CHANGE, ET C'EST LEGITIME. L'etalon 0 ne peut plus se lire
+	// « 42 expansions » : les aretes macro compressent les chemins, donc les
+	// comptes d'expansion et les probabilites des aretes atomiques (dont le
+	// denominateur grossit) bougent PAR CONSTRUCTION. Le controle devient
+	// « memes best par racine, aucune solution perdue, EPUISE toujours
+	// EPUISE ». Eteint, le chemin est bit-a-bit celui d'avant.
+	bool finisher_options = false;
 	// --- options (chantier 17) ---
 	// Catalogue de macros propose a l'echantillonnage NRPA (nul = eteint,
 	// comportement d'avant a l'octet pres). Voir OptionCatalog.
+	//
+	// ATTENTION : sous minage EN LIGNE ce pointeur CHANGE en cours de run. Il
+	// est alors toujours egal a `options_hold.get()` du worker — c'est ce
+	// shared_ptr qui garantit la duree de vie. Ne jamais le recopier ailleurs
+	// que dans un tirage.
 	const OptionCatalog* options = nullptr;
+	// MINAGE EN LIGNE (session 14) : non nul = le worker verse ses meilleures
+	// lignes au corpus vivant et rachete periodiquement le catalogue. Voir
+	// OnlineOptions. Nul = comportement d'avant a l'octet pres (le catalogue,
+	// s'il existe, est celui du demarrage et ne bouge plus).
+	OnlineOptions* options_online = nullptr;
+	// Identite du worker, pour le quota par worker du corpus vivant. Sans
+	// effet quand `options_online` est nul.
+	uint32_t worker_id = 0;
 	// PHS* CANONIQUE (audit session 12) : le cout du papier (2103.11505) est
 	// (d + h)/pi — log(d + levin_h*h) - log pi — l'heuristique s'AJOUTE a la
 	// profondeur et la borne d'expansions est preservee. Notre forme par
@@ -1701,6 +1818,12 @@ private:
 	// les autres workers (cfg.nrpa_shared).
 	double NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng);
 	void Adapt(Policy& pol, const NrpaRun& best);
+	// Un tour de minage EN LIGNE, appele a la FRONTIERE SURE (entre deux
+	// iterations de niveau superieur : aucun tirage en vol dans ce worker, donc
+	// aucun `active_macro` ne pointe dans le catalogue). Verse `best` au corpus
+	// vivant, rachete le catalogue s'il a change, et re-mine si c'est le tour de
+	// ce worker. Sans effet si cfg.options_online est nul.
+	void OnlineOptionsTick(const NrpaRun& best);
 	// Enumere le prompt courant dans `out` (adversaire : "ne rien faire" seul ;
 	// prompt non enumerable : reponse par defaut). false = branche morte.
 	bool FillChoices(ChoiceList& out);
@@ -1843,6 +1966,13 @@ private:
 	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).
 	// Vide et jamais consulte quand le mecanisme est eteint.
 	NrpaResidual ctx_weights;
+
+	// Minage EN LIGNE : la PROPRIETE du catalogue que ce worker lit. `cfg.options`
+	// en est toujours le `.get()`. Tant que ce shared_ptr vit, le catalogue vit —
+	// c'est ce qui rend le rachat sans danger pendant que d'autres workers
+	// tiennent encore l'ancien.
+	std::shared_ptr<const OptionCatalog> options_hold;
+	uint64_t options_gen = 0;
 
 	// Tampons reutilises des chemins chauds (une allocation par decision est
 	// une allocation de trop a des dizaines de millions de decisions par run).

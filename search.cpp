@@ -1733,6 +1733,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	path.clear();
 	run.score = 0;
 	run.steps.clear();
+	run.flat.clear();
+	// Ligne PLATE pour le minage EN LIGNE (session 14) : les decisions ABSORBEES
+	// par une macro n'apparaissent pas dans `steps` — re-miner dessus fabriquerait
+	// des macros de macros, qui avortent au premier pas (cf. NrpaRun::flat).
+	const bool mine_flat = cfg.options_online != nullptr;
 	// Compteurs initiaux : le finisseur echantillonne depuis un etat de recul
 	// deja profond — contraintes d'invocation, coupure de tour et gradient de
 	// resolutions doivent compter depuis le prefixe, pas depuis zero.
@@ -1754,6 +1759,15 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// fenetre de proposition des macros se compare a ce compteur, pas a la
 	// profondeur en prompts (qui compte aussi les coups forces).
 	uint32_t nsteps = 0;
+	// Le descripteur de contexte coute une requete de zone par decision : il ne
+	// se calcule que si quelqu'un le consomme — le niveau contextuel de la
+	// politique, la garde semantique du catalogue COURANT, ou (minage en ligne)
+	// celle du catalogue A VENIR, dont les contextes se relevent maintenant. Ce
+	// troisieme terme est le seul nouveau : sans lui, un run parti nu releverait
+	// des contextes tous nuls et la garde semantique naitrait aveugle.
+	const bool want_ctx = cfg.ctx_shrink >= 0.0f ||
+						  (cfg.options && cfg.options->ctx_tol >= 0) ||
+						  (mine_flat && cfg.options_online->ctx_tol >= 0);
 
 	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
 		if(BudgetExhausted()) {
@@ -1885,6 +1899,29 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				++stats.macro_absorbed;
 				if(++macro_pos >= active_macro->size())
 					active_macro = nullptr;
+				// La decision ABSORBEE entre quand meme dans la ligne plate :
+				// c'est precisement celle que `steps` ne verra jamais, et celle
+				// qu'un re-minage doit pouvoir traverser pour rallonger la macro
+				// au lieu d'en fabriquer une de macros.
+				if(mine_flat) {
+					PolicyStep f;
+					f.keys.reserve(choices.size());
+					for(const Choice& c : choices)
+						f.keys.push_back(c.plan_key);
+					// Une decision absorbee n'a jamais ete echantillonnee : ses
+					// biais ne sont pas definis. Les vecteurs sont dimensionnes
+					// (tout consommateur qui les indexe reste sur pied) et nuls ;
+					// le mineur, lui, ne lit que `keys`, `chosen` et `ctx`.
+					f.known.assign(choices.size(), 0);
+					f.hinted.assign(choices.size(), 0);
+					f.chosen = pick;
+					if(want_ctx)
+						f.ctx = ContextKey(
+							CommonCodes(here.codes, target.codes),
+							duel.Count(static_cast<uint8_t>(cfg.target_player),
+									   LOCATION_HAND));
+					run.flat.push_back(std::move(f));
+				}
 			} else {
 				++stats.macro_aborted;
 				active_macro = nullptr;
@@ -1902,8 +1939,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// Le descripteur coute une requete de zone par decision : il ne se
 			// paie que si le niveau contextuel est allume — ou si la garde
 			// semantique des options en a besoin.
-			if(cfg.ctx_shrink >= 0.0f ||
-			   (cfg.options && cfg.options->ctx_tol >= 0))
+			if(want_ctx)
 				step.ctx = ContextKey(
 					CommonCodes(here.codes, target.codes),
 					duel.Count(static_cast<uint8_t>(cfg.target_player),
@@ -2017,6 +2053,20 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 						++stats.hint_taken;
 				}
 			}
+			// Ligne PLATE : la meme decision sous forme ATOMIQUE — les ids de
+			// macro (la queue de step.keys) sont ecartes et le coup retenu est
+			// le choix du PROMPT reellement joue, macro choisie comprise (`pick`
+			// est alors son premier coup).
+			if(mine_flat) {
+				const size_t n = choices.size();
+				PolicyStep f;
+				f.ctx = step.ctx;
+				f.chosen = pick;
+				f.keys.assign(step.keys.begin(), step.keys.begin() + n);
+				f.known.assign(step.known.begin(), step.known.begin() + n);
+				f.hinted.assign(step.hinted.begin(), step.hinted.begin() + n);
+				run.flat.push_back(std::move(f));
+			}
 			step.chosen = pick_index;
 			run.steps.push_back(std::move(step));
 		}
@@ -2125,6 +2175,148 @@ double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) 
 	return best.score;
 }
 
+void Search::OnlineOptionsTick(const NrpaRun& best) {
+	OnlineOptions* oo = cfg.options_online;
+	if(!oo)
+		return;
+	const auto now = std::chrono::steady_clock::now();
+	bool mine = false;
+	std::vector<NrpaRun> corpus;
+	// Parametres de minage recopies SOUS VERROU : ils ne changent jamais apres
+	// le demarrage, mais les lire hors verrou serait une course a la lettre du
+	// standard, et ce fichier ne laisse pas de course « benigne » derriere lui.
+	size_t m_max = 0, m_len = 0;
+	uint32_t m_sup = 0, m_win = 0;
+	int m_ctx = -1;
+	{
+		std::lock_guard<std::mutex> lock(oo->mu);
+		// 1. CONTRIBUTION. La ligne plate de la meilleure sequence de ce worker
+		// entre au corpus vivant. Trois filtres, dans cet ordre : elle doit
+		// exister, etre INEDITE (les seize workers repartent tous de la meilleure
+		// sequence partagee — sans dedoublonnage le corpus serait seize fois la
+		// meme ligne), et respecter le quota de son worker.
+		if(best.score > 0 && best.flat.size() >= 2) {
+			++oo->offered;
+			uint64_t sig = 0x9E3779B97F4A7C15ull;
+			for(const PolicyStep& s : best.flat)
+				sig = (sig ^ s.keys[s.chosen]) * 0x100000001B3ull;
+			bool dup = false;
+			for(const auto& e : oo->pool)
+				if(e.sig == sig) { dup = true; break; }
+			if(dup) {
+				++oo->dups;
+			} else {
+				// Quota par worker : la place se prend a la PIRE ligne de ce
+				// worker, pas a celle d'un autre. C'est ce qui empeche un worker
+				// prolifique de vider le corpus de la diversite des autres.
+				size_t mine_n = 0, worst = SIZE_MAX;
+				for(size_t i = 0; i < oo->pool.size(); ++i)
+					if(oo->pool[i].worker == cfg.worker_id) {
+						++mine_n;
+						if(worst == SIZE_MAX ||
+						   oo->pool[i].score < oo->pool[worst].score)
+							worst = i;
+					}
+				bool take = true;
+				if(mine_n >= oo->per_worker) {
+					if(oo->pool[worst].score >= best.score)
+						take = false;
+					else
+						oo->pool.erase(oo->pool.begin() +
+									   static_cast<ptrdiff_t>(worst));
+				}
+				if(take) {
+					OnlineOptions::Entry e;
+					e.sig = sig;
+					e.score = best.score;
+					e.worker = cfg.worker_id;
+					e.run.score = best.score;
+					e.run.steps = best.flat;   // le mineur consomme `steps`
+					oo->pool.push_back(std::move(e));
+					++oo->kept;
+					// Plafond global : la pire ligne du corpus, tous workers
+					// confondus, sort.
+					while(oo->pool.size() > oo->max_pool) {
+						size_t w = 0;
+						for(size_t i = 1; i < oo->pool.size(); ++i)
+							if(oo->pool[i].score < oo->pool[w].score)
+								w = i;
+						oo->pool.erase(oo->pool.begin() +
+									   static_cast<ptrdiff_t>(w));
+					}
+				}
+			}
+		}
+		// 2. RACHAT du catalogue. Le shared_ptr garde vivant celui qu'on quitte
+		// tant qu'un autre worker le tient encore.
+		if(oo->gen != options_gen) {
+			options_hold = oo->cat;
+			options_gen = oo->gen;
+			cfg.options = options_hold.get();
+		}
+		// 3. RECLAMATION du tour de minage. Un seul mineur a la fois ; le
+		// premier worker a franchir l'echeance le prend.
+		const size_t lines = oo->pool.size() + (oo->seed ? oo->seed->size() : 0);
+		if(!oo->mining && now >= oo->next && lines >= oo->min_lines) {
+			oo->mining = true;
+			mine = true;
+			m_max = oo->max_options;
+			m_sup = oo->support;
+			m_len = oo->max_len;
+			m_win = oo->window;
+			m_ctx = oo->ctx_tol;
+			corpus.reserve(lines);
+			if(oo->seed)
+				for(const NrpaRun& r : *oo->seed)
+					corpus.push_back(r);
+			for(const auto& e : oo->pool)
+				corpus.push_back(e.run);
+		}
+	}
+	if(!mine)
+		return;
+	// Le minage court VERROU RELACHE : les quinze autres workers continuent de
+	// tirer pendant ce temps. Il court aussi dans le budget du run — sa duree
+	// est mesuree, et c'est elle qui decide s'il a sa place en ligne.
+	const auto t0 = std::chrono::steady_clock::now();
+	OptionCatalog cat = MineOptionCatalog(corpus, m_max, m_sup, m_len, m_win,
+										  m_ctx);
+	const double ms = std::chrono::duration<double, std::milli>(
+						  std::chrono::steady_clock::now() - t0).count();
+	{
+		std::lock_guard<std::mutex> lock(oo->mu);
+		oo->mining = false;
+		oo->next = std::chrono::steady_clock::now() +
+				   std::chrono::milliseconds(
+					   static_cast<long long>(oo->period_ms));
+		++oo->rounds;
+		oo->mine_ms_total += ms;
+		oo->mine_ms_max = (std::max)(oo->mine_ms_max, ms);
+		oo->last_lines = corpus.size();
+		if(cat.Size()) {
+			size_t sum = 0, mx = 0;
+			for(const auto& s : cat.seqs) {
+				sum += s.size();
+				mx = (std::max)(mx, s.size());
+			}
+			oo->last_size = cat.Size();
+			oo->last_maxlen = mx;
+			oo->last_avglen = double(sum) / double(cat.Size());
+			oo->last_flat = cat.model_flat;
+			oo->last_opt = cat.model_opt;
+			oo->cat = std::make_shared<const OptionCatalog>(std::move(cat));
+			++oo->gen;
+		}
+		// Un tour qui ne retient RIEN laisse le catalogue precedent en place :
+		// on ne desarme jamais un worker sur un corpus momentanement pauvre.
+		if(oo->gen != options_gen) {
+			options_hold = oo->cat;
+			options_gen = oo->gen;
+			cfg.options = options_hold.get();
+		}
+	}
+}
+
 double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 	best.score = -1;
 	best.steps.clear();
@@ -2142,6 +2334,10 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 		if(BudgetExhausted() ||
 		   (!cfg.anytime && solutions.size() >= cfg.max_solutions))
 			break;
+		// FRONTIERE SURE du minage EN LIGNE : aucun tirage n'est en vol dans ce
+		// worker, donc aucun `active_macro` ne pointe dans le catalogue — il
+		// peut etre echange ici et nulle part ailleurs.
+		OnlineOptionsTick(best);
 		NrpaRun child;
 		Nrpa(cfg.nrpa_level - 1, pol, child, rng);
 		if(child.score > best.score) {
@@ -2292,11 +2488,24 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// de l'ancetre qui realise ce min : c'est lui qui permet d'etendre la
 		// somme d'un cran sans reparcourir le chemin.
 		double hv = 0.0, hu = 0.0;
+		// --- arete MACRO (cfg.finisher_options) ---
+		// Indice de la macro dans cfg.options. UINT32_MAX = arete ordinaire.
+		// `response` reste la PREMIERE reponse de la macro ; les suivantes se
+		// retrouvent au rejeu, cle par cle, aux prompts intermediaires — elles
+		// ne sont pas stockees (elles ne sont pas des choix de l'arbre).
+		uint32_t macro = UINT32_MAX;
+		// Decisions REELLES sur le chemin. `depth` compte les ARETES — c'est le
+		// d(n) de la borne de Levin, et c'est bien lui qui doit tomber quand une
+		// macro compresse k decisions en une. Mais le PLAFOND de decisions est
+		// une borne sur le jeu, pas sur l'arbre : une arete de longueur 8 avance
+		// de 8 decisions, et le laisser compter pour 1 rendrait le plafond huit
+		// fois plus lache sans que rien ne le dise. Les deux sont donc separes.
+		uint32_t rdepth = 0;
 	};
 	std::vector<LNode> nodes;
 	nodes.push_back({ -1, 0, 0.0f, {}, 0.0f, 1.0, 0xffffu,
 					  std::numeric_limits<double>::infinity(),
-					  std::numeric_limits<double>::infinity() });
+					  std::numeric_limits<double>::infinity(), UINT32_MAX, 0u });
 	// h(racine) de l'Eq. 7 : l'echelle qui rend le rerooter doux invariant par
 	// changement d'unite de l'heuristique. C'est h A LA RACINE DE LA RECHERCHE
 	// COURANTE, pas une constante du probleme — la session 8 prenait
@@ -2329,6 +2538,9 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 
 	std::vector<uint32_t> chain;
 	std::vector<double> logit;
+	// Macros applicables au noeud developpe : (indice de macro, indice du choix
+	// qui porte sa premiere cle). Tampon reutilise entre expansions.
+	std::vector<std::pair<uint32_t, uint32_t>> lapp;
 	uint32_t actions = 0, turns = 0, summons = 0;
 	uint64_t resolved = 0;
 	enum class Adv { Branch, Dead, Goal };
@@ -2384,6 +2596,45 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			duel.SetResponse(ro_choices[0].response);
 			path.push_back(ro_choices[0].response);
 		}
+	};
+
+	// SUITE d'une ARETE MACRO (chantier 3). Sa PREMIERE reponse vient d'etre
+	// appliquee par l'appelant, comme pour une arete ordinaire ; les cles
+	// suivantes se jouent en avancant jusqu'a chaque prompt a choix multiple et
+	// en y retrouvant la cle. Une cle absente AVORTE l'arete — elle devient
+	// morte, exactement comme une macro qui casse au rollout. Rend false quand
+	// l'arete est morte (l'appelant s'arrete), true quand la macro est jouee
+	// jusqu'au bout (l'appelant reprend son flux : c'est LUI qui fera l'advance
+	// suivant, comme pour une arete ordinaire).
+	//
+	// `check` a le meme sens que pour advance : vrai seulement sur le segment
+	// NOUVEAU de la chaine. Les compteurs ne s'incrementent que la — sur les
+	// prefixes, la meme arete se rejoue des milliers de fois et un compteur qui
+	// l'y compterait ne mesurerait que le taux de rejeu.
+	auto play_rest = [&](uint32_t n, bool check) -> bool {
+		if(nodes[n].macro == UINT32_MAX)
+			return true;
+		const std::vector<uint64_t>& seq = cfg.options->seqs[nodes[n].macro];
+		for(size_t k = 1; k < seq.size(); ++k) {
+			if(advance(check) != Adv::Branch)
+				return false;
+			size_t hit = SIZE_MAX;
+			for(size_t i = 0; i < ro_choices.size(); ++i)
+				if(ro_choices[i].plan_key == seq[k]) {
+					hit = i;
+					break;
+				}
+			if(hit == SIZE_MAX) {
+				if(check)
+					++stats.macro_aborted;
+				return false;
+			}
+			if(check)
+				++stats.macro_absorbed;
+			duel.SetResponse(ro_choices[hit].response);
+			path.push_back(ro_choices[hit].response);
+		}
+		return true;
 	};
 
 	// Pile de plongee : le niveau d'arene racine+1+i est l'etat du noeud
@@ -2506,6 +2757,12 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				++ci;
 				if(ci < chain.size())
 					++stats.replay_decisions;
+				// Arete macro : ses cles suivantes se jouent maintenant, avant
+				// que la boucle ne reprenne son advance.
+				if(!play_rest(chain[ci - 1], ci == chain.size())) {
+					dead = true;
+					break;
+				}
 			}
 		} else {
 			// Depiler jusqu'a l'ancetre partage (chaque Pop restaure et
@@ -2546,6 +2803,10 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					++ci;
 					if(ci < chain.size())
 						++stats.replay_decisions;
+					if(!play_rest(chain[ci - 1], ci == chain.size())) {
+						dead = true;
+						break;
+					}
 					Adv a = advance(ci == chain.size());
 					if(a != Adv::Branch) {
 						dead = true;
@@ -2578,8 +2839,9 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		++stats.nodes;
 		prof::Count(prof::kDecisions);
 		const uint32_t ndepth = nodes[idx].depth;
+		const uint32_t nrdepth = nodes[idx].rdepth;
 		const float nlogpi = nodes[idx].logpi;
-		if(ndepth >= cfg.max_decisions) {
+		if(nrdepth >= cfg.max_decisions) {
 			++stats.edges_skipped;
 			continue;
 		}
@@ -2660,18 +2922,67 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					   (hinted ? cfg.hint_bias : 0.0f);
 			mx = (std::max)(mx, logit[i]);
 		}
+		// ARETES MACRO (chantier 3). Memes gardes qu'au rollout : UNE macro par
+		// premiere cle (la mieux classee parmi les compatibles), AUCUN biais
+		// herite (le poids est celui que la politique a appris sur son id). La
+		// fenetre positionnelle n'a pas de sens ici — le finisseur ne compte
+		// pas de decisions depuis un depart de tirage — et elle est refutee
+		// (9.19 (g)) : seule la garde SEMANTIQUE s'applique.
+		//
+		// Le denominateur du softmax grossit donc de `lapp.size()` : les aretes
+		// atomiques deviennent MOINS probables. C'est exactement pourquoi le
+		// compte d'expansions de l'etalon 0 n'est plus le controle (voir
+		// SearchConfig::finisher_options).
+		lapp.clear();
+		if(cfg.finisher_options && cfg.options) {
+			uint16_t mctx = 0;
+			if(cfg.options->ctx_tol >= 0)
+				mctx = ContextKey(
+					CommonCodes(board_scratch.codes, target.codes),
+					duel.Count(static_cast<uint8_t>(cfg.target_player),
+							   LOCATION_HAND));
+			for(size_t i = 0; i < nc; ++i) {
+				auto it = cfg.options->by_first.find(ro_choices[i].plan_key);
+				if(it == cfg.options->by_first.end())
+					continue;
+				for(uint32_t mi : it->second) {
+					if(!cfg.options->CtxOk(mi, mctx))
+						continue;
+					lapp.emplace_back(mi, static_cast<uint32_t>(i));
+					break;   // une macro par premiere cle
+				}
+			}
+			for(const auto& mp : lapp) {
+				auto pit = pol.find(cfg.options->ids[mp.first]);
+				logit.push_back((pit == pol.end()) ? 0.0 : pit->second);
+				mx = (std::max)(mx, logit.back());
+				++stats.macro_taken;
+			}
+		}
 		double sum = 0;
 		for(double& x : logit) {
 			x = std::exp(x - mx);
 			sum += x;
 		}
-		for(size_t i = 0; i < nc; ++i) {
+		for(size_t i = 0; i < logit.size(); ++i) {
 			LNode child;
 			child.parent = static_cast<int32_t>(idx);
 			child.depth = ndepth + 1;
 			child.logpi = nlogpi + static_cast<float>(std::log(
 				(std::max)(logit[i] / sum, 1e-30)));
-			child.response = ro_choices[i].response;
+			if(i < nc) {
+				child.response = ro_choices[i].response;
+				child.rdepth = nrdepth + 1;
+			} else {
+				// Arete macro : sa reponse est le premier coup de la macro ; sa
+				// PROFONDEUR D'ARBRE reste 1 — c'est toute la compression — mais
+				// elle avance de |macro| decisions reelles.
+				const auto& mp = lapp[i - nc];
+				child.response = ro_choices[mp.second].response;
+				child.macro = mp.first;
+				child.rdepth = nrdepth +
+					static_cast<uint32_t>(cfg.options->seqs[mp.first].size());
+			}
 			double lcost;
 			if(cfg.reroot_h > 0) {
 				// Eq. 3 de arXiv:2605.30664, tenue en O(1). Deux candidats

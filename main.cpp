@@ -724,6 +724,16 @@ struct Options {
 	// ni les fenetres --fire. Une re-mesure ne porterait donc que sur un tiers
 	// du flux (audit §5).
 	uint32_t nrpa_lr = 0;
+	// ADAPTATION LENTE ET LONGUE (session 14, chantier 2 — recette Montparnasse,
+	// arXiv:2505.02110 / 2606.07562, Eterna100 resolu ainsi) : le pas
+	// d'adaptation NRPA et le nombre d'iterations par niveau. Jusqu'ici gardes en
+	// dur (1.0 et 24) — donc jamais places sur un cadran, donc jamais mesures.
+	// La recette du papier est un ALPHA PETIT compense par BEAUCOUP d'iterations
+	// au niveau bas : la politique se deplace lentement et explore longtemps le
+	// meme bassin au lieu de s'y verrouiller en quelques adaptations. 0 = defaut
+	// du moteur (comportement d'avant a l'octet pres).
+	double nrpa_alpha = 0;
+	uint32_t nrpa_iters = 0;
 	// Table de transposition PARTAGEE entre workers (lazy SMP), en Mo par
 	// passe. 0 = tables privees (comportement d'avant).
 	// Table de transposition PARTAGEE entre workers. PORTEE REELLE : les seules
@@ -840,6 +850,17 @@ struct Options {
 	// compatible avec une occurrence du corpus — cartes posees exactes, main
 	// a +/- options_ctx. -1 = garde eteinte (defaut).
 	int options_ctx = -1;
+	// MINAGE EN LIGNE (session 14, chantier 1 — Marvin arXiv:1110.2736) :
+	// periode en SECONDES du re-minage sur les meilleures lignes DU RUN.
+	// 0 = eteint (le catalogue est mine une fois au demarrage sur --adapt, et
+	// ne bouge plus : comportement d'avant a l'octet pres). C'est le mecanisme
+	// qui rend le bootstrap possible EN UNE SEULE TRAITE — sans corpus externe,
+	// sans --approach herite, sans relance.
+	uint32_t options_online = 0;
+	// Corpus vivant : lignes retenues au total, et par worker (la POMPE A
+	// DIVERSITE — en multi-runs elle venait des graines).
+	uint32_t options_pool = 12;
+	uint32_t options_per_worker = 2;
 	// PHS* canonique (audit s12) : cout (d + h)/pi du papier au lieu de notre
 	// log(d+1) + h - log pi (facteur e^h, sans garantie).
 	bool phs_canonical = false;
@@ -849,6 +870,11 @@ struct Options {
 	// Recuperation d'apres-but dans le finisseur (9.18 (g), opt-in) : sous
 	// --optimize, un noeud-but de RunLevin continue au lieu de s'arreter.
 	bool finisher_post_goal = false;
+	// ARETES MACRO dans le finisseur (session 14, chantier 3) : les macros du
+	// catalogue deviennent des aretes de l'arbre de Levin. Opt-in : le controle
+	// de l'etalon 0 change LEGITIMEMENT de forme quand il est allume (voir
+	// SearchConfig::finisher_options).
+	bool finisher_options = false;
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
@@ -1143,6 +1169,12 @@ void Usage() {
 		"                     apres n re-trouvailles de la meilleure sequence\n"
 		"                     (defaut 0 = stagnation seule — R=2 mesure perdant :\n"
 		"                     8/8 -> 7/8 sur la transplantation test 4)\n"
+		"  --nrpa-alpha <x>   pas d'adaptation NRPA (defaut 1.0). Petit = la\n"
+		"                     politique se deplace LENTEMENT — la moitie de la\n"
+		"                     recette Montparnasse (l'autre est --nrpa-iters)\n"
+		"  --nrpa-iters <n>   iterations par niveau NRPA (defaut 24). Le cout d'un\n"
+		"                     appel de niveau L est n^L tirages : monter n allonge\n"
+		"                     l'exploration d'un meme bassin avant de rendre la main\n"
 		"  --finisher <mode>  finisseur de la transplantation : levin (archive\n"
 		"                     Go-Explore + recul + Levin Tree Search sur la\n"
 		"                     politique NRPA, defaut), mono (l'ancien : le seul\n"
@@ -1208,6 +1240,15 @@ void Usage() {
 		"                     occurrence du corpus (cartes cibles posees\n"
 		"                     exactes, main a +/- n). -1 = eteinte (defaut) ;\n"
 		"                     15 = ne garder que les cartes posees.\n"
+		"  --options-online <s>  MINAGE EN LIGNE : re-miner le catalogue toutes\n"
+		"                     les s secondes sur les meilleures lignes DU RUN\n"
+		"                     (0 = eteint, defaut). Aucun corpus externe requis :\n"
+		"                     le run part nu et s'arme lui-meme. Implique\n"
+		"                     --options 256 si --options n'est pas donne.\n"
+		"  --options-pool <n> corpus vivant : lignes retenues au total (defaut 12)\n"
+		"  --options-per-worker <n>  et au plus n par worker (defaut 2) — c'est\n"
+		"                     la POMPE A DIVERSITE : sans quota, les seize workers\n"
+		"                     versent seize fois la meme meilleure ligne partagee.\n"
 		"  --phs-canonical    finisseur : cout PHS* du papier, (d + h)/pi, au\n"
 		"                     lieu de log(d+1) + h - log pi (facteur e^h,\n"
 		"                     plus agressif, sans la garantie du papier)\n"
@@ -1217,6 +1258,13 @@ void Usage() {
 		"  --finisher-post-goal  finisseur : sous --optimize, un noeud-but\n"
 		"                     CONTINUE (recuperation d'apres-but, piege 35) au\n"
 		"                     lieu de s'arreter. Opt-in, a juger sur A/B.\n"
+		"  --finisher-options  finisseur : les macros du catalogue deviennent\n"
+		"                     des ARETES de l'arbre de Levin (cout log 1/pi,\n"
+		"                     avance de k decisions, avortement = arete morte).\n"
+		"                     Opt-in. ATTENTION : allume, il change LEGITIMEMENT\n"
+		"                     les comptes d'expansions — le controle devient\n"
+		"                     memes best par racine / aucune solution perdue /\n"
+		"                     EPUISE toujours EPUISE.\n"
 		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
 		"                     t < 1 concentre la masse sur les coups les mieux\n"
 		"                     classes SANS changer le classement — le seul\n"
@@ -1446,6 +1494,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--nrpa-keep") {
 			const char* v = next("--nrpa-keep"); if(!v) return false;
 			o.nrpa_keep = std::atof(v);
+		} else if(a == "--nrpa-alpha") {
+			const char* v = next("--nrpa-alpha"); if(!v) return false;
+			o.nrpa_alpha = std::atof(v);
+		} else if(a == "--nrpa-iters") {
+			const char* v = next("--nrpa-iters"); if(!v) return false;
+			o.nrpa_iters = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--nrpa-lr") {
 			const char* v = next("--nrpa-lr"); if(!v) return false;
 			o.nrpa_lr = static_cast<uint32_t>(std::atoi(v));
@@ -1522,6 +1576,15 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--options-ctx") {
 			const char* v = next("--options-ctx"); if(!v) return false;
 			o.options_ctx = std::atoi(v);
+		} else if(a == "--options-online") {
+			const char* v = next("--options-online"); if(!v) return false;
+			o.options_online = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-pool") {
+			const char* v = next("--options-pool"); if(!v) return false;
+			o.options_pool = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-per-worker") {
+			const char* v = next("--options-per-worker"); if(!v) return false;
+			o.options_per_worker = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--phs-canonical") {
 			o.phs_canonical = true;
 		} else if(a == "--merged-pop") {
@@ -1530,6 +1593,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.merged_pop = false;
 		} else if(a == "--finisher-post-goal") {
 			o.finisher_post_goal = true;
+		} else if(a == "--finisher-options") {
+			o.finisher_options = true;
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
@@ -5385,13 +5450,23 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// rien a miner : le dire plutot que laisser un mecanisme silencieusement
 	// absent du chemin (la lecon de --adapt en mode reparation, 9.19 (b)).
 	OptionCatalog option_catalog;
-	if(opt.options_n) {
+	// MINAGE EN LIGNE : `--options-online` implique un plafond de catalogue.
+	// Sans cela le drapeau serait accepte et INERTE (options_n = 0 coupe tout) —
+	// la famille exacte du « mecanisme silencieusement absent du chemin ».
+	const uint32_t options_n =
+		(opt.options_online && !opt.options_n) ? 256u : opt.options_n;
+	if(options_n) {
 		if(adapt_runs.empty()) {
-			std::printf("\n!! --options %u : aucun corpus releve (--adapt "
-						"manquant ou vide) — catalogue VIDE, mecanisme eteint.\n",
-						opt.options_n);
+			if(opt.options_online)
+				std::printf("\n  options : aucun corpus externe (--adapt) — le run "
+							"part NU et minera ses propres lignes toutes les %u s "
+							"(--options-online).\n", opt.options_online);
+			else
+				std::printf("\n!! --options %u : aucun corpus releve (--adapt "
+							"manquant ou vide) — catalogue VIDE, mecanisme eteint.\n",
+							options_n);
 		} else {
-			option_catalog = MineOptionCatalog(adapt_runs, opt.options_n,
+			option_catalog = MineOptionCatalog(adapt_runs, options_n,
 											   opt.options_support,
 											   opt.options_len,
 											   opt.options_window,
@@ -5410,7 +5485,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			std::printf("\n  options : %zu macro(s) retenue(s) sur plafond %u "
 						"(support >= %u, longueur 2-%zu, moyenne %.1f, fenetre "
 						"%s%u, ctx %s) ; perte modele %.1f -> %.1f log10\n",
-						option_catalog.Size(), opt.options_n,
+						option_catalog.Size(), options_n,
 						opt.options_support, max_len,
 						option_catalog.Size()
 							? double(sum_len) / double(option_catalog.Size())
@@ -5494,10 +5569,39 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
 	cfg.dive_full = opt.dive_full;
 	cfg.finisher_post_goal = opt.finisher_post_goal;
+	cfg.finisher_options = opt.finisher_options;
 	cfg.lifo_ties = opt.lifo_ties;
 	cfg.phs_canonical = opt.phs_canonical;
 	cfg.merged_pop = opt.merged_pop;
 	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
+	// MINAGE EN LIGNE (session 14) : le corpus vivant du run. Il est declare
+	// ICI pour survivre a toutes les phases, mais n'est BRANCHE que sur les
+	// workers de la phase tirages — c'est la seule phase qui produit des lignes
+	// completes. Le catalogue qu'il aura fini par miner est ensuite passe au
+	// finisseur en STATIQUE (plus personne ne re-mine apres les tirages).
+	OnlineOptions online;
+	// Le catalogue de fin de tirages, tenu vivant pour le finisseur.
+	std::shared_ptr<const OptionCatalog> final_online;
+	if(opt.options_online) {
+		online.max_options = options_n;
+		online.support = opt.options_support;
+		online.max_len = opt.options_len;
+		online.window = opt.options_window;
+		online.ctx_tol = opt.options_ctx;
+		online.period_ms = opt.options_online * 1000.0;
+		online.max_pool = opt.options_pool ? opt.options_pool : 1;
+		online.per_worker = opt.options_per_worker ? opt.options_per_worker : 1;
+		if(!adapt_runs.empty())
+			online.seed = &adapt_runs;
+		if(option_catalog.Size()) {
+			online.cat = std::make_shared<const OptionCatalog>(option_catalog);
+			online.gen = 1;   // les workers l'adoptent des le premier tour
+		}
+		std::printf("  options EN LIGNE : re-minage toutes les %u s, corpus "
+					"vivant %zu ligne(s) max (%zu par worker)%s\n",
+					opt.options_online, online.max_pool, online.per_worker,
+					online.seed ? ", corpus --adapt en amorce" : "");
+	}
 	if(opt.hint_bias >= 0)
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
@@ -5720,18 +5824,42 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		{
 			const int lvl = opt.nrpa_level > 0 ? opt.nrpa_level
 											  : ((budget > 180000.0) ? 3 : 2);
-			std::printf("  niveau NRPA : %d  (%s ; ~%d tirages par appel de "
-						"niveau)\n", lvl,
+			// Le nombre de tirages par appel de niveau est iters^L : il etait
+			// imprime en dur (576/13824), ce qui aurait menti des que
+			// --nrpa-iters bouge — exactement la variable cachee de C15.
+			const uint32_t it = opt.nrpa_iters ? opt.nrpa_iters
+											   : SearchConfig{}.nrpa_iters;
+			double rollouts = 1;
+			for(int k = 0; k < lvl; ++k)
+				rollouts *= it;
+			std::printf("  niveau NRPA : %d  (%s ; ~%.0f tirages par appel de "
+						"niveau, iters %u)\n", lvl,
 						opt.nrpa_level > 0 ? "--nrpa-level"
 										   : "defaut, seuil de 180 s sur le "
 											 "budget des tirages",
-						lvl >= 3 ? 13824 : 576);
+						rollouts, it);
+			// Le cadran d'adaptation, imprime des qu'il quitte le defaut : un
+			// reglage qui change l'algorithme sans se nommer est une variable
+			// cachee (C15).
+			if(opt.nrpa_alpha > 0 || opt.nrpa_lr)
+				std::printf("  adaptation  : alpha %.3f (%s), repetitions "
+							"limitees %u (%s)\n",
+							opt.nrpa_alpha > 0 ? opt.nrpa_alpha
+											   : SearchConfig{}.nrpa_alpha,
+							opt.nrpa_alpha > 0 ? "--nrpa-alpha" : "defaut",
+							opt.nrpa_lr,
+							opt.nrpa_lr ? "--nrpa-lr" : "stagnation seule");
 		}
 		// Meilleure sequence GLOBALE, partagee entre les workers NRPA : les
 		// redemarrages repartent de la meilleure ligne connue de tous au lieu
 		// de reapprendre les memes sous-lignes chacun dans son coin.
 		NrpaShared shared_best;
 		auto t0 = Clock::now();
+		// Premiere echeance de minage en ligne : une periode apres le depart —
+		// avant, le corpus vivant n'a encore rien de complet a offrir.
+		online.next = std::chrono::steady_clock::now() +
+					  std::chrono::milliseconds(
+						  static_cast<long long>(online.period_ms));
 
 		auto worker = [&](unsigned id) {
 			// Sept workers sur huit en NRPA. Le quart glouton d'origine a ete
@@ -5776,6 +5904,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					wcfg.nrpa_restart_keep = static_cast<float>(opt.nrpa_keep);
 					wcfg.nrpa_shared = &shared_best;
 					wcfg.nrpa_lr = opt.nrpa_lr;
+					// Recette Montparnasse (chantier 2) : pas d'adaptation et
+					// iterations par niveau, jusqu'ici en dur. 0 = defaut du
+					// moteur, a l'octet pres.
+					if(opt.nrpa_alpha > 0)
+						wcfg.nrpa_alpha = static_cast<float>(opt.nrpa_alpha);
+					if(opt.nrpa_iters)
+						wcfg.nrpa_iters = opt.nrpa_iters;
+					// Minage EN LIGNE : ce worker verse ses meilleures lignes au
+					// corpus vivant et rachete le catalogue entre deux iterations
+					// de niveau superieur. `worker_id` sert au quota par worker
+					// (la pompe a diversite).
+					if(opt.options_online) {
+						wcfg.options_online = &online;
+						wcfg.worker_id = id;
+					}
 					wcfg.archive_k = opt.archive_k;
 					// Borne brulees partagee entre workers (session 6).
 					if(opt.optimize && opt.burn_share)
@@ -5893,6 +6036,41 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							: 0.0,
 						(unsigned long long)(greedy.macro_aborted +
 											 nrpa.macro_aborted));
+		// La vie du MINAGE EN LIGNE. Trois lectures qui decident de son sort :
+		// le nombre de tours (a zero, le run n'a jamais eu de quoi miner), le
+		// catalogue final (taille et perte modele — la meme lecture que le
+		// catalogue statique), et la DUREE du minage, qui court dans le budget
+		// du run : au-dessus de la seconde, il faudrait rendre le corpus vivant
+		// plus petit ou la periode plus longue.
+		if(opt.options_online) {
+			std::lock_guard<std::mutex> lock(online.mu);
+			std::printf("      options en ligne : %u tour(s) de minage, corpus "
+						"vivant %zu ligne(s) (%llu offertes, %llu retenues, "
+						"%llu doublons)\n",
+						online.rounds, online.pool.size(),
+						(unsigned long long)online.offered,
+						(unsigned long long)online.kept,
+						(unsigned long long)online.dups);
+			if(online.rounds)
+				std::printf("                       dernier catalogue : %zu macro(s) "
+							"(moyenne %.1f, max %zu) sur %zu ligne(s), perte modele "
+							"%.1f -> %.1f log10 ; minage %.0f ms en moyenne, %.0f ms "
+							"au pire\n",
+							online.last_size, online.last_avglen,
+							online.last_maxlen, online.last_lines,
+							online.last_flat, online.last_opt,
+							online.mine_ms_total / double(online.rounds),
+							online.mine_ms_max);
+			// Le catalogue mine en ligne SURVIT aux tirages : c'est la meilleure
+			// connaissance de macros que le run possede, et les tirages enracines
+			// du finisseur doivent en heriter — sinon le run se desarmerait
+			// exactement au moment ou il convertit. Plus personne ne re-mine
+			// apres ce point : le catalogue redevient statique.
+			if(online.cat && online.cat->Size()) {
+				final_online = online.cat;
+				cfg.options = final_online.get();
+			}
+		}
 		// Ce que les CONTRAINTES DE LIGNE coupent, PAR MODE. Trois mecanismes
 		// actifs dans tous les runs disciplines depuis la session 3, et aucun
 		// n'etait imprime LA OU IL TRAVAILLE : `PrintCuts` ne couvrait que les
@@ -6381,11 +6559,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													  double(st.nodes),
 												  double(st.replay_chain) /
 													  double(st.nodes));
+								// ARETES MACRO (chantier 3) : enfilees/absorbees/avortees, PAR
+								// RACINE. Sans cette colonne, un finisseur ou aucune macro n'est
+								// jamais proposable serait indiscernable d'un finisseur ou elles
+								// ne servent a rien (piege 52).
+								char mc[64] = "";
+								if(cfg.finisher_options && (st.macro_taken || st.macro_aborted))
+									std::snprintf(mc, sizeof(mc), " mac=%llu/%llu/%llu",
+												  (unsigned long long)st.macro_taken,
+												  (unsigned long long)st.macro_absorbed,
+												  (unsigned long long)st.macro_aborted);
 								std::printf("  %-14s %9llu exp. %7.1f s  best "
-											"%u/%zu%s%s%s%s  b=%llu  %s%s\n", lbl,
+											"%u/%zu%s%s%s%s%s  b=%llu  %s%s\n", lbl,
 											(unsigned long long)st.nodes,
 											st.ms / 1000.0, st.best_overlap,
-											target.codes.size(), rr, rf, rg, rj,
+											target.codes.size(), rr, rf, rg, rj, mc,
 											(unsigned long long)st.edges_skipped,
 											SearchOutcome(st),
 											fs.Solutions().empty()
@@ -6759,12 +6947,25 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												  double(st.nodes),
 											  double(st.replay_chain) /
 												  double(st.nodes));
+							// ARETES MACRO (chantier 3) : enfilees/absorbees/
+							// avortees, PAR RACINE. Sans cette colonne, un
+							// finisseur ou aucune macro n'est jamais proposable
+							// serait indiscernable d'un finisseur ou elles ne
+							// servent a rien (piege 52).
+							char mc[64] = "";
+							if(cfg.finisher_options &&
+							   (st.macro_taken || st.macro_aborted))
+								std::snprintf(mc, sizeof(mc),
+											  " mac=%llu/%llu/%llu",
+											  (unsigned long long)st.macro_taken,
+											  (unsigned long long)st.macro_absorbed,
+											  (unsigned long long)st.macro_aborted);
 							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
-										"%s%s%s%s  b=%llu  %s%s\n",
+										"%s%s%s%s%s  b=%llu  %s%s\n",
 										roots[i].label.c_str(),
 										(unsigned long long)st.nodes,
 										st.ms / 1000.0, st.best_overlap,
-										target.codes.size(), rr, rf, rg, rj,
+										target.codes.size(), rr, rf, rg, rj, mc,
 										(unsigned long long)st.edges_skipped,
 										SearchOutcome(st),
 										fs.Solutions().empty() ? ""

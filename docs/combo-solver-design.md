@@ -3682,3 +3682,126 @@ budget : le off du soir convertit là où l'opt1 du matin ne convertissait pas),
 répétitions ×3 à 300 s, pas sur l'étalon B à 60 s. Le µs/appel du PGO s13 contre son témoin
 LTO n'a pas été re-relevé (hygiène en attente — la mécanique du pipeline est identique à la
 s12, mesurée là-bas à −21,4 %).
+
+### 9.21 Session 14 : le bootstrap rentre DANS le run — `--options-online`, et la boucle InnateCoder en une seule traite
+
+Mission fixée par l'opérateur en fin de session 13 : un run complet d'une seule traite doit
+monter seul vers le but — **zéro corpus externe, zéro `--approach` hérité, zéro relance**. La
+session 13 avait prouvé la FAISABILITÉ de la boucle en plusieurs runs (gen1 nue → macros →
+gen2 armée → premier 2/4, 9.20 (a)-(b)) ; la session 14 devait l'INTERNALISER.
+
+**(a) `--options-online` : le minage EN LIGNE, et les trois points de conception que le code
+imposait.** Précédent : Marvin (arXiv:1110.2736) mémoïse ses macros PENDANT la recherche et
+les utilise dans le même solve. Ici : les workers versent leurs meilleures lignes à un corpus
+VIVANT, un mineur re-déroule `MineOptionCatalog` dessus toutes les `s` secondes (la même
+sélection par perte de Levin, arXiv:2410.11262), et le catalogue est échangé à une frontière
+sûre. Trois points, chacun imposé par une contrainte du code existant :
+
+1. **La frontière.** `PolicyRollout` garde un pointeur BRUT dans `seqs[m]` le temps d'une
+   macro active. Le rachat se fait donc entre deux itérations de niveau supérieur — aucun
+   tirage en vol dans ce worker — et chaque worker tient son catalogue par un
+   `shared_ptr<const>` : l'ancien reste vivant tant qu'un worker le lit.
+2. **Les poids appris survivent gratuitement** : l'id d'une macro est un HASH DE SON CONTENU,
+   donc une macro re-trouvée au tour suivant retrouve exactement son poids de politique. Rien
+   à transférer, et c'était déjà vrai dans le code — il fallait seulement ne pas le casser.
+3. **La ligne PLATE (`NrpaRun::flat`), le point qui ne se devinait pas.** Une ligne trouvée
+   AVEC macros enregistre l'ID DE LA MACRO comme coup joué (les décisions absorbées ne
+   produisent aucun `PolicyStep`). Re-miner dessus ne donne PAS des « macros de macros
+   gratuites » comme le prompt l'espérait : la deuxième clé d'une telle macro n'est jamais
+   proposée par un prompt — `choices[i].plan_key` est toujours ATOMIQUE — donc elle avorterait
+   au premier pas, systématiquement. La hiérarchie émergente s'obtient par RE-APLATISSEMENT :
+   le tirage enregistre, en parallèle de `steps`, la même ligne sous forme atomique, absorbées
+   comprises ; une macro minée dessus peut couvrir ce qu'une macro précédente absorbait et
+   sortir plus longue qu'elle. Même hiérarchie, réalisée du côté du mineur plutôt que de
+   l'exécuteur. `flat` n'est rempli que sous `--options-online` (coût nul sinon).
+
+**La POMPE À DIVERSITÉ, côté corpus** (chantier 2, première moitié). En multi-runs la diversité
+venait des graines ; en une traite elle doit venir de l'intérieur. Le corpus vivant est un
+ensemble borné avec **quota par worker** : dédoublonnage par signature de ligne, au plus
+`--options-per-worker` lignes par worker, plafond `--options-pool` par éviction de la pire.
+Le dédoublonnage porte tout le poids — mesure sur un run de 60 s : **8 609 lignes offertes,
+103 retenues, 8 506 doublons**. Sans lui, les seize workers (qui repartent tous de la meilleure
+séquence partagée) rempliraient le corpus de la même ligne.
+
+**(b) Le coût du mineur, l'instrument qui décide de sa place.** Il court DANS le budget du run :
+sa durée est mesurée et imprimée. Étalon B 60 s, période 15 s : 2 tours, **39 ms** de moyenne
+et de pire. Étalon A 300 s, période 60 s : 3 tours, **81-114 ms au pire**. Deux ordres de
+grandeur sous la seconde — le mécanisme ne mange pas ce qu'il apporte. À surveiller si le
+corpus vivant ou les lignes s'allongent : le minage est en O(lignes × longueur × faisceau).
+
+**Santé stricte** : 24 lignes de diff contre `s13_sante_pgo.log`, QUE des durées et le nom
+d'outdir (273 digests, 210/273, 209 candidates, 16 replays) — le mécanisme est bien DORMANT
+éteint. **PGO s14** (`tools/s14_pgo.ps1`, témoin `combosolver_lto_s14.exe`, cinq régimes
+d'entraînement dont un run `--options-online` SANS corpus — le chemin neuf) : santé du binaire
+PGO à 22 lignes de diff, toutes des durées. La santé INSTRUMENTÉE est restée propre pour la
+troisième fois : l'anomalie C10 de 9.19 (e) ne s'est jamais reproduite.
+
+**Note de procédure versée au dossier** : les `.pgc` des sessions précédentes ne sont pas
+effacés avant l'entraînement (12 fichiers fusionnés, dont 7 hérités de la s13). C'est la
+procédure telle qu'elle tourne depuis la s12 et les gains mesurés l'ont été ainsi ; elle est
+conservée pour la comparabilité, pas parce qu'elle est la bonne. À trancher si un jour un
+pipeline PGO rend un résultat surprenant.
+
+**(c) CORRECTION AU PROMPT — `--nrpa-lr` n'était pas à écrire, il existait et avait été
+réfuté.** Le prompt de la session 14 donnait les répétitions limitées (GNRPA-LR,
+arXiv:2401.10420) pour un mécanisme « jamais essayé ici, quelques lignes de code ». Il est
+implémenté **depuis la session 4** (`--nrpa-lr`, arrêt d'un niveau après R re-trouvailles du
+score MATÉRIEL de la meilleure séquence) et y a été **mesuré PERDANT** : R=2, transplantation
+`test 4`, 90 s — 8/8 et 36 lignes côté témoin, 7/8 et 0 ligne côté R=2. La note de l'époque
+demandait explicitement une re-mesure « R plus grand, niveau 1 seulement ». Ce qui restait à
+faire était donc la MESURE, pas l'implémentation.
+
+En revanche l'autre moitié du chantier 2 — l'**adaptation lente et longue** (recette
+Montparnasse, arXiv:2505.02110 / 2606.07562) — n'avait **aucun cadran** : `nrpa_alpha` et
+`nrpa_iters` étaient en dur à 1.0 et 24, jamais exposés, donc jamais mesurables. `--nrpa-alpha`
+et `--nrpa-iters` les sortent, et le nombre de tirages par appel de niveau (imprimé en dur
+576/13824) est désormais DÉRIVÉ de `iters^L` — sans quoi la ligne aurait menti dès que le
+cadran bouge, exactement la variable cachée de C15.
+
+**(d) L'A/B DE LA MISSION : le run part NU et convertit — 3 graines sur 3.** Étalon A but seul,
+`--no-ref`, **aucun `--adapt`, aucun `--approach`, une seule traite**, 300 s, trois bras
+intercalés par graine (`tools/s14_options_online_ab.ps1`). Le témoin est exactement la gen1 nue
+de 9.20 (a). Le juge est l'**approche ÉCRITE** — le meilleur état que le RUN ENTIER a su
+atteindre, pas la ligne « NRPA … best k/4 » qui ne résume que la phase tirages (voir le piège
+d'instrument ci-dessous) :
+
+| graine | bras | approche écrite | ≥2 | ≥3 | avortées/prise |
+|---|---|---|---|---|---|
+| 888 | nu | 1/4 (56 déc.) | 2 614 | **0** | — |
+| 888 | `--options-online 60` | **2/4 (202 déc.)** | 220 035 | **115 933** | 0,25 |
+| 888 | + `--options-ctx 1` | 1/4 (54 déc.) | 113 519 | 44 840 | 0,38 |
+| 1234 | nu | 1/4 (61 déc.) | 8 885 | **0** | — |
+| 1234 | `--options-online 60` | **2/4 (211 déc.)** | 201 590 | **91 887** | 0,31 |
+| 1234 | + `--options-ctx 1` | **2/4 (196 déc.)** | 267 479 | 91 636 | 0,44 |
+| 4242 | nu | 1/4 (49 déc.) | 2 769 | 25 | — |
+| 4242 | `--options-online 60` | **2/4 (190 déc.)** | 158 243 | **76 280** | 0,31 |
+| 4242 | + `--options-ctx 1` | **2/4 (193 déc.)** | 170 302 | 121 433 | 0,21 |
+
+**Le fait, en une phrase : `--options-online` convertit 3 graines sur 3 là où le run nu en
+convertit 0 sur 3, et les résolutions profondes passent de 0/0/25 à 76 k-116 k.** Trois à
+quatre ordres de grandeur sur l'axe ≥3, et la conversion — que 9.20 (f) donnait pour
+stochastique (~1 run armé sur 3-5, et il fallait un corpus fabriqué par des runs antérieurs) —
+devient SYSTÉMATIQUE dans un run qui n'a rien reçu. Le catalogue que le run se mine (6 à 17
+macros, longueur moyenne 6,8-7,9, 3 tours de minage) est d'emblée à la qualité « gen2 armée »
+de 9.20 (b) — 3-6 macros de longueur 7,0-7,3 — que la session 13 n'obtenait qu'au second run
+et avec un corpus externe. La boucle InnateCoder est INTERNALISÉE.
+
+**LA GARDE SÉMANTIQUE NE SURVIT PAS À SON PROPRE TEST.** 9.20 (g) la laissait « non-destructive,
+signe positif, OPT-IN » en écrivant que « son vrai test est DANS la boucle ». Le voici : elle
+convertit 2/3 contre 3/3, elle divise ≥3 par 2,6 sur la graine 888, et — la lecture
+diagnostique — elle **AUGMENTE le taux d'avortement** sur les deux graines où l'appariement est
+propre (0,25 → 0,38 ; 0,31 → 0,44), là où la session 13 la mesurait en train de le DIVISER par
+2 à 8 en régime de corpus statique. L'explication tient à la sélection : la garde rétrécit le
+dénominateur du modèle, donc le catalogue retenu est plus petit (4-11 macros contre 6-17), et
+la « meilleure macro par première clé PARMI LES COMPATIBLES » est souvent un moins bon ajusté
+que la meilleure tout court. VERDICT : la garde reste implémentée et opt-in, mais **la forme
+recommandée du minage en ligne est SANS elle**. Le signe positif de 9.20 (g) était un indice
+de régime statique, pas une propriété du mécanisme — et il est retiré pour le régime en ligne.
+
+**PIÈGE D'INSTRUMENT rencontré en séance, à verser au dossier.** La ligne de résumé
+`NRPA … best k/4` ne couvre QUE la phase tirages ; sur la graine 888 le bras en ligne y affiche
+1/4 alors que le run a écrit `best_approach_2of4.yrp` — la 2ᵉ Liger avait été trouvée par les
+tirages ENRACINÉS du finisseur, invisibles dans cette ligne. Lire le bootstrap sur elle aurait
+compté une conversion sur trois au lieu de trois sur trois. Le juge est l'approche ÉCRITE ;
+c'est d'ailleurs déjà la colonne que 9.20 (a) lisait, mais rien ne le disait dans l'outil.
+`tools/s14_lecture.ps1` la lit désormais, et imprime les deux côte à côte.

@@ -95,13 +95,29 @@ combosolver.exe gabarit.yrpX --scriptdir <scripts> `
 # c'etait le defaut C1 (un seul jeton de partition pour seize workers), corrige
 # session 9. La mesure est A REFAIRE ; lire la colonne "partition".
 
+# MINAGE EN LIGNE DES OPTIONS (session 14) : le bootstrap EN UNE SEULE TRAITE.
+# Jusqu'ici le catalogue de macros etait mine UNE fois, au demarrage, sur un
+# corpus EXTERNE (`--adapt`) — un run parti de rien restait nu, et l'auto-amorce
+# demandait plusieurs runs enchaines a la main (gen1 nue -> macros -> gen2
+# armee). `--options-online <s>` fait rentrer la boucle DANS le run : les
+# workers versent leurs meilleures lignes a un corpus vivant, le catalogue est
+# re-mine toutes les s secondes (meme selection par perte de Levin) et echange a
+# une frontiere sure. Aucun corpus, aucun `--approach`, aucune relance.
+combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
+    --no-ref --target ... --options-online 60 --options-ctx 1
+# `--options-pool` / `--options-per-worker` reglent le corpus vivant : c'est la
+# POMPE A DIVERSITE (les seize workers repartent tous de la meilleure sequence
+# partagee — sans quota par worker, le corpus serait seize fois la meme ligne).
+
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
 `--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
 `--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
-`--nrpa-level`, `--max-subsets`, `--recipes`, `--no-seed-recipes`,
-`--no-seed-quant`, `--derive-summon-min`, `--profile`, `--verbose`).
+`--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--nrpa-lr`, `--max-subsets`,
+`--recipes`, `--no-seed-recipes`, `--no-seed-quant`, `--derive-summon-min`,
+`--options`, `--options-ctx`, `--options-online`, `--finisher-options`,
+`--profile`, `--verbose`).
 `--profile` imprime le profil du chemin chaud par phase (sondes rdtsc, temps
 exclusif, ligne « reste ») — c'est l'instrument qui a tranché que 82-86 % du
 temps part dans le core (§9.18) ; son coût mesuré est sous le bruit (< 2 %).
