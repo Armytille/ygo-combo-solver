@@ -434,7 +434,12 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 		return;
 	// Presence VIDE : aucune entite nulle part. Toute exigence est donc a
 	// satisfaire, et la distance affichee est celle du depart.
-	auto none = [](const Requirement&) -> uint32_t { return 0u; };
+	struct NoAvail {
+		uint32_t Count(const Requirement&) const { return 0u; }
+		bool Claim(const Requirement&) { return false; }
+		uint32_t CountAndClaim(const Requirement&) { return 0u; }
+		void ResetClaims() {}
+	} none;
 	std::vector<uint32_t> seen;
 	std::printf("     %-44s %-8s %s\n", "carte cible", "h plat",
 				"distance amorcee");
@@ -3933,7 +3938,7 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 // seule difference mesurable est prime-par-coup contre gradient discriminatif.
 void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					const std::vector<PlanStep>& plan, const BoardKey& target,
-					std::vector<NrpaRun>& out) {
+					std::vector<NrpaRun>& out, RecipeGraph* recipes = nullptr) {
 	if(opt.adapt_files.empty())
 		return;
 	namespace fs = std::filesystem;
@@ -4005,7 +4010,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					NrpaRun run;
 					size_t unknown =
 						LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX,
-									  eo, repertoire, target, run);
+									  eo, repertoire, target, run, recipes);
 					if(!run.steps.empty()) {
 						total_steps += run.steps.size();
 						total_unknown += unknown;
@@ -5319,10 +5324,40 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// survivre a toutes les phases (tirages, finisseur).
 	NrpaPolicy prior_policy;
 	BuildPriorPolicy(opt, db, scripts, prior_policy);
+	// GRAPHE DE RECETTES (chantier 16). Cree AVANT le rejeu d'adaptation, pour
+	// que les invocations du corpus le nourrissent en recettes OBSERVEES
+	// (revue session 12) — materiaux et zones reels, voies d'exception
+	// comprises : c'est ce qui casse l'oeuf-et-la-poule du graphe
+	// observationnel sans lire un seul texte d'effet. Un seul graphe pour tout
+	// le run : les recettes sont des FAITS, les reunir ne peut qu'enrichir.
+	// `static` : il survit a toutes les recherches du run.
+	static RecipeGraph recipe_graph;
+	if(opt.recipes >= 0) {
+		std::printf("  graphe de recettes : ACTIF, poids %.2f%s\n",
+					static_cast<float>(opt.recipes),
+					opt.recipes == 0.0
+						? "  (alimente et MESURE, n'entre pas dans le cout)"
+						: "  (la distance de recettes pese dans h)");
+		// AMORCE PAR LE TEXTE, sans quoi la carte jamais posee n'a aucune
+		// recette et sa distance retombe au plancher — c'est-a-dire au `h`
+		// plat.
+		if(opt.seed_recipes && !start_yrp.decks.empty()) {
+			const Deck& sd = start_yrp.decks[
+				opt.target_player < static_cast<int>(start_yrp.decks.size())
+					? opt.target_player : 0];
+			const size_t n = SeedRecipesFromText(db, sd, target, recipe_graph,
+												 opt.seed_cardinal);
+			std::printf("  amorce par le texte : %zu recette(s) posee(s), "
+						"%zu produit(s) connus\n", n, recipe_graph.Products());
+			ReportSeededDistances(target, recipe_graph, db);
+		}
+	}
+
 	// Rejeu d'adaptation (--adapt, chantier 5bis) : le corpus entre non plus
 	// en primes par coup mais en gradient sur ses propres carrefours.
 	std::vector<NrpaRun> adapt_runs;
-	BuildAdaptRuns(opt, db, scripts, plan, target, adapt_runs);
+	BuildAdaptRuns(opt, db, scripts, plan, target, adapt_runs,
+				   opt.recipes >= 0 ? &recipe_graph : nullptr);
 
 	// OPTIONS (chantier 17) : le catalogue est mine UNE fois, ici, et survit a
 	// toutes les phases — les workers le lisent en const. Sans corpus il n'y a
@@ -5440,31 +5475,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
 				opt.hint_bias >= 0 ? "--hint-bias" : "defaut du moteur");
 	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
-	// GRAPHE DE RECETTES (chantier 16). Un seul graphe pour tout le run : les
-	// recettes sont des FAITS observes, les reunir ne peut qu'enrichir. Il doit
-	// survivre a toutes les recherches, d'ou le `static` local — la duree de vie
-	// d'un run.
-	static RecipeGraph recipe_graph;
+	// Le graphe de recettes est cree et amorce PLUS HAUT (avant le rejeu
+	// d'adaptation, qui le nourrit) ; ici, seulement le cablage dans cfg.
 	if(opt.recipes >= 0) {
 		cfg.recipes = &recipe_graph;
 		cfg.recipe_h = static_cast<float>(opt.recipes);
-		std::printf("  graphe de recettes : ACTIF, poids %.2f%s\n",
-					cfg.recipe_h,
-					cfg.recipe_h == 0.0f
-						? "  (alimente et MESURE, n'entre pas dans le cout)"
-						: "  (la distance de recettes pese dans h)");
-		// AMORCE PAR LE TEXTE, sans quoi la carte jamais posee n'a aucune
-		// recette et sa distance retombe au plancher — c'est-a-dire au `h` plat.
-		if(opt.seed_recipes && !start_yrp.decks.empty()) {
-			const Deck& sd = start_yrp.decks[
-				opt.target_player < static_cast<int>(start_yrp.decks.size())
-					? opt.target_player : 0];
-			const size_t n = SeedRecipesFromText(db, sd, target, recipe_graph,
-												 opt.seed_cardinal);
-			std::printf("  amorce par le texte : %zu recette(s) posee(s), "
-						"%zu produit(s) connus\n", n, recipe_graph.Products());
-			ReportSeededDistances(target, recipe_graph, db);
-		}
 	}
 	// Optimisation de cout anytime : la recherche continue apres la premiere
 	// solution (chaque solution resserre la borne), l'ensemble par worker est

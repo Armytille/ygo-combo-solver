@@ -6,6 +6,7 @@
 // le meme noeud, et la table de transposition les fusionne.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -353,10 +354,18 @@ inline float EffectiveWeight(const NrpaPolicy& pol, const NrpaResidual* res,
 // identifiees (sautees : on ne sait pas quel choix la ligne a pris).
 // `target` sert au CONTEXTE de chaque etape (cartes du board cible deja
 // posees) : le meme descripteur que celui calcule au tirage.
+class RecipeGraph;
+// `recipes` (revue session 12) : si non nul, les invocations REJOUEES de la
+// ligne de corpus nourrissent le graphe de recettes en recettes OBSERVEES —
+// materiaux et zones reels, voies d'exception comprises (materiaux depuis le
+// deck, invocations sans materiaux, substituts). C'est ce qui casse
+// l'oeuf-et-la-poule du graphe observationnel (« il n'apprend que de
+// lui-meme ») sans lire un seul texte d'effet : regle 3 au sens strict.
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
-					 const BoardKey& target, NrpaRun& out);
+					 const BoardKey& target, NrpaRun& out,
+					 RecipeGraph* recipes = nullptr);
 
 // Probabilite moyenne (log) que `pol` donne aux coups CHOISIS par les lignes
 // du corpus, sous les memes biais que l'echantillonnage. C'est l'instrument
@@ -827,10 +836,21 @@ public:
 				has_cardinal.store(true, std::memory_order_relaxed);
 				break;
 			}
+		// Ordre CANONIQUE avant comparaison : la meme invocation vue avec ses
+		// materiaux dans deux ordres est LA MEME recette — sans le tri, elle
+		// occupait deux des huit places par produit (revue session 12).
+		std::vector<Requirement> canon = mats;
+		std::sort(canon.begin(), canon.end(),
+				  [](const Requirement& a, const Requirement& b) {
+					  if(a.kind != b.kind) return a.kind < b.kind;
+					  if(a.code != b.code) return a.code < b.code;
+					  if(a.zone != b.zone) return a.zone < b.zone;
+					  return a.count < b.count;
+				  });
 		std::lock_guard<std::mutex> lk(mx);
 		auto& list = recipes[product];
 		for(Recipe& r : list) {
-			if(r.materials == mats) {
+			if(r.materials == canon) {
 				++r.seen;
 				// Une recette d'abord amorcee puis CONSTATEE devient une
 				// observation : le texte disait vrai.
@@ -839,7 +859,7 @@ public:
 			}
 		}
 		if(list.size() < kMaxPerProduct)
-			list.push_back({ mats, 1, primed });
+			list.push_back({ std::move(canon), 1, primed });
 	}
 
 	// Somme des distances a plusieurs produits, sous un meme etat de presence.
@@ -853,17 +873,27 @@ public:
 	// Jamais infinie (regle 2). `budget` borne la profondeur : les recettes
 	// forment un graphe cyclique (A consomme B ici, B consomme A ailleurs) et
 	// rien ne garantit qu'il soit acyclique.
-	// `avail` rend le NOMBRE d'entites presentes qui satisfont une exigence — 0
-	// ou 1 pour une carte nommee, un compte pour une exigence cardinale.
+	//
+	// CONSOMMATION INTRA-RECETTE (revue session 12). `avail` n'est plus un
+	// simple compteur : au cadre du HAUT (la recette du produit cible et ses
+	// materiaux directs, claim_depth 2 puis 1), chaque exigence servie RECLAME
+	// ses entites — un meme corps ne peut plus etre a la fois le materiau
+	// nomme « Leo Dancer » et l'un des « 3 monstres Lunalight » de la MEME
+	// invocation. Les reclamations repartent a zero entre recettes (le min
+	// compare des invocations independantes) et entre produits. En dessous
+	// (claim_depth 0), l'ancien comptage partage et le memo : une consommation
+	// inter-invocations modeliserait mal les corps recycles par le cimetiere
+	// (sur-estimation possible — la direction interdite), et un memo sous etat
+	// de reclamation rendrait la distance dependante de l'ordre de visite.
 	template<typename Avail>
 	uint32_t DistanceAll(const std::vector<uint32_t>& codes, uint8_t zone,
-						 const Avail& avail, uint32_t budget = 6) const {
+						 Avail& avail, uint32_t budget = 6) const {
 		std::lock_guard<std::mutex> lk(mx);
 		std::unordered_map<uint64_t, uint32_t> memo;
 		uint32_t total = 0;
 		for(uint32_t c : codes)
 			total += DistanceLocked(Requirement{ c, zone, kReqCard, 1 }, avail,
-									budget, memo);
+									budget, 2, memo);
 		return total;
 	}
 
@@ -896,10 +926,9 @@ private:
 	static constexpr size_t kMaxPerProduct = 8;
 
 	template<typename Avail>
-	uint32_t DistanceLocked(const Requirement& req, const Avail& avail,
-							uint32_t budget,
+	uint32_t DistanceLocked(const Requirement& req, Avail& avail,
+							uint32_t budget, uint32_t claim_depth,
 							std::unordered_map<uint64_t, uint32_t>& memo) const {
-		const uint32_t have = avail(req);
 		// EXIGENCE CARDINALE : on ne recurse pas. Aucun produit n'est nomme —
 		// « trois monstres Lunalight » ne designe pas une carte a fabriquer,
 		// mais un COMPTE a atteindre. Chaque exemplaire manquant coute une
@@ -907,9 +936,14 @@ private:
 		// action) : la direction sure de la regle 2, et le gradient est la —
 		// il decroit a chaque exemplaire pose, meme quand aucune carte cible
 		// n'arrive sur le terrain.
-		if(req.kind != kReqCard)
+		if(req.kind != kReqCard) {
+			const uint32_t have = claim_depth ? avail.CountAndClaim(req)
+											  : avail.Count(req);
 			return have >= req.count ? 0u : req.count - have;
-		if(have)
+		}
+		// Nommee : au cadre reclamant, servir une exigence CONSOMME sa copie —
+		// « 2 "Nom" » cesse d'etre satisfait par un seul exemplaire.
+		if(claim_depth ? avail.Claim(req) : avail.Count(req) != 0)
 			return 0;
 		if(!budget)
 			return 1;   // plancher : on ne declare jamais inatteignable
@@ -925,12 +959,17 @@ private:
 			(static_cast<uint64_t>(req.code) << 24) |
 			(static_cast<uint64_t>(req.kind) << 20) |
 			(static_cast<uint64_t>(req.zone) << 4) | budget;
-		auto mit = memo.find(key);
-		if(mit != memo.end())
-			return mit->second;
+		// Le memo ne sert que HORS reclamation : une valeur calculee sous un
+		// etat de reclamation donne ne vaut que pour cet etat.
+		if(!claim_depth) {
+			auto mit = memo.find(key);
+			if(mit != memo.end())
+				return mit->second;
+		}
 		auto it = recipes.find(req.code);
 		if(it == recipes.end() || it->second.empty()) {
-			memo.emplace(key, 1u);
+			if(!claim_depth)
+				memo.emplace(key, 1u);
 			return 1;   // recette inconnue -> exactement le `h` plat d'avant
 		}
 		// L'OBSERVATION PRIME SUR LE TEXTE (regle 3). Des qu'une invocation
@@ -944,13 +983,19 @@ private:
 		for(const Recipe& r : it->second) {
 			if(has_observed && r.primed)
 				continue;
+			// Chaque recette est UNE invocation independante : au cadre du
+			// haut, les reclamations repartent a zero entre deux recettes.
+			if(claim_depth == 2)
+				avail.ResetClaims();
 			uint32_t cost = 1;   // l'invocation elle-meme
 			for(const Requirement& m : r.materials)
-				cost += DistanceLocked(m, avail, budget - 1, memo);
+				cost += DistanceLocked(m, avail, budget - 1,
+									   claim_depth ? claim_depth - 1 : 0, memo);
 			best = (std::min)(best, cost);
 		}
 		const uint32_t out = best == 0xffffffffu ? 1u : best;
-		memo.emplace(key, out);
+		if(!claim_depth)
+			memo.emplace(key, out);
 		return out;
 	}
 

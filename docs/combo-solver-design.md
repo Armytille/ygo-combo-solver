@@ -3446,7 +3446,49 @@ au-delà de l'`in_use` du niveau cible ne sont PAS restaurées — leurs spans s
 par `RestoreMetadata` et re-carvés par `Allocate` avant tout usage, le contenu résiduel n'est
 jamais lu.
 
-**(i) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
+**(j) LE BOOTSTRAP S'AUTO-AMORCE — le test de découverte est positif sur la masse.** Protocole
+(`tools/s12_bootstrap.ps1`) : étalon A but seul (`--no-ref`, aucune ligne enregistrée
+n'existe), corpus fabriqué par le solveur LUI-MÊME — les `best_approach_1of4.yrp` de trois
+runs de génération à graines distinctes (3 lignes de 65-72 décisions, toutes à 1/4) — puis
+trois bras d'attribution sur deux graines de mesure (300 s chacun) :
+
+| bras | ≥1 résolution | ≥2 | ≥3 |
+|---|---|---|---|
+| témoin (g888 / g1234) | 608 780 / 819 007 | 1 427 / 10 433 | 0 / 1 384 |
+| adaptation seule | 721 713 / 845 827 | 4 241 / 9 353 | 914 / 796 |
+| **adaptation + options** | 487 908 / 517 397 | **260 273 / 242 513** | **81 702 / 68 149** |
+
+L'attribution est nette : l'adaptation seule ≈ témoin ; **les macros multiplient les tirages à
+≥2 résolutions par ×25-180 et à ≥3 par ×50-85, sur les deux graines** — à partir des seules
+découvertes partielles du solveur, zéro référence. La sélection par perte de Levin retient
+~15-19 macros d'un corpus de 3 lignes (les motifs répétés à l'intérieur des lignes suffisent).
+C'est la réponse à la qualification du (g) : le mécanisme n'est pas qu'un exploiteur de
+quasi-référence, il s'AUTO-AMORCE sur la masse. Limites : best reste 1/4 partout à ce budget
+(196 s de tirages) — la conversion en 2ᵉ Liger demande l'ITÉRATION (gen2 armée des macros →
+corpus plus riche) ou plus de budget ; un run par graine, mais 4 paires structurelles (≥2 et
+≥3 × 2 graines) toutes dans le même sens et à ces ordres de grandeur, la dispersion ne suffit
+pas comme explication.
+
+**(k) Le rétro robustifié — trois correctifs de la revue « effets au-dessus des règles ».**
+(1) **Corpus→graphe** : `LiftPolicyRun` nourrit désormais le graphe de recettes pendant le
+rejeu d'adaptation — matériaux et zones RÉELS des invocations du corpus, voies d'exception
+comprises (matériaux depuis le deck, invocations sans matériaux, substituts) ; le graphe est
+créé et amorcé AVANT `BuildAdaptRuns`. C'est le correctif de l'œuf-et-la-poule (« un graphe
+qui n'apprend que des invocations réussies ») : les recettes OBSERVÉES arrivent dès la
+première seconde, sans lire un texte d'effet — règle 3 au sens strict. (2) **Consommation
+INTRA-RECETTE** : au cadre du haut de `DistanceLocked` (la recette du produit cible et ses
+matériaux directs), chaque exigence servie RÉCLAME ses entités — un même corps ne peut plus
+être à la fois le matériau nommé « Leo Dancer » et l'un des « 3 monstres Lunalight » de la
+même invocation, et « 2 "Nom" » cesse d'être satisfait par un seul exemplaire. Les
+réclamations repartent à zéro entre recettes et entre produits ; en dessous, l'ancien comptage
+partagé et le mémo (une consommation inter-invocations sur-estimerait — les corps recyclent
+par le cimetière — et un mémo sous réclamation dépendrait de l'ordre de visite). Strictement
+sous-estimant, déterministe. (3) **Ordre canonique dans `Observe`** : la même invocation vue
+avec ses matériaux dans deux ordres est LA MÊME recette (elle occupait deux des huit places
+par produit). Santé stricte : 0 ligne hors durées. Le 2×2 décisif (h plat/amorcé × coût
+actuel/canonique, `tools/s12_retro_ab.ps1`) tourne sur ce moteur.
+
+**(l) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
 tirages, même sonde) : 27,2 µs (pré-optimisation) → 23,6 (LTO+C20+C22, re-mesuré ce jour sur
 le même montage) → **18,6 (PGO)**, soit −32 % par appel. Finisseur : **+92 % d'expansions à
 temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et sur l'EXPOSANT :

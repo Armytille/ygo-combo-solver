@@ -612,54 +612,95 @@ float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
 			recipe_present_info[i] = { duel.Db().Find(recipe_present[i].code),
 									   recipe_present[i].zone };
 	}
-	// Combien d'entites presentes satisfont une exigence. Appele une fois par
-	// materiau de chaque recette exploree : recherche binaire sur la table triee
-	// pour une carte nommee, parcours pour une exigence cardinale (la table fait
-	// ~60-80 entrees et n'est triee ni sur l'archetype ni sur le niveau).
-	auto avail = [this](const Requirement& r) -> uint32_t {
-		// EXIGENCE CARDINALE : un COMPTE, pas un test de presence. La table
-		// n'est pas triee sur l'archetype ni sur le niveau — on la parcourt, et
-		// elle est courte. Le DECK et l'EXTRA sont exclus par ZoneIsPlayable :
-		// trois Lunalight qui dorment dans le deck ne sont pas trois materiaux.
-		if(r.kind != kReqCard) {
-			uint32_t n = 0;
-			for(const PresentInfo& pi : recipe_present_info) {
-				if(!pi.row || !(pi.row->type & kRecipeTypeMonster))
+	// Combien d'entites presentes satisfont une exigence — et, au cadre
+	// RECLAMANT de DistanceLocked (la recette du haut et ses materiaux
+	// directs), quelles entites sont deja SERVIES : un meme corps ne peut plus
+	// etre a la fois le materiau nomme et l'un des « 3 monstres Lunalight »
+	// de la meme invocation (revue session 12). Recherche binaire sur la table
+	// triee pour une carte nommee, parcours pour une exigence cardinale (la
+	// table fait ~60-80 entrees, non triee sur l'archetype ni le niveau).
+	struct PresentAvail {
+		const std::vector<Requirement>& present;
+		const std::vector<PresentInfo>& info;   // vide si aucun cardinal
+		std::vector<uint8_t>& claimed;          // parallele a `present`
+		static bool ZoneOk(const Requirement& r, uint8_t z) {
+			// Zone JOKER (exigence amorcee par le texte) : n'importe quelle
+			// zone ou un materiau se PREND. Le deck et l'extra n'en sont pas :
+			// une carte qui y dort doit encore etre invoquee, et c'est l'etape
+			// que l'on compte.
+			return r.zone == kZoneAny ? ZoneIsPlayable(z) : z == r.zone;
+		}
+		bool CardinalMatch(const Requirement& r, size_t i) const {
+			const PresentInfo& pi = info[i];
+			if(!pi.row || !(pi.row->type & kRecipeTypeMonster))
+				return false;
+			if(!ZoneOk(r, pi.zone))
+				return false;
+			if(r.kind == kReqLevel)
+				return (pi.row->level & 0xff) == r.code;
+			for(uint16_t sc : pi.row->setcodes)
+				if(sc && SetcodeMatches(sc, static_cast<uint16_t>(r.code)))
+					return true;
+			return false;
+		}
+		size_t NamedFirst(const Requirement& r) const {
+			auto by_code = [](const Requirement& a, const Requirement& b) {
+				if(a.code != b.code) return a.code < b.code;
+				return a.zone < b.zone;
+			};
+			auto it = std::lower_bound(present.begin(), present.end(),
+									   Requirement{ r.code, 0 }, by_code);
+			return static_cast<size_t>(it - present.begin());
+		}
+		// Comptage PARTAGE (cadres non reclamants) : l'ancien comportement.
+		uint32_t Count(const Requirement& r) const {
+			if(r.kind != kReqCard) {
+				uint32_t n = 0;
+				for(size_t i = 0; i < info.size(); ++i)
+					n += CardinalMatch(r, i) ? 1u : 0u;
+				return n;
+			}
+			for(size_t i = NamedFirst(r);
+				i < present.size() && present[i].code == r.code; ++i)
+				if(ZoneOk(r, present[i].zone))
+					return 1u;
+			return 0u;
+		}
+		// Reclamation d'une copie nommee : la premiere qui convient et n'est
+		// pas deja servie.
+		bool Claim(const Requirement& r) {
+			for(size_t i = NamedFirst(r);
+				i < present.size() && present[i].code == r.code; ++i)
+				if(!claimed[i] && ZoneOk(r, present[i].zone)) {
+					claimed[i] = 1;
+					return true;
+				}
+			return false;
+		}
+		// Cardinale reclamante : compte les entites non servies, en sert
+		// jusqu'a `count`.
+		uint32_t CountAndClaim(const Requirement& r) {
+			uint32_t n = 0, taken = 0;
+			for(size_t i = 0; i < info.size(); ++i) {
+				if(claimed[i] || !CardinalMatch(r, i))
 					continue;
-				if(r.zone == kZoneAny ? !ZoneIsPlayable(pi.zone)
-									  : pi.zone != r.zone)
-					continue;
-				if(r.kind == kReqLevel) {
-					n += (pi.row->level & 0xff) == r.code ? 1u : 0u;
-				} else {
-					for(uint16_t sc : pi.row->setcodes)
-						if(sc && SetcodeMatches(sc,
-												static_cast<uint16_t>(r.code))) {
-							++n;
-							break;
-						}
+				++n;
+				if(taken < r.count) {
+					claimed[i] = 1;
+					++taken;
 				}
 			}
 			return n;
 		}
-		auto by_code = [](const Requirement& a, const Requirement& b) {
-			if(a.code != b.code) return a.code < b.code;
-			return a.zone < b.zone;
-		};
-		auto it = std::lower_bound(recipe_present.begin(), recipe_present.end(),
-								   Requirement{ r.code, 0 }, by_code);
-		if(it == recipe_present.end() || it->code != r.code)
-			return 0u;
-		// Zone JOKER (exigence amorcee par le texte) : n'importe quelle zone ou
-		// un materiau se PREND. Le deck et l'extra n'en sont pas : une carte qui
-		// y dort doit encore etre invoquee, et c'est l'etape que l'on compte.
-		for(; it != recipe_present.end() && it->code == r.code; ++it) {
-			if(r.zone == kZoneAny ? ZoneIsPlayable(it->zone)
-								  : it->zone == r.zone)
-				return 1u;
-		}
-		return 0u;
+		void ResetClaims() { std::fill(claimed.begin(), claimed.end(), 0); }
 	};
+	static thread_local std::vector<uint8_t> claim_scratch;
+	claim_scratch.assign(recipe_present.size(), 0);
+	// `info` doit etre parallele a `present` meme sans cardinaux : les
+	// reclamations indexent les deux tables d'un meme indice.
+	if(!cfg.recipes->HasCardinal())
+		recipe_present_info.assign(recipe_present.size(), PresentInfo{});
+	PresentAvail avail{ recipe_present, recipe_present_info, claim_scratch };
 
 	// Cartes cibles manquantes : c'est sur elles que porte la distance.
 	std::vector<uint32_t> missing;
@@ -2836,7 +2877,8 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
-					 const BoardKey& target, NrpaRun& out) {
+					 const BoardKey& target, NrpaRun& out,
+					 RecipeGraph* recipes) {
 	size_t unknown = 0, ri = 0;
 	uint8_t ptype = 0;
 	std::vector<uint8_t> payload;
@@ -2844,6 +2886,32 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 	BoardKey here;
 	out.score = 0;
 	out.steps.clear();
+
+	// CORPUS -> GRAPHE (revue session 12) : les invocations de la ligne
+	// rejouee sont des recettes OBSERVEES — la meme logique que StepToPrompt
+	// (MSG_MOVE a REASON_MATERIAL accumule, MSG_SUMMONING/SPSUMMONING verse).
+	// C'est ici qu'entrent les voies d'exception que le texte ne dit pas.
+	std::vector<Requirement> lift_mats;
+	auto watch = [&](const Message& m) {
+		if(!recipes)
+			return;
+		if(m.type == MSG_MOVE && m.size >= 28) {
+			uint32_t code = 0, reason = 0;
+			std::memcpy(&code, m.data, 4);
+			std::memcpy(&reason, m.data + 24, 4);
+			if(reason & REASON_MATERIAL)
+				lift_mats.push_back(
+					Requirement{ duel.Db().Canonical(code),
+								 NormalizeZone(m.data[5]) });
+		} else if((m.type == MSG_SUMMONING || m.type == MSG_SPSUMMONING) &&
+				  m.size >= 4) {
+			uint32_t code = 0;
+			std::memcpy(&code, m.data, 4);
+			if(code)
+				recipes->Observe(duel.Db().Canonical(code), lift_mats);
+			lift_mats.clear();
+		}
+	};
 
 	// Meme appariement que LiftPlan : on identifie la reponse enregistree par
 	// l'ETAT qu'elle atteint, jamais octet par octet (l'encodage d'EDOPro et
@@ -2857,9 +2925,14 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 			for(const Message& m : duel.Messages()) {
 				if(m.type == MSG_RETRY)
 					return 0;
+				watch(m);
 				if(IsPrompt(m.type)) {
 					nt = m.type;
 					np.assign(m.data, m.data + m.size);
+					// Frontiere de pas : des materiaux restes sans invocation
+					// ne doivent pas se coller a la suivante (meme semantique
+					// que StepToPrompt, qui repart a vide a chaque pas).
+					lift_mats.clear();
 				}
 			}
 			if(status != OCG_DUEL_STATUS_CONTINUE)
@@ -2871,10 +2944,12 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 	for(;;) {
 		int status = duel.Process();
 		for(const Message& m : duel.Messages()) {
+			watch(m);
 			if(IsPrompt(m.type)) {
 				ptype = m.type;
 				payload.assign(m.data, m.data + m.size);
 				player = m.size ? m.data[0] : -1;
+				lift_mats.clear();
 			}
 		}
 		if(status == OCG_DUEL_STATUS_END)
