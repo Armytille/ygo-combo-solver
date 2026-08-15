@@ -17,14 +17,18 @@ contexte), et §9.18. **Ne redécouvre rien de ce qui y est chiffré.**
   Process/expansion 54,5 → 12,8, **+92 % d'expansions à temps égal**, ordre
   d'extraction inchangé (contrôle : 42/b=0/ÉPUISÉ, mêmes best). `--no-dive-full`
   = témoin. `--lifo-ties` réfuté seul, neutre combiné.
-- **Options (chantier 17) : implémentées, VIVANTES, et leur forme SANS CONTEXTE
-  est réfutée** (deux A/B perdants — 8-9 prises/tirage, absorption 1,0-2,1
-  contre ~6,6 visées, 78-84 % d'avortements). Diagnostic : une macro minée aux
-  décisions 40-47 est proposée dès la décision 5. Éteintes par défaut
-  (`--options 256` pour reprendre, exige `--adapt`).
-- La prévision (lue enfin — le script s10 tournait sur un chemin où `--adapt`
-  était IGNORÉ, corrigé) : seul le gros catalogue vaut (256/support 2 :
-  8,5 ordres, 93 % absorbé) ; 16 et 64 contre-productifs.
+- **Options (chantier 17) : GAGNANTES dans leur forme v3** — sélection
+  gloutonne par PERTE DE LEVIN (le critère d'Alikhasi & Lelis, §9.19 (g)) au
+  lieu du gain brut : le catalogue s'auto-limite (19 macros sur plafond 256),
+  et l'A/B rend **best 8/8 trois runs sur trois** (témoin 7/7/6), ≥2 et ≥3
+  résolutions au-dessus du témoin sur TOUTES les paires. OPT-IN :
+  `--options 256` (exige `--adapt`) — forme recommandée. Les formes v1/v2
+  (gain brut) et la FENÊTRE DE POSITION (`--options-window`) sont réfutées ;
+  la précondition suivante doit être SÉMANTIQUE (`ctx`).
+- `--phs-canonical` (coût (d+h)/π du papier au lieu de notre facteur e^h) :
+  neutre sur l'étalon 0 (h≈1) — à juger sur l'étalon A (h_root 4-6).
+- Snapshots Go-Explore aux cellules : écartés par l'instrument (kPrefix 0,0 %
+  depuis dive_full).
 
 ## PIÈGE DE BUILD NOUVEAU — reproductibilité PGO
 
@@ -35,18 +39,20 @@ en silence. Après tout changement de moteur : rebuild, santé, puis re-déroule
 
 ## À FAIRE, par rendement estimé décroissant
 
-1. **Options CONDITIONNÉES** : miner et proposer les macros avec leur contexte
-   (`PolicyStep::ctx` existe des deux côtés du releveur) et/ou fenêtre de
-   position sur la ligne d'origine. Juge : « ≥ k résolutions » et « 8/8 AVEC
-   rips » — jamais le compteur de tirages. Montage : `tools/s12_options_ab2.ps1`.
-2. **Coût fixe d'arène du finisseur** (44,5 % de la phase depuis dive_full :
+1. **Pousser les options GAGNANTES** (montage : `tools/s12_suite_audit.ps1`,
+   bras `sel`) : précondition SÉMANTIQUE (`ctx` — la positionnelle est
+   réfutée), corpus plus riche que les 17 lignes, et un run LONG pour
+   convertir les 8/8 en lignes complètes avec rips. Juge : « ≥ k
+   résolutions » et « 8/8 AVEC rips » — jamais le compteur de tirages.
+2. **`--phs-canonical` sur l'étalon A** (h_root = 4-6, là où e^h et d+h
+   divergent réellement).
+3. **Coût fixe d'arène du finisseur** (44,5 % de la phase depuis dive_full :
    Restore 22,6 %, Push 17,4 %, Pop 4,5 %) : stride de pile, journaux plus
    légers, Restore paresseux. Contrôle : étalon 0 (`tools/s12_rejeux.ps1`).
-3. **`Adv::Goal` traité comme `Adv::Dead`** dans `advance()` (9.18 (g)) :
+4. **`Adv::Goal` traité comme `Adv::Dead`** dans `advance()` (9.18 (g)) :
    toujours non tranché — pas de récupération d'après-but dans le finisseur.
-4. Observation ouverte : binaire `/GENPROFILE` → 1898 indécodables C10 en
-   santé (binaires normal et PGO : zéro). À trancher si un run normal en
-   remonte un jour.
+5. Observation ouverte : binaire `/GENPROFILE` → 1898 indécodables C10 une
+   fois, non reproduite. À trancher si un run normal en remonte un jour.
 
 ## Montage de mesure (inchangé par ailleurs)
 
