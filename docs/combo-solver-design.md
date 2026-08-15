@@ -3650,3 +3650,35 @@ mesuré : tout le reste de la santé est identique au champ près (273 digests, 
 209 candidates, 16 replays) et les decks des étalons sont figés. À garder en tête si un jour
 un A/B inter-jours diverge sur l'énumération : la base vivante N'EST PAS épinglée,
 contrairement aux scripts.
+
+**(g) La garde SÉMANTIQUE des options (`--options-ctx`) : vivante, NON-destructive — et
+positive sans être tranchante.** Rebuild + santé stricte (structurel identique), pipeline PGO
+s13 re-déroulé (`tools/s13_pgo.ps1`, témoin `combosolver_lto_s13.exe`, 4 régimes
+d'entraînement dont un run options+ctx ; la santé INSTRUMENTÉE est restée propre — l'anomalie
+C10 de 9.19 (e) ne s'est pas reproduite une seconde fois). A/B
+(`tools/s13_options_ctx_ab.ps1`), trois bras : off / `ctx 1` (posées exactes, main ±1) /
+`ctx 15` (posées seules).
+
+*Étalon B contraint (60 s ×3, graine 888)* : INDÉCIS — la dispersion engloutit tout (crêtes
+5/8-0/8-7/8 présentes dans les deux bras, ≥3 = 146/255/65 en sommes par bras). La garde est
+bien ACTIVE : prises ÷2-8, catalogue 19 → 18, perte modèle 33,8 → 31,6 (le dénominateur du
+modèle rétrécit avec la garde).
+
+*Étalon A bootstrap (300 s ×2 graines, corpus1)* — le terrain des options :
+
+| bras | g888 ≥2 / ≥3 / best | g1234 ≥2 / ≥3 / best | avortées (g888/g1234) |
+|---|---|---|---|
+| off | 244 137 / 72 407 / **2/4** | 278 905 / 77 292 / 1/4 | 722 k / 2 927 k |
+| ctx 1 | **334 071** / **85 897** / **2/4** | 254 103 / 78 337 / **2/4** | 534 k / 2 092 k |
+| ctx 15 | 267 359 / 73 892 / **2/4** | **290 466** / **90 479** / **2/4** | 809 k / 796 k |
+
+Lecture : (1) le mode de défaillance de la fenêtre positionnelle (≥3 = 0 partout) est ABSENT —
+la garde sémantique ne bride pas les résolutions profondes ; (2) ≥3 au-dessus du bras off sur
+les 4 paires gardées (de +1,4 % à +19 %) ; (3) les bras gardés convertissent 2/4 sur LES DEUX
+graines (off : une sur deux) — mais la conversion est stochastique (~1 run armé sur 2-3 à ce
+budget : le off du soir convertit là où l'opt1 du matin ne convertissait pas), donc 2/2 contre
+1/2 est un indice, pas un fait. VERDICT : mécanisme correct, non-destructif, signe positif —
+**reste OPT-IN** ; son vrai test est DANS la boucle (gen4 armée `--options-ctx 1`) et sur des
+répétitions ×3 à 300 s, pas sur l'étalon B à 60 s. Le µs/appel du PGO s13 contre son témoin
+LTO n'a pas été re-relevé (hygiène en attente — la mécanique du pipeline est identique à la
+s12, mesurée là-bas à −21,4 %).
