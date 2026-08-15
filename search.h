@@ -316,6 +316,20 @@ inline uint64_t CtxKey(uint64_t key, uint16_t ctx) {
 	return key ^ ((static_cast<uint64_t>(ctx) + 1) * 0x9e3779b97f4a7c15ull);
 }
 
+// Compatibilite SEMANTIQUE entre le contexte courant et celui d'une occurrence
+// de macro dans le corpus (conditionnement des options, 9.19 (g) : la fenetre
+// POSITIONNELLE est refutee — les tirages ne s'alignent pas en indice avec le
+// corpus — la precondition doit etre l'ETAT). Cartes cibles posees : EXACTES
+// (l'axe de progression du combo, celui qui separe la montee du finisseur) ;
+// main : a ±hand_tol (les recherches la font osciller, l'exactitude
+// sur-briderait comme la fenetre l'a fait).
+inline bool OptionCtxCompatible(uint16_t have, uint16_t want, uint32_t hand_tol) {
+	if((have >> 4) != (want >> 4))
+		return false;
+	const uint32_t a = have & 15u, b = want & 15u;
+	return (a > b ? a - b : b - a) <= hand_tol;
+}
+
 // Poids effectif d'un coup sous la politique a deux niveaux. `shrink` < 0
 // eteint le niveau contextuel (la fonction rend alors pol[key] exactement).
 inline float EffectiveWeight(const NrpaPolicy& pol, const NrpaResidual* res,
@@ -486,6 +500,21 @@ struct OptionCatalog {
 	// Fenetre de proposition : la macro n'est proposee qu'a
 	// |decision courante - pos| <= window. 0 = pas de garde.
 	uint32_t window = 0;
+	// Precondition SEMANTIQUE (l'alternative a la fenetre, refutee) : les
+	// contextes DISTINCTS (PolicyStep::ctx) releves au DEBUT des occurrences
+	// de chaque macro dans le corpus. La macro n'est proposee que si le
+	// contexte courant est compatible avec l'un d'eux (cartes cibles posees
+	// exactes, main a ±ctx_tol). ctx_tol < 0 = garde eteinte.
+	std::vector<std::vector<uint16_t>> ctxs;
+	int ctx_tol = -1;
+	bool CtxOk(size_t m, uint16_t ctx) const {
+		if(ctx_tol < 0)
+			return true;
+		for(uint16_t w : ctxs[m])
+			if(OptionCtxCompatible(ctx, w, static_cast<uint32_t>(ctx_tol)))
+				return true;
+		return false;
+	}
 	// Perte de Levin MODELE (log10, moyenne par ligne, politique uniforme)
 	// sans puis avec le catalogue : l'instrument de la selection.
 	double model_flat = 0, model_opt = 0;
@@ -502,7 +531,7 @@ struct OptionCatalog {
 // le terme log10(d) du papier neglige (~2 contre ~87).
 OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 								size_t max_options, uint32_t min_support,
-								size_t max_len, uint32_t window);
+								size_t max_len, uint32_t window, int ctx_tol);
 
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
@@ -1201,6 +1230,13 @@ struct SearchConfig {
 	// 4,36 -> 0,58/expansion, arene 47 -> 37 % de la phase, +4,5 % d'exp. a
 	// temps egal. --no-merged-pop = temoin d'A/B.
 	bool merged_pop = true;
+	// RECUPERATION D'APRES-BUT dans le finisseur (9.18 (g), opt-in) : sous
+	// --optimize, un noeud-but de RunLevin continue d'avancer au lieu d'etre
+	// traite comme Dead — le but est deja enregistre par GoalCheck, des
+	// decisions de plus peuvent reduire les brulees sans toucher au board
+	// (piege 35, la semantique des rollouts anytime). Sans --optimize : sans
+	// effet (le finisseur s'arrete au but, comportement historique).
+	bool finisher_post_goal = false;
 	// --- options (chantier 17) ---
 	// Catalogue de macros propose a l'echantillonnage NRPA (nul = eteint,
 	// comportement d'avant a l'octet pres). Voir OptionCatalog.

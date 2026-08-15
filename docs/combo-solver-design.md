@@ -3631,3 +3631,22 @@ piège 47). MAIS `EnumOptions::canonical_zones` (une colonne représentative par
 existe, est documenté, et n'est allumé NULLE PART — un candidat d'A/B gratuit pour le
 branchement du finisseur, de la même famille que le « mécanisme silencieusement absent du
 chemin ».
+
+**(f) La gen3 PLAFONNE à budget de génération constant.** Gen3 armée du CUMUL
+(`tools/s13_bootstrap_gen3.ps1`, mêmes graines, 240 s) : les trois graines rendent 1/4
+(74/87/53 décisions), ≥2/≥3 au niveau de la gen2 (147-220 k / 33-49 k), catalogue identique au
+bras cumul (6 macros, 25,8 → 18,4). Lecture : le grand gain de l'itération était l'ARMEMENT
+lui-même (gen1→gen2) ; ré-miner sur un corpus plus riche ne franchit pas de cran
+supplémentaire automatiquement à ce budget — la conversion 2/4 reste un événement
+stochastique (~1 run armé sur 3-5 à 240-300 s : g4242 gen2, opt12 g888 et g1234, contre six
+autres runs armés restés à 1/4). Les leviers du cran suivant : le BUDGET de génération
+(240 s est le plancher historique), la garde ctx si elle gagne, et le corpus cumulé qui
+conserve la ligne 2/4 (c1+c2+c3 pour la prochaine itération — on ne jette jamais).
+
+**Observation d'environnement versée au dossier** : entre la santé du matin et celle du
+relink, le compte de cartes chargées est passé de 24 758 à 24 767 (+9, mêmes 33 bases) — une
+`.cdb` de l'installation vivante a été mise à jour en arrière-plan (hors dépôt). Sans effet
+mesuré : tout le reste de la santé est identique au champ près (273 digests, 210/273,
+209 candidates, 16 replays) et les decks des étalons sont figés. À garder en tête si un jour
+un A/B inter-jours diverge sur l'énumération : la base vivante N'EST PAS épinglée,
+contrairement aux scripts.

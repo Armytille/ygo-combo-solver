@@ -833,14 +833,22 @@ struct Options {
 	uint32_t options_len = 8;
 	// Fenetre de proposition (v3) : une macro n'est proposee qu'a +/- window
 	// decisions enregistrees de sa position d'origine dans le corpus.
-	// 0 = pas de garde.
+	// 0 = pas de garde. REFUTEE (9.19 (g)) : gardee pour l'A/B.
 	uint32_t options_window = 0;
+	// Garde SEMANTIQUE (la forme designee par 9.19 (g)) : une macro n'est
+	// proposee que si le contexte courant (cartes cibles posees, main) est
+	// compatible avec une occurrence du corpus — cartes posees exactes, main
+	// a +/- options_ctx. -1 = garde eteinte (defaut).
+	int options_ctx = -1;
 	// PHS* canonique (audit s12) : cout (d + h)/pi du papier au lieu de notre
 	// log(d+1) + h - log pi (facteur e^h, sans garantie).
 	bool phs_canonical = false;
 	// Depilage fusionne de l'arene au retour vers l'ancetre (voir
 	// SearchConfig::merged_pop). GAGNANT etalon 0, par defaut.
 	bool merged_pop = true;
+	// Recuperation d'apres-but dans le finisseur (9.18 (g), opt-in) : sous
+	// --optimize, un noeud-but de RunLevin continue au lieu de s'arreter.
+	bool finisher_post_goal = false;
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
@@ -1194,13 +1202,21 @@ void Usage() {
 		"  --options-len <n>  longueur maximale d'une macro (defaut 8)\n"
 		"  --options-window <n>  ne proposer une macro qu'a +/- n decisions de\n"
 		"                     sa position d'origine dans le corpus (defaut 0 =\n"
-		"                     pas de garde). La precondition-proxy de la v3.\n"
+		"                     pas de garde). REFUTEE (9.19 (g)) ; pour l'A/B.\n"
+		"  --options-ctx <n>  garde SEMANTIQUE : ne proposer une macro que si\n"
+		"                     le contexte courant est compatible avec une\n"
+		"                     occurrence du corpus (cartes cibles posees\n"
+		"                     exactes, main a +/- n). -1 = eteinte (defaut) ;\n"
+		"                     15 = ne garder que les cartes posees.\n"
 		"  --phs-canonical    finisseur : cout PHS* du papier, (d + h)/pi, au\n"
 		"                     lieu de log(d+1) + h - log pi (facteur e^h,\n"
 		"                     plus agressif, sans la garantie du papier)\n"
 		"  --no-merged-pop    finisseur : revenir au depilage niveau par niveau\n"
 		"                     (temoin d'A/B ; le depilage fusionne est le\n"
 		"                     defaut — chaque page chaude recopiee une fois)\n"
+		"  --finisher-post-goal  finisseur : sous --optimize, un noeud-but\n"
+		"                     CONTINUE (recuperation d'apres-but, piege 35) au\n"
+		"                     lieu de s'arreter. Opt-in, a juger sur A/B.\n"
 		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
 		"                     t < 1 concentre la masse sur les coups les mieux\n"
 		"                     classes SANS changer le classement — le seul\n"
@@ -1503,12 +1519,17 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--options-window") {
 			const char* v = next("--options-window"); if(!v) return false;
 			o.options_window = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-ctx") {
+			const char* v = next("--options-ctx"); if(!v) return false;
+			o.options_ctx = std::atoi(v);
 		} else if(a == "--phs-canonical") {
 			o.phs_canonical = true;
 		} else if(a == "--merged-pop") {
 			o.merged_pop = true;
 		} else if(a == "--no-merged-pop") {
 			o.merged_pop = false;
+		} else if(a == "--finisher-post-goal") {
+			o.finisher_post_goal = true;
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
@@ -5373,7 +5394,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			option_catalog = MineOptionCatalog(adapt_runs, opt.options_n,
 											   opt.options_support,
 											   opt.options_len,
-											   opt.options_window);
+											   opt.options_window,
+											   opt.options_ctx);
 			size_t max_len = 0, sum_len = 0;
 			for(const auto& s : option_catalog.seqs) {
 				max_len = (std::max)(max_len, s.size());
@@ -5381,9 +5403,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			}
 			// La taille est un RESULTAT de la selection par perte de Levin
 			// (elle s'arrete quand plus rien n'ameliore), pas le parametre.
+			char ctxdesc[40] = "off";
+			if(opt.options_ctx >= 0)
+				std::snprintf(ctxdesc, sizeof(ctxdesc),
+							  "pose exact, main +/-%d", opt.options_ctx);
 			std::printf("\n  options : %zu macro(s) retenue(s) sur plafond %u "
 						"(support >= %u, longueur 2-%zu, moyenne %.1f, fenetre "
-						"%s%u) ; perte modele %.1f -> %.1f log10\n",
+						"%s%u, ctx %s) ; perte modele %.1f -> %.1f log10\n",
 						option_catalog.Size(), opt.options_n,
 						opt.options_support, max_len,
 						option_catalog.Size()
@@ -5391,6 +5417,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							: 0.0,
 						opt.options_window ? "+/-" : "",
 						opt.options_window,
+						ctxdesc,
 						option_catalog.model_flat, option_catalog.model_opt);
 		}
 	}
@@ -5466,6 +5493,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.levin_reroot = opt.levin_reroot;
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
 	cfg.dive_full = opt.dive_full;
+	cfg.finisher_post_goal = opt.finisher_post_goal;
 	cfg.lifo_ties = opt.lifo_ties;
 	cfg.phs_canonical = opt.phs_canonical;
 	cfg.merged_pop = opt.merged_pop;

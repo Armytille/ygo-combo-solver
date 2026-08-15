@@ -1900,8 +1900,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// de corpus — il est SEMANTIQUE, donc comparable d'une ligne a
 			// l'autre, contrairement a la profondeur.
 			// Le descripteur coute une requete de zone par decision : il ne se
-			// paie que si le niveau contextuel est allume.
-			if(cfg.ctx_shrink >= 0.0f)
+			// paie que si le niveau contextuel est allume — ou si la garde
+			// semantique des options en a besoin.
+			if(cfg.ctx_shrink >= 0.0f ||
+			   (cfg.options && cfg.options->ctx_tol >= 0))
 				step.ctx = ContextKey(
 					CommonCodes(here.codes, target.codes),
 					duel.Count(static_cast<uint8_t>(cfg.target_player),
@@ -1952,12 +1954,16 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					auto it = cfg.options->by_first.find(choices[i].plan_key);
 					if(it == cfg.options->by_first.end())
 						continue;
-					// Precondition-proxy : la macro n'est proposee qu'a
-					// portee de fenetre de sa position d'origine dans le
-					// corpus — le meme test que le modele de selection.
+					// Preconditions : fenetre de position (refutee, gardee
+					// pour l'A/B) et garde SEMANTIQUE (ctx compatible avec
+					// une occurrence du corpus) — les memes tests que le
+					// modele de selection. La "meilleure macro par premiere
+					// cle" devient la mieux classee PARMI LES COMPATIBLES.
 					for(uint32_t mi : it->second) {
 						const uint32_t p = cfg.options->pos[mi];
 						if(W && (nsteps + W < p || nsteps > p + W))
+							continue;
+						if(!cfg.options->CtxOk(mi, step.ctx))
 							continue;
 						applicable.emplace_back(mi, static_cast<uint32_t>(i));
 						break;   // une macro par premiere cle
@@ -2356,8 +2362,13 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				ComputeBoardKeyInto(duel, static_cast<uint8_t>(cfg.target_player),
 									board_scratch);
 				if(GoalCheck(board_scratch, static_cast<uint32_t>(path.size()),
-							 actions, resolved))
-					return Adv::Goal;
+							 actions, resolved)) {
+					// Apres-but (opt-in) : sous anytime la ligne CONTINUE —
+					// GoalCheck a deja enregistre la solution, la suite peut
+					// la rendre moins chere (recuperations, piege 35).
+					if(!(cfg.anytime && cfg.finisher_post_goal))
+						return Adv::Goal;
+				}
 				if(turns >= 2) { ++stats.turn_cuts; return Adv::Dead; }
 				if(GuardCut(board_scratch, summons))
 					return Adv::Dead;
@@ -3251,14 +3262,17 @@ OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
 // pas un parametre — max_options n'est qu'un plafond.
 OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 								size_t max_options, uint32_t min_support,
-								size_t max_len, uint32_t window) {
+								size_t max_len, uint32_t window, int ctx_tol) {
 	OptionCatalog cat;
 	cat.window = window;
-	// 1. Les lignes : coup joue, largeur legale et cles legales par decision.
+	cat.ctx_tol = ctx_tol;
+	// 1. Les lignes : coup joue, largeur legale, cles legales et contexte
+	// semantique par decision.
 	struct Line {
 		std::vector<uint64_t> played;
 		std::vector<uint32_t> legal;
 		std::vector<const std::vector<uint64_t>*> keys;
+		std::vector<uint16_t> ctx;
 	};
 	std::vector<Line> lines;
 	for(const NrpaRun& r : runs) {
@@ -3270,38 +3284,49 @@ OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 			lines.back().legal.push_back(static_cast<uint32_t>(
 				(std::max)(s.keys.size(), size_t{ 1 })));
 			lines.back().keys.push_back(&s.keys);
+			lines.back().ctx.push_back(s.ctx);
 		}
 	}
 	if(lines.empty())
 		return cat;
 
 	// 2. Le vivier : sous-sequences a support >= min_support, position
-	// moyenne d'occurrence, plafonne aux 1024 meilleures au gain brut (le
-	// glouton exact sur tout le treillis couterait un ordre de plus).
+	// moyenne d'occurrence, contextes de depart d'occurrence, plafonne aux
+	// 1024 meilleures au gain brut (le glouton exact sur tout le treillis
+	// couterait un ordre de plus).
 	struct Cand {
 		std::vector<uint64_t> seq;
 		uint32_t n = 0;
 		uint32_t pos = 0;
 		double brut = 0;
+		std::vector<uint16_t> ctxs;
 	};
-	std::map<std::vector<uint64_t>, std::pair<uint32_t, uint64_t>> sup;
+	struct SupEntry {
+		uint32_t n = 0;
+		uint64_t pos = 0;
+		std::vector<uint16_t> ctxs;
+	};
+	std::map<std::vector<uint64_t>, SupEntry> sup;
 	for(const Line& L : lines)
 		for(size_t i = 0; i < L.played.size(); ++i)
 			for(size_t len = 2; len <= max_len && i + len <= L.played.size();
 				++len) {
 				auto& e = sup[std::vector<uint64_t>(
 					L.played.begin() + i, L.played.begin() + i + len)];
-				++e.first;
-				e.second += i;
+				++e.n;
+				e.pos += i;
+				e.ctxs.push_back(L.ctx[i]);
 			}
 	std::vector<Cand> pool;
 	for(auto& [seq, e] : sup) {
-		if(e.first < min_support)
+		if(e.n < min_support)
 			continue;
-		pool.push_back({ seq, e.first,
-						 static_cast<uint32_t>(e.second / e.first),
-						 static_cast<double>(e.first) *
-							 static_cast<double>(seq.size() - 1) });
+		std::sort(e.ctxs.begin(), e.ctxs.end());
+		e.ctxs.erase(std::unique(e.ctxs.begin(), e.ctxs.end()), e.ctxs.end());
+		pool.push_back({ seq, e.n, static_cast<uint32_t>(e.pos / e.n),
+						 static_cast<double>(e.n) *
+							 static_cast<double>(seq.size() - 1),
+						 std::move(e.ctxs) });
 	}
 	std::sort(pool.begin(), pool.end(), [](const Cand& a, const Cand& b) {
 		if(a.brut != b.brut) return a.brut > b.brut;
@@ -3332,6 +3357,17 @@ OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 		const uint32_t p = c.pos;
 		return i + window >= p && i <= size_t{ p } + window;
 	};
+	// La garde semantique du modele de selection : le MEME test que le
+	// rollout (OptionCatalog::CtxOk), sans quoi la perte modele serait
+	// calculee sur un denominateur que le run ne paie pas.
+	auto ctx_ok = [&](const Cand& c, uint16_t ctx) {
+		if(ctx_tol < 0)
+			return true;
+		for(uint16_t w : c.ctxs)
+			if(OptionCtxCompatible(ctx, w, static_cast<uint32_t>(ctx_tol)))
+				return true;
+		return false;
+	};
 	std::vector<std::vector<uint32_t>> proposable(total), playable(total);
 	for(size_t li = 0; li < lines.size(); ++li) {
 		const Line& L = lines[li];
@@ -3342,7 +3378,7 @@ OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 				if(it == cand_by_first.end())
 					continue;
 				for(uint32_t ci : it->second)
-					if(in_window(pool[ci], i) &&
+					if(in_window(pool[ci], i) && ctx_ok(pool[ci], L.ctx[i]) &&
 					   (proposable[g].empty() || proposable[g].back() != ci))
 						proposable[g].push_back(ci);
 			}
@@ -3351,7 +3387,8 @@ OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 				continue;
 			for(uint32_t ci : it->second) {
 				const auto& s = pool[ci].seq;
-				if(in_window(pool[ci], i) && i + s.size() <= L.played.size() &&
+				if(in_window(pool[ci], i) && ctx_ok(pool[ci], L.ctx[i]) &&
+				   i + s.size() <= L.played.size() &&
 				   std::equal(s.begin(), s.end(), L.played.begin() + i))
 					playable[g].push_back(ci);
 			}
@@ -3433,6 +3470,7 @@ OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 	for(uint32_t ci : chosen) {
 		cat.seqs.push_back(pool[ci].seq);
 		cat.pos.push_back(pool[ci].pos);
+		cat.ctxs.push_back(pool[ci].ctxs);
 	}
 	for(size_t m = 0; m < cat.seqs.size(); ++m) {
 		// Identite de la macro dans l'espace des poids. Collision id/plan_key
