@@ -37,22 +37,39 @@ en silence. Après tout changement de moteur : rebuild, santé, puis re-déroule
 `tools/s12_pgo.ps1` AVANT toute mesure. Témoins conservés :
 `combosolver_preopt.exe` (pré-s11), `combosolver_lto_s12.exe` (LTO, code s12).
 
+## ACQUIS DE LA SUITE DE SESSION (9.19 (h)-(m)) — ne pas re-mesurer
+
+- **BOOTSTRAP AUTO-AMORCÉ POSITIF** (j) : étalon A but seul, corpus = 3
+  approches 1/4 auto-générées → les macros multiplient les ≥2 résolutions par
+  ×25-180 et les ≥3 par ×50-85 (2 graines, attribution nette : adaptation
+  seule ≈ témoin). best reste 1/4 à 196 s.
+- **`merged_pop` PAR DÉFAUT** (h) : Restore unitaires 4,36 → 0,58/exp, arène
+  47 → 37 % de la phase, équivalence exacte. Cadran workers : 16 validé,
+  24 destructeur (−18 %), le mur est la bande passante mémoire.
+- **Rétro robustifié** (k) : corpus→graphe (LiftPolicyRun nourrit Observe),
+  consommation intra-recette, tri canonique. Et **réfuté comme h de
+  FINISSEUR** (l) : 2×2 neutre sur 16 paires — l'observation écrase l'amorce
+  aux états profonds, et h est un plateau là-bas (donc `--phs-canonical`
+  neutre PAR CONSTRUCTION aux h plats, pas seulement non mesuré). Le verrou
+  reste le h plat ; la montée est couverte par les MACROS, pas par une
+  distance dans le coût du finisseur.
+
 ## À FAIRE, par rendement estimé décroissant
 
-1. **Pousser les options GAGNANTES** (montage : `tools/s12_suite_audit.ps1`,
-   bras `sel`) : précondition SÉMANTIQUE (`ctx` — la positionnelle est
-   réfutée), corpus plus riche que les 17 lignes, et un run LONG pour
-   convertir les 8/8 en lignes complètes avec rips. Juge : « ≥ k
-   résolutions » et « 8/8 AVEC rips » — jamais le compteur de tirages.
-2. **`--phs-canonical` sur l'étalon A** (h_root = 4-6, là où e^h et d+h
-   divergent réellement).
-3. **Coût fixe d'arène du finisseur** (44,5 % de la phase depuis dive_full :
-   Restore 22,6 %, Push 17,4 %, Pop 4,5 %) : stride de pile, journaux plus
-   légers, Restore paresseux. Contrôle : étalon 0 (`tools/s12_rejeux.ps1`).
+1. **ITÉRER le bootstrap** (`tools/s12_bootstrap.ps1`) : gen2 ARMÉE des
+   macros (--adapt corpus1 --options 256) → approches meilleures → corpus2 →
+   macros meilleures. Et le conditionnement SÉMANTIQUE des macros (`ctx` ;
+   le graphe de recettes est le substrat). Juge : « ≥ k résolutions » et
+   best/4 — jamais le compteur de tirages.
+2. **Run LONG d'exploitation** (étalon B, bras `sel` de
+   `tools/s12_suite_audit.ps1`, 600-1800 s) : convertir les 8/8 en lignes
+   complètes AVEC rips.
+3. **Coût fixe d'arène résiduel** (~37 % de la phase du finisseur) : Push
+   allégé (miroir paresseux), stride. Contrôle : étalon 0.
 4. **`Adv::Goal` traité comme `Adv::Dead`** dans `advance()` (9.18 (g)) :
-   toujours non tranché — pas de récupération d'après-but dans le finisseur.
-5. Observation ouverte : binaire `/GENPROFILE` → 1898 indécodables C10 une
-   fois, non reproduite. À trancher si un run normal en remonte un jour.
+   toujours non tranché.
+5. Observation dormante : `/GENPROFILE` → 1898 indécodables C10 une fois,
+   non reproduite ensuite.
 
 ## Montage de mesure (inchangé par ailleurs)
 

@@ -3488,22 +3488,52 @@ avec ses matériaux dans deux ordres est LA MÊME recette (elle occupait deux de
 par produit). Santé stricte : 0 ligne hors durées. Le 2×2 décisif (h plat/amorcé × coût
 actuel/canonique, `tools/s12_retro_ab.ps1`) tourne sur ce moteur.
 
-**(l) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
-tirages, même sonde) : 27,2 µs (pré-optimisation) → 23,6 (LTO+C20+C22, re-mesuré ce jour sur
-le même montage) → **18,6 (PGO)**, soit −32 % par appel. Finisseur : **+92 % d'expansions à
-temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et sur l'EXPOSANT :
-les options sélectionnées par perte de Levin (g) rendent **8/8 sur 3 runs sur 3** et des ≥3
-résolutions au-dessus du témoin sur toutes les paires — le premier mécanisme de MASSE gagnant
-du projet. L'INSTRUMENT a aussi changé de statut : le compteur de tirages/états à graine
-fixée est déclassé pour l'A/B de débit ; le par-appel sous `--profile`, les contrôles
-exhaustifs déterministes et les sorties structurelles (≥k résolutions, best) le remplacent.
+**(l) Le 2×2 du rétro : NEUTRE sur les seize paires — et les deux questions tombent pour la
+même cause.** Étalon A déterministe (`tools/s12_retro_ab.ps1`), quatre bras : h plat/amorcé ×
+coût actuel/canonique, sur le moteur robustifié (k). L'amorce pose bien son gradient en tête
+(Liger 5, Bagooska 3 — inchangés par la consommation intra-recette, comme attendu à terrain
+vide) ; et pourtant expansions (±2 %), `best` par racine et `hR` (3,0-4,0) sont identiques
+dans les quatre bras. Deux mécanismes, une cause :
 
-**Ce qui reste, par rendement estimé décroissant :** (1) pousser les options gagnantes —
-précondition SÉMANTIQUE (`ctx` ; la positionnelle est réfutée), corpus plus riche, et un run
-long pour convertir les 8/8 en lignes complètes avec rips ; (2) `--phs-canonical` à juger sur
-l'étalon A (h_root = 4-6, là où e^h et d+h divergent) ; (3) le coût fixe d'arène du finisseur
-(44,5 % de la phase : stride de pile, journaux plus légers, ou Restore paresseux) ;
-(4) `Adv::Goal` traité comme `Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché).
-Les réserves d'usage : `dive_full` tient sur UN run par bras — mais son contrôle est
-l'identité exhaustive (42/b=0/ÉPUISÉ, mêmes `best` par racine), pas un compteur ; PGO tient
-sur des distributions disjointes ×3 ; les options tiennent sur 6/6 paires structurelles.
+1. **L'observation écrase l'amorce là où le finisseur travaille.** Des centaines à des
+   milliers d'invocations observées par racine (`rec=` 640-14 831) remplacent les recettes du
+   texte dès les premières secondes (règle 3, comportement voulu) — et aux états profonds des
+   racines de recul, les matériaux des recettes observées sont largement PRÉSENTS : la
+   distance retombe au compte des manquants, c'est-à-dire au h plat. Le gradient amorcé
+   n'existe qu'à terrain vide — la MONTÉE — que le finisseur ne visite jamais.
+2. **h est un PLATEAU aux états visités, donc toute forme de coût est neutre.** `hgoal` est
+   hérité du parent par TOUS ses enfants — le terme h décale un sous-arbre en bloc et ne
+   réordonne qu'entre sous-arbres de h différents. h quasi constant → e^h comme (d+h) sont un
+   offset : l'ordre est celui de Levin pur. `--phs-canonical` reste donc non départagé PAR
+   CONSTRUCTION tant que h est plat — pas seulement non mesuré.
+
+**Le verrou reste LE H PLAT — le diagnostic de la session 8 tient mot pour mot.** Le rétro
+dans sa forme actuelle est réfuté comme h de FINISSEUR : mécanisme vivant, gradient réel au
+départ, éteint là où il pèse (il n'est branché que dans `RunLevin`, pour raison de coût — la
+seule phase où son gradient s'effondre). Sa valeur résiduelle est dans la MONTÉE (tirages),
+où il n'est pas branché — et où les MACROS du bootstrap (j) font déjà ce travail par un autre
+canal, avec un effet mesuré de deux ordres de grandeur. Conséquence pratique : la voie
+« heuristique qui décroît » passe désormais par les options/macros (masse), pas par une
+distance de rétrosynthèse dans le coût du finisseur ; le graphe de recettes reste précieux
+comme MODÈLE (comptage dérivé, faisabilité, futur conditionnement sémantique des macros).
+
+**(m) Où en est le chantier, au terme de la session 12.** Débit : `Process` au par-appel
+27,2 µs → **18,6 (LTO+PGO, −32 %)** ; finisseur **+92 %** d'expansions à temps égal
+(`dive_full`) puis **−21 % de temps d'arène** en plus (`merged_pop`) ; cadran des workers
+tranché (16 validé, 24 destructeur, le mur est la bande passante). Masse : les options par
+perte de Levin — **8/8 ×3 en exploitation (g)** et **×50-180 sur les résolutions profondes en
+BOOTSTRAP auto-amorcé (j)** — le premier mécanisme de masse gagnant du projet, confirmé sur
+les deux régimes. Réfutés proprement : lifo_ties, la fenêtre de position, le rétro comme h de
+finisseur et la forme du coût PHS aux h plats (l). L'instrument a changé de statut : compteur
+de tirages déclassé ; par-appel sous `--profile`, contrôles exhaustifs déterministes et
+sorties structurelles (≥k résolutions, best) le remplacent.
+
+**Ce qui reste, par rendement estimé décroissant :** (1) **l'ITÉRATION du bootstrap** — gen2
+armée des macros → corpus plus riche → macros meilleures, et le conditionnement SÉMANTIQUE
+(`ctx`) des macros (le graphe de recettes en est le substrat naturel) ; (2) un run LONG
+d'exploitation pour convertir les 8/8 en lignes complètes avec rips ; (3) le coût fixe
+d'arène résiduel du finisseur (~37 % de la phase après merged_pop) ; (4) `Adv::Goal` traité
+comme `Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché). Les réserves d'usage :
+`dive_full` et `merged_pop` tiennent sur l'identité exhaustive, pas sur un compteur ; PGO sur
+des distributions disjointes ×3 ; les options sur 6/6 paires (exploitation) et 4/4 paires à
+deux ordres de grandeur (bootstrap).
