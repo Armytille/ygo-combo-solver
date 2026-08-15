@@ -818,6 +818,14 @@ struct Options {
 	// premier tirage. --adapt-passes 0 desactive le mecanisme (A/B).
 	std::vector<std::string> adapt_files;
 	uint32_t adapt_passes = 4;
+	// OPTIONS (chantier 17) : taille du catalogue de macros minees dans le
+	// corpus --adapt et proposees a l'echantillonnage NRPA. 0 = eteint
+	// (comportement d'avant a l'octet pres). La prevision (9.19 (b)) ne
+	// justifie que le GROS catalogue : 256/support 2 gagne 8,5 ordres, 16 et
+	// 64 sont contre-productifs.
+	uint32_t options_n = 0;
+	uint32_t options_support = 2;
+	uint32_t options_len = 8;
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
@@ -1162,6 +1170,13 @@ void Usage() {
 		"                     par coup (mesure NEUTRE, session 6).\n"
 		"  --adapt-passes <n> passes d'adaptation par ligne (defaut 4 ; 0 coupe\n"
 		"                     le mecanisme sans toucher au releve — c'est l'A/B)\n"
+		"  --options <n>      OPTIONS (chantier 17) : catalogue de n macros\n"
+		"                     minees dans le corpus --adapt et proposees comme\n"
+		"                     UNE unite d'echantillonnage aux tirages NRPA\n"
+		"                     (0 = eteint, defaut). La prevision ne justifie que\n"
+		"                     le gros catalogue : 256.\n"
+		"  --options-support <n>  occurrences minimales d'une macro (defaut 2)\n"
+		"  --options-len <n>  longueur maximale d'une macro (defaut 8)\n"
 		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
 		"                     t < 1 concentre la masse sur les coups les mieux\n"
 		"                     classes SANS changer le classement — le seul\n"
@@ -1452,6 +1467,15 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--adapt-passes") {
 			const char* v = next("--adapt-passes"); if(!v) return false;
 			o.adapt_passes = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options") {
+			const char* v = next("--options"); if(!v) return false;
+			o.options_n = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-support") {
+			const char* v = next("--options-support"); if(!v) return false;
+			o.options_support = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-len") {
+			const char* v = next("--options-len"); if(!v) return false;
+			o.options_len = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
@@ -5272,6 +5296,36 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::vector<NrpaRun> adapt_runs;
 	BuildAdaptRuns(opt, db, scripts, plan, target, adapt_runs);
 
+	// OPTIONS (chantier 17) : le catalogue est mine UNE fois, ici, et survit a
+	// toutes les phases — les workers le lisent en const. Sans corpus il n'y a
+	// rien a miner : le dire plutot que laisser un mecanisme silencieusement
+	// absent du chemin (la lecon de --adapt en mode reparation, 9.19 (b)).
+	OptionCatalog option_catalog;
+	if(opt.options_n) {
+		if(adapt_runs.empty()) {
+			std::printf("\n!! --options %u : aucun corpus releve (--adapt "
+						"manquant ou vide) — catalogue VIDE, mecanisme eteint.\n",
+						opt.options_n);
+		} else {
+			option_catalog = MineOptionCatalog(adapt_runs, opt.options_n,
+											   opt.options_support,
+											   opt.options_len);
+			size_t max_len = 0, sum_len = 0;
+			for(const auto& s : option_catalog.seqs) {
+				max_len = (std::max)(max_len, s.size());
+				sum_len += s.size();
+			}
+			std::printf("\n  options : %zu macro(s) minee(s) (support >= %u, "
+						"longueur 2-%zu, moyenne %.1f) sur %zu ligne(s) de "
+						"corpus\n",
+						option_catalog.Size(), opt.options_support, max_len,
+						option_catalog.Size()
+							? double(sum_len) / double(option_catalog.Size())
+							: 0.0,
+						adapt_runs.size());
+		}
+	}
+
 	// --- 4. Recherche, par approfondissement progressif du nombre d'ecarts.
 	SearchConfig cfg;
 	cfg.target_player = opt.target_player;
@@ -5344,6 +5398,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
 	cfg.dive_full = opt.dive_full;
 	cfg.lifo_ties = opt.lifo_ties;
+	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
 	if(opt.hint_bias >= 0)
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
@@ -5563,6 +5618,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// laissee ouverte par le §9.11 : la garde elague-t-elle utilement,
 			// ou rase-t-elle l'espace ?
 			uint64_t constraint_cuts = 0, guard_cuts = 0;
+			// Options (chantier 17) : prises / decisions absorbees / avortees.
+			uint64_t macro_taken = 0, macro_absorbed = 0, macro_aborted = 0;
 			uint32_t overlap = 0, monsters = 0, overlap_ripped = 0;
 		};
 		ModeStats greedy, nrpa;
@@ -5682,6 +5739,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
+					m.macro_taken += s.Stats().macro_taken;
+					m.macro_absorbed += s.Stats().macro_absorbed;
+					m.macro_aborted += s.Stats().macro_aborted;
 					m.hint_seen += s.Stats().hint_seen;
 					m.hint_taken += s.Stats().hint_taken;
 					for(int k = 0; k < 4; ++k)
@@ -5735,6 +5795,25 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)nrpa.nodes,
 						(unsigned long long)nrpa.adapts, nrpa.overlap,
 						target.codes.size(), nrpa.monsters);
+		// Le triptyque de vie des OPTIONS (piege 52) : a `prises` nul le
+		// catalogue n'est jamais choisi (poids ou applicabilite), a `avortees`
+		// dominant il ne correspond pas aux prompts rencontres. Le gain
+		// d'exposant est absorbees/prise (vise : longueur moyenne - 1).
+		if(greedy.macro_taken + nrpa.macro_taken + greedy.macro_aborted +
+		   nrpa.macro_aborted)
+			std::printf("      options : %llu prises, %llu decisions absorbees "
+						"(%.1f/prise), %llu avortees\n",
+						(unsigned long long)(greedy.macro_taken +
+											 nrpa.macro_taken),
+						(unsigned long long)(greedy.macro_absorbed +
+											 nrpa.macro_absorbed),
+						(greedy.macro_taken + nrpa.macro_taken)
+							? double(greedy.macro_absorbed +
+									 nrpa.macro_absorbed) /
+								  double(greedy.macro_taken + nrpa.macro_taken)
+							: 0.0,
+						(unsigned long long)(greedy.macro_aborted +
+											 nrpa.macro_aborted));
 		// Ce que les CONTRAINTES DE LIGNE coupent, PAR MODE. Trois mecanismes
 		// actifs dans tous les runs disciplines depuis la session 3, et aucun
 		// n'etait imprime LA OU IL TRAVAILLE : `PrintCuts` ne couvrait que les

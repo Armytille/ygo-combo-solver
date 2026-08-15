@@ -3182,3 +3182,191 @@ où `DescendGuided`/`DescendRepair` documentent explicitement continuer APRÈS l
 À trancher en session suivante : soit c'est voulu (le finisseur s'arrête au but par
 construction), soit la récupération d'après-but est structurellement absente du finisseur et
 personne ne l'a mesuré.
+
+### 9.19 Session 12 : les médianes retirent le chiffre de la session 11, et le compteur de tirages est déclassé comme instrument d'A/B
+
+Session PERFORMANCE (suite). Programme du prompt : les trois répétitions et les médianes
+d'abord, PGO ensuite, puis le chantier nouveau désigné par l'instrument — les REJEUX du
+finisseur — et la lecture de la prévision des options.
+
+**(a) Les médianes : le « +31,8 % d'états à temps égal » de la session 11 NE SURVIT PAS.**
+Étalon B contraint, 60 s, graine 888, trois répétitions par bras, bras INTERCALÉS
+(`tools/s12_ab_medianes.ps1`) :
+
+| bras | tirages ×3 | médiane | états, médiane |
+|---|---|---|---|
+| ancien binaire (`combosolver_preopt.exe`) | 156 261 / 175 518 / 194 431 | **175 518** | 7 076 319 |
+| nouveau (LTO+C20+C22+ancêtre) | 122 252 / 158 431 / 162 320 | **158 431** | 6 840 313 |
+| nouveau + `--profile` | 147 363 / 205 767 / 213 390 | **205 767** | 7 744 983 |
+
+La médiane du nouveau binaire est SOUS celle de l'ancien (−9,7 % tirages), et le bras profilé —
+qui porte un SURCOÛT — est au-dessus des deux (+30 % sur le bras nu du même binaire). Aucun de
+ces trois écarts n'est un fait : la dispersion à graine fixée est de ±10-18 % par bras, et elle
+engloutit tout. Le run unique de la session 11 (113 654 contre 196 067) avait tiré le bas de la
+bande de l'ancien et le haut de celle du nouveau — exactement le piège 39, sur le chiffre que le
+§9.18 (d) avait lui-même flanqué de deux réserves écrites.
+
+**Conséquence méthodologique, plus importante que le chiffre retiré : le compteur de
+tirages/états à graine fixée est DÉCLASSÉ comme instrument d'A/B de débit** pour tout effet
+< ~20 %. Ce qui le remplace : le coût PAR APPEL relevé par la même sonde `--profile` des deux
+côtés — piège 39 étendu : la dispersion des COMPTEURS domine, celle du par-appel non (médiane
+`Process` phase tirages sur les trois runs profilés du jour : 19,0 / 19,3 / 22,3 µs). Le
+−13,8 %/appel du LTO (27,2 → 23,5 µs, §9.18 (d)) reste le seul énoncé de gain qui tienne.
+Le coût de l'instrument reste indiscernable du bruit (le bras profilé rend PLUS d'états que le
+bras nu).
+
+**(b) La prévision des options (chantier 17) : enfin lue, et elle ne justifie le chantier que
+dans sa forme GROS CATALOGUE.** Le script s10 n'avait jamais pu l'imprimer : `--adapt` n'est
+branché que sur les chemins `--start`/`--fire` (`BuildAdaptRuns`) ; en mode réparation le flag
+était accepté et IGNORÉ — la famille exacte du « mécanisme silencieusement absent du chemin »
+(réflexe session 9). Corrigé : avertissement imprimé en mode réparation, script réparé
+(`--start` ajouté). La table (corpus `solutions/`, 17 lignes, politique uniforme) :
+
+| catalogue | support | décisions | avec macros | log10 d/π | absorbé |
+|---|---|---|---|---|---|
+| 16 | 4 | 170 | 115 | 87,6 → 151,0 | 38 % |
+| 64 | 3 | 170 | 54 | 87,6 → 100,3 | 78 % |
+| 256 | 2 | 170 | **32** | 87,6 → **79,1** | **93 %** |
+
+Les petits catalogues sont CONTRE-PRODUCTIFS : proposés à chaque décision, ils gonflent le
+branchement plus que la profondeur ne baisse. Le gros catalogue (256 macros, support 2,
+longueur ≤ 8) absorbe 93 % du corpus, ramène la ligne de 170 à 32 décisions et gagne 8,5 ordres
+de grandeur sur la borne de Levin — le seuil d'ouverture du chantier (3 ordres) est largement
+franchi, mais uniquement sous cette forme. Réserve : borne calculée sous politique UNIFORME
+(l'adaptée 4 passes est déjà à 28,7 en monolithe) ; le transfert du gain à la politique adaptée
+n'est pas prédit par cette table.
+
+**(c) Le chantier REJEUX : l'instrument d'abord, et il renverse le diagnostic de la
+session 11.** Nouveau compteur `rj = arêtes rejouées / arêtes de chaîne, par expansion`
+(imprimé sur chaque ligne de finisseur ; à chaîne = rejouées, la pile n'absorbe rien ; à 0,
+tout). Sur l'étalon 0, bras témoin : **rj = 12/12 partout** — la pile de plongée n'absorbait
+RIEN. Le « les sauts de file partagent des préfixes courts » du §9.18 (f) était un artefact de
+l'instrument de l'époque : la pile ne retenait que les nœuds DÉVELOPPÉS de la branche courante
+et perdait les intermédiaires à chaque saut — l'ancêtre partagé trouvé était quasi toujours la
+racine. Les sauts ONT des préfixes profonds communs ; c'était la pile qui les perdait.
+
+**`--dive-full`** empile un niveau d'arène à CHAQUE nœud de chaîne rejoué (pas seulement au
+nœud développé) : le trafic de pages d'un segment se RÉPARTIT entre les Push — seules les pages
+chaudes communes sont journalisées plusieurs fois — et la pile détient la branche entière.
+Étalon 0, quatre bras sous `--profile` (`tools/s12_rejeux.ps1`), contrôle identique partout
+(recul 0 : 42 exp., b=0, ÉPUISÉ ; mêmes `best` par racine — l'ordre d'extraction est inchangé,
+seule la vitesse change) :
+
+| bras | rj | Process/exp | µs/appel | exp. à temps égal (4 reculs) |
+|---|---|---|---|---|
+| témoin | 12/12 | 54,5 | 70,4 | 14 910 |
+| `--lifo-ties` | 12/12 | 54,5 | 90,4 | 11 867 |
+| **`--dive-full`** | **1,5/14** | **12,8** | 95,4 | **28 686 (+92 %)** |
+| les deux | 1,4/14 | 12,3 | 103,5 | 29 817 |
+
+**Le plus gros gain du chantier performance à ce jour, et il est STRUCTUREL** (pas un compteur
+de tirages : l'ordre d'extraction étant inchangé, l'accélération est du débit pur). PAR DÉFAUT
+depuis cette session ; `--no-dive-full` pour l'A/B. Confirmation sur run de contrôle défaut :
+identique au bras au drapeau près.
+
+`--lifo-ties` (départage LIFO des ex aequo de la file) est RÉFUTÉ seul : les ex aequo exacts
+sont rares (les log-probabilités diffèrent par nœud), rj ne bouge pas, et l'ordre modifié
+visite des états plus chers (90,4 contre 70,4 µs/appel) pour −20 % d'expansions ; neutre
+combiné à `dive_full`. Éteint par défaut, gardé pour l'A/B.
+
+**Ce que le profil dit du coût résiduel** : dans le bras `dive`, `Process` ne pèse plus que
+53 % — l'arène en prend 44,5 % (Restore 22,6 %, Push 17,4 %, Pop 4,5 %, à ~119/167/43 µs
+l'appel). Le prochain levier du finisseur est le COÛT FIXE par niveau d'arène (Push/Pop par
+nœud rejoué), pas le core. Piste : un pas de pile (stride) ou des journaux plus légers.
+
+**(d) PGO : GARDÉ — −21,4 % par appel, distributions disjointes.** Mécanique sans toucher
+premake : le linker MSVC lit `_LINK_` — `/GENPROFILE`, entraînement (santé + étalon B 30 s +
+étalon 0 30 s : les trois régimes), `/USEPROFILE` (`tools/s12_pgo.ps1`). Santé stricte du
+binaire PGO : 24 lignes de diff, toutes des durées (et 0,199 → 0,177 ms/décision sur le
+déroulement de référence). Mesure au par-appel (`tools/s12_pgo_mesure.ps1`, étalon B contraint
+60 s ×3 par bras, intercalés, sonde identique des deux côtés) :
+
+| bras | `Process` µs/appel (tirages) ×3 | médiane |
+|---|---|---|
+| LTO (témoin `combosolver_lto_s12.exe`) | 25,23 / 23,63 / 20,90 | 23,63 |
+| PGO | 18,58 / 18,91 / 17,71 | **18,58 (−21,4 %)** |
+
+Le pire run PGO (18,91) bat le meilleur run LTO (20,90) : l'effet est RÉSOLU par l'instrument,
+pas inféré d'une médiane. Les compteurs déclassés pointent d'ailleurs dans le même sens
+(médiane tirages +32 %, 5 des 6 paires disjointes) — cohérence, pas preuve. Cumul depuis le
+témoin pré-optimisation : `Process` 27,2 → 23,6 (LTO, jour du même montage) → 18,6 µs/appel.
+
+**ATTENTION REPRODUCTIBILITÉ** : un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` et perd le
+PGO en silence (le binaire redevient LTO nu). Après tout changement de moteur : recompiler,
+santé, puis RE-DÉROULER `tools/s12_pgo.ps1` avant toute mesure. Le témoin LTO du jour est
+conservé (`combosolver_lto_s12.exe`), comme `combosolver_preopt.exe` avant lui.
+
+**(e) Observation ouverte — versée au dossier, non tranchée.** Le binaire INSTRUMENTÉ
+(`/GENPROFILE`) a rendu sa santé d'entraînement avec **1898 réponses INDÉCODABLES** par le
+filtre `--no-chain` (tri-état C10, code de sortie 1), là où les binaires normal et PGO final
+en rendent ZÉRO sur la même commande. Deux hypothèses non départagées : un artefact de codegen
+de l'instrumentation, ou un chemin `v >= n` du décodeur de chaîne (réponse enregistrée
+confrontée à un prompt désynchronisé en réparation) que seul le rythme différent du binaire
+instrumenté fait apparaître — auquel cas le classement `Undecodable` de ce cas est trop
+sévère : un désaccord SÉMANTIQUE attendu en réparation y est compté comme dérive de FORMAT.
+Sans effet sur les binaires livrés (santés propres) ; à trancher si un run normal remonte un
+jour ce compteur.
+
+**(f) Le chantier 17 IMPLÉMENTÉ — et son premier A/B perd, avec le diagnostic au chiffre
+près.** La session a poursuivi au-delà du programme : le catalogue d'options est passé de
+prévision à mécanisme. `MineOptionCatalog` (le même minage que la prévision : support ≥ 2,
+longueur ≤ 8, classement gain brut) rend un catalogue exécutable — séquences, une clé de
+politique par macro (id propre dans l'espace des `plan_key`), index par première clé. Dans
+`PolicyRollout`, une macro applicable (première clé légale au prompt) est UNE unité
+d'échantillonnage : choisie, ses clés suivantes se jouent sans échantillonner ni produire de
+`PolicyStep` (les prompts forcés passent au travers — le corpus n'en enregistre pas) ; une clé
+non proposée fait AVORTER la macro, le tirage reprend son cours — rien n'est jamais retiré de
+l'espace. `--options <n>` (0 = éteint, défaut), exige un corpus `--adapt`. Triptyque de vie
+imprimé : prises / décisions absorbées / avortées (piège 52).
+
+Premier A/B (étalon B contraint + `--adapt solutions`, 60 s ×3 par bras,
+`tools/s12_options_ab.ps1`), forme naïve — toutes les macros applicables proposées, biais
+répertoire hérité du premier coup :
+
+| lecture | témoin ×3 | `--options 256` ×3 |
+|---|---|---|
+| prises / tirage | — | **7,7** (600k-969k prises) |
+| absorbées / prise | — | **1,3-2,1** (cible ~6,6) |
+| avortées / prises | — | 45-82 % |
+| best | 7/8, 8/8, 7/8 | 5/8, 6/8, 7/8 |
+| tirages ≥ 3 résolutions | 2, 0, 28 | **0, 0, 0** |
+
+**PERDANT, et l'instrument dit pourquoi** : le catalogue INONDE le softmax — à chaque prompt,
+des dizaines de macros applicables portant chacune le biais répertoire écrasent les choix
+atomiques ; la masse part sur des macros qui cassent au deuxième pas (une sous-séquence minée
+aux décisions 40-47 est proposée dès la décision 5, où sa première clé est légale mais pas la
+suite). Deux gardes posées en réponse : UNE macro par première clé (la mieux classée), et
+AUCUN biais hérité (le poids part de zéro, l'adaptation seule les élève).
+
+**Deuxième A/B (mêmes montage et graine, `tools/s12_options_ab2.ps1`) : toujours PERDANT.**
+Les gardes n'ont pas réduit la fréquence — 8-9 prises/tirage (chaque choix du prompt apporte
+encore SA macro), absorption 1,0-1,6/prise, 78-84 % d'avortements. Sorties : best témoin
+8/8, 8/8, 6/8 contre opt 7/8, 7/8, 7/8 ; un signal isolé sur ≥ 2 résolutions (opt 1059 et
+607 contre témoin 145 et 54 sur deux runs — à la dispersion près, non concluant) ; ≥ 3
+jamais atteint côté opt (le témoin l'atteint 12 fois sur un run). VERDICT : le mécanisme est
+implémenté, vivant, instrumenté — et sa forme SANS CONTEXTE est réfutée sur ce montage. Le
+diagnostic tient en une phrase : une sous-séquence minée aux décisions 40-47 est proposée dès
+la décision 5, où sa première clé est légale mais pas sa suite. La prochaine forme est
+CONDITIONNÉE — miner et proposer les macros avec leur contexte (`PolicyStep::ctx`, les cartes
+cibles posées, existe déjà des deux côtés du releveur), et/ou n'accorder une macro qu'à
+l'endroit de sa ligne d'origine (fenêtre de position). ÉTEINT par défaut ; `--options 256`
+pour reprendre l'A/B. À noter aussi : les décisions absorbées paient toujours leur coût core
+(`Process` par pas inchangé) — les options sont un levier de MASSE (probabilité d'une ligne
+complète), pas de débit ; leur juge est « ≥ k résolutions » et « 8/8 AVEC rips », jamais le
+compteur de tirages.
+
+**(g) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
+tirages, même sonde) : 27,2 µs (pré-optimisation) → 23,6 (LTO+C20+C22, re-mesuré ce jour sur
+le même montage) → **18,6 (PGO)**, soit −32 % par appel. Finisseur : **+92 % d'expansions à
+temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et l'INSTRUMENT a
+changé de statut : le compteur de tirages/états à graine fixée est déclassé pour l'A/B de
+débit ; le par-appel sous `--profile` et les contrôles exhaustifs déterministes le remplacent.
+
+**Ce qui reste, par rendement estimé décroissant :** (1) les OPTIONS dans leur forme
+CONDITIONNÉE — le mécanisme existe et est instrumenté ((f) : contexte ou fenêtre de position ;
+la forme libre est réfutée) ; (2) le coût fixe d'arène du finisseur (44,5 % de la phase :
+stride de pile, journaux plus légers, ou Restore paresseux) ; (3) `Adv::Goal` traité comme
+`Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché). Les réserves d'usage :
+`dive_full` tient sur UN run par bras — mais son contrôle est l'identité exhaustive
+(42/b=0/ÉPUISÉ, mêmes `best` par racine), pas un compteur ; PGO tient sur des distributions
+disjointes ×3.

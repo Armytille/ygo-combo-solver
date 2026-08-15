@@ -1701,6 +1701,13 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	uint32_t rp_prev = ResolveProgress(resolved);
 	double novel_states = 0;
 	std::vector<double> logit;
+	// Macro en cours d'execution (chantier 17) : les cles restantes se jouent
+	// sans echantillonner ni produire de PolicyStep. Les prompts FORCES
+	// intermediaires (un seul choix) passent au travers : le corpus n'en
+	// enregistre pas, les sequences minees n'en contiennent donc jamais.
+	const std::vector<uint64_t>* active_macro = nullptr;
+	size_t macro_pos = 0;
+	std::vector<std::pair<uint32_t, uint32_t>> applicable;   // (macro, choix)
 
 	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
 		if(BudgetExhausted()) {
@@ -1816,7 +1823,28 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		}
 
 		size_t pick = 0;
-		if(choices.size() > 1) {
+		bool scripted = false;
+		// Macro active : jouer sa cle suivante si CE prompt (a choix multiple)
+		// la propose ; sinon elle AVORTE et le tirage reprend son cours — le
+		// mecanisme ne retire jamais rien de l'espace, au pire il ne fait rien.
+		if(active_macro && choices.size() > 1) {
+			const uint64_t want = (*active_macro)[macro_pos];
+			for(size_t i = 0; i < choices.size(); ++i)
+				if(choices[i].plan_key == want) {
+					pick = i;
+					scripted = true;
+					break;
+				}
+			if(scripted) {
+				++stats.macro_absorbed;
+				if(++macro_pos >= active_macro->size())
+					active_macro = nullptr;
+			} else {
+				++stats.macro_aborted;
+				active_macro = nullptr;
+			}
+		}
+		if(!scripted && choices.size() > 1) {
 			// Echantillonnage softmax sous la politique — AUCUNE evaluation des
 			// fils : c'est ce qui rend un tirage NRPA plusieurs fois moins cher
 			// qu'un tirage glouton (qui avance/mesure/restaure chaque fils).
@@ -1863,13 +1891,57 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				step.known.push_back(known ? 1 : 0);
 				step.hinted.push_back(hinted ? 1 : 0);
 			}
+			// OPTIONS (chantier 17) : une macro applicable devient un choix de
+			// plus, pesee par SON poids — l'unite d'echantillonnage qui
+			// concentre la masse. Deux gardes, posees par le premier A/B
+			// (9.19 (g)) : UNE macro par premiere cle (la mieux classee —
+			// l'index suit l'ordre du minage), sans quoi le catalogue inonde
+			// le softmax (7,7 prises/tirage mesurees) ; et AUCUN biais herite
+			// (le poids part de zero, l'adaptation seule les eleve — avec le
+			// biais repertoire, 82 % des prises avortaient apres ~1,3 pas).
+			applicable.clear();
+			if(cfg.options) {
+				for(size_t i = 0; i < choices.size(); ++i) {
+					auto it = cfg.options->by_first.find(choices[i].plan_key);
+					if(it == cfg.options->by_first.end())
+						continue;
+					applicable.emplace_back(it->second.front(),
+											static_cast<uint32_t>(i));
+				}
+				for(const auto& [mi, ci] : applicable) {
+					const double w =
+						EffectiveWeight(pol, &ctx_weights, cfg.options->ids[mi],
+										step.ctx, cfg.ctx_shrink);
+					logit.push_back(
+						w / (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f));
+					mx = (std::max)(mx, logit.back());
+					step.keys.push_back(cfg.options->ids[mi]);
+					step.known.push_back(0);
+					step.hinted.push_back(0);
+				}
+			}
 			double sum = 0;
 			for(double& x : logit) { x = std::exp(x - mx); sum += x; }
 			double u = double(next() >> 11) * (1.0 / 9007199254740992.0) * sum;
 			double acc = 0;
+			size_t pick_index = 0;
 			for(size_t i = 0; i < logit.size(); ++i) {
 				acc += logit[i];
-				if(u < acc || i + 1 == logit.size()) { pick = i; break; }
+				if(u < acc || i + 1 == logit.size()) { pick_index = i; break; }
+			}
+			if(pick_index >= choices.size()) {
+				// Macro choisie : la reponse appliquee est son premier coup,
+				// le curseur prend la suite.
+				const auto& [mi, ci] = applicable[pick_index - choices.size()];
+				pick = ci;
+				++stats.macro_taken;
+				const std::vector<uint64_t>& seq = cfg.options->seqs[mi];
+				if(seq.size() > 1) {
+					active_macro = &seq;
+					macro_pos = 1;
+				}
+			} else {
+				pick = pick_index;
 			}
 			// Visibilite des indices : un coup indice etait-il seulement LEGAL
 			// ici ? C'est la mesure qui separe "mal echantillonne" de "jamais
@@ -1880,11 +1952,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					any |= h != 0;
 				if(any) {
 					++stats.hint_seen;
-					if(step.hinted[pick])
+					if(step.hinted[pick_index])
 						++stats.hint_taken;
 				}
 			}
-			step.chosen = pick;
+			step.chosen = pick_index;
 			run.steps.push_back(std::move(step));
 		}
 
@@ -3057,6 +3129,62 @@ OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
 								  : 0.0;
 	}
 	return out;
+}
+
+// Le MEME minage que ForecastOptionGain (support = occurrences dans le corpus,
+// gain brut = (longueur - 1) x support, les max_options premieres) — mais il
+// rend le catalogue EXECUTABLE au lieu d'une prevision : sequences, cle de
+// politique par macro (id propre dans le meme espace que les plan_key), et
+// index par premiere cle pour le test d'applicabilite au prompt.
+OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
+								size_t max_options, uint32_t min_support,
+								size_t max_len) {
+	OptionCatalog cat;
+	std::vector<std::vector<uint64_t>> played;
+	for(const NrpaRun& r : runs) {
+		if(r.steps.empty())
+			continue;
+		played.emplace_back();
+		for(const PolicyStep& s : r.steps)
+			played.back().push_back(s.keys[s.chosen]);
+	}
+	std::map<std::vector<uint64_t>, uint32_t> support;
+	for(const std::vector<uint64_t>& seq : played)
+		for(size_t i = 0; i < seq.size(); ++i)
+			for(size_t len = 2; len <= max_len && i + len <= seq.size(); ++len)
+				++support[std::vector<uint64_t>(seq.begin() + i,
+												seq.begin() + i + len)];
+	std::vector<std::pair<double, const std::vector<uint64_t>*>> ranked;
+	for(const auto& [seq, n] : support) {
+		if(n < min_support)
+			continue;
+		ranked.emplace_back(static_cast<double>(n) *
+								static_cast<double>(seq.size() - 1),
+							&seq);
+	}
+	std::sort(ranked.begin(), ranked.end(),
+			  [](const auto& a, const auto& b) {
+				  if(a.first != b.first) return a.first > b.first;
+				  return a.second->size() > b.second->size();
+			  });
+	for(const auto& [gain, seq] : ranked) {
+		if(cat.seqs.size() >= max_options)
+			break;
+		cat.seqs.push_back(*seq);
+	}
+	for(size_t m = 0; m < cat.seqs.size(); ++m) {
+		// Identite de la macro dans l'espace des poids. Les plan_key sont des
+		// hachages 64 bits arbitraires : une collision id/cle reelle est du
+		// meme ordre qu'une collision entre deux plan_key — negligee des deux
+		// cotes. Le sel evite qu'une macro d'UNE cle (impossible ici,
+		// longueur >= 2) ne s'identifie a cette cle.
+		uint64_t id = 0x9E3779B97F4A7C15ull;
+		for(uint64_t k : cat.seqs[m])
+			id = (id ^ k) * 0x100000001B3ull;
+		cat.ids.push_back(id);
+		cat.by_first[cat.seqs[m].front()].push_back(static_cast<uint32_t>(m));
+	}
+	return cat;
 }
 
 double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,

@@ -447,6 +447,32 @@ OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
 								  size_t max_options, uint32_t min_support,
 								  size_t max_len);
 
+// --- CATALOGUE D'OPTIONS (chantier 17, session 12) ---
+//
+// Le seul levier identifie qui attaque l'EXPOSANT : la prevision (9.19 (b))
+// chiffre le gros catalogue (256 macros, support 2, longueur <= 8) a 93 %
+// d'absorption du corpus et 8,5 ordres de grandeur sur la borne de Levin.
+//
+// Une macro est une SEQUENCE DE plan_key minee dans le corpus --adapt. Dans
+// l'echantillonnage elle est UNE unite : proposee aux cotes des choix du
+// prompt quand sa premiere cle y est legale, pesee par SON poids de politique
+// (id propre dans le meme espace de cles), et une fois choisie, ses cles
+// suivantes se jouent sans echantillonner ni produire de PolicyStep — c'est
+// la que la profondeur de la ligne (au sens de la perte de Levin) tombe de
+// 170 a ~32. Si une cle n'est pas proposee par le prompt courant, la macro
+// AVORTE et le tirage reprend son cours normal : le mecanisme ne retire
+// jamais rien de l'espace (regle 2 du chantier 16, meme esprit).
+struct OptionCatalog {
+	std::vector<std::vector<uint64_t>> seqs;
+	std::vector<uint64_t> ids;   // cle de politique de chaque macro
+	// premiere cle -> indices des macros qui commencent par elle
+	std::unordered_map<uint64_t, std::vector<uint32_t>> by_first;
+	size_t Size() const { return seqs.size(); }
+};
+OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
+								size_t max_options, uint32_t min_support,
+								size_t max_len);
+
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
 // Une politique de cette forme est une fonction du couple (contexte, ensemble
@@ -1101,6 +1127,10 @@ struct SearchConfig {
 	// -20 % d'expansions ; neutre combine a dive_full. Reste disponible pour
 	// l'A/B, eteint par defaut.
 	bool lifo_ties = false;
+	// --- options (chantier 17) ---
+	// Catalogue de macros propose a l'echantillonnage NRPA (nul = eteint,
+	// comportement d'avant a l'octet pres). Voir OptionCatalog.
+	const OptionCatalog* options = nullptr;
 	// --- graphe de recettes (chantier 16) ---
 	// Non nul : le graphe est ALIMENTE par les invocations observees, et `h`
 	// devient la distance sur ce graphe au lieu du compte de cartes manquantes.
@@ -1347,6 +1377,15 @@ struct SearchStats {
 	uint64_t rollout_count = 0;
 	uint64_t turn_cuts = 0;         // tirages arretes au changement de tour
 	uint64_t nrpa_adapts = 0;
+	// --- options (chantier 17) ---
+	// Le triptyque de vie du mecanisme (piege 52) : macros CHOISIES par
+	// l'echantillonnage, decisions ABSORBEES par leurs pas scriptes (le gain
+	// d'exposant est absorbees/choisies), macros AVORTEES en cours de route
+	// (cle non proposee par le prompt — a dominant, le catalogue ne
+	// correspond pas aux prompts que la recherche rencontre).
+	uint64_t macro_taken = 0;
+	uint64_t macro_absorbed = 0;
+	uint64_t macro_aborted = 0;
 	// Visibilite des indices (--hint) : dans combien d'etats un coup indice
 	// etait LEGAL, et combien de fois il a ete pris. hint_seen = 0 signifie
 	// que le probleme n'est pas l'echantillonnage mais la LEGALITE — le core
