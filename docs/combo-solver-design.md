@@ -3604,3 +3604,30 @@ d'enfants). Le drapeau fait continuer la ligne après le but sous anytime, comme
 **Piège de build reconduit** : après le relink de ces mécanismes, `tools/s13_pgo.ps1` —
 variante s13 du pipeline PGO qui N'ÉCRASE PAS le témoin s12 (`combosolver_lto_s13.exe` neuf)
 et ajoute un 4ᵉ run d'entraînement avec options+ctx pour couvrir le mineur v3 et la garde.
+
+**(d) LE RUN LONG D'EXPLOITATION CONVERTIT — premières lignes complètes AVEC rips sur
+l'étalon B contraint.** Chantier 2 de 9.19 (m) : le bras `sel` gagnant (adapt + options 256),
+budget ×20 (1200 s), graines 888 et 1234 (`tools/s13_exploitation_longue.ps1`). Graine 888 :
+**32 lignes atteignent le board via le finisseur** (lignes `crete-rip 8/8 <-- BUT` sur les
+racines de recul 20/40), **16 solutions écrites**, toutes à **19 brûlées / 56 actions /
+264-266 décisions — contre 276 décisions pour la référence humaine** à brûlées et actions
+égales. Vérification sur pièce (`solution_00`, mode juge, rejeu depuis zéro) : **0 MSG_RETRY,
+garde tenue sur 27 fenêtres adverses (0 découverte), résolutions 2/2 Omega@terrain +
+1/1 Trishula@terrain**. C'est la première production de bout en bout du montage contraint —
+en 9.16 il rendait « best 3/8, aucune ligne » à 90 s, et 9.19 (g) notait « aucune ligne
+complète avec rips encore (60 s) ». Graine 1234 : pas de conversion à 1200 s
+(`best_approach_8of8.yrp`, 205 décisions, crête-rip 7/8) — une graine sur deux convertit à ce
+budget ; la dispersion reste réelle. À noter : le plafond d'écriture (16) a laissé 16
+candidates non examinées — l'avertissement du rapport le dit lui-même (piège documenté, à
+trier par coût si un run futur en produit plus).
+
+**(e) Observation versée au dossier — `canonical_zones` est un mécanisme DORMANT.** En
+répondant à une question de séance (« les zones et positions branchent-elles ? ») : le choix
+de colonne émet bien un choix par colonne libre, mais l'identité de politique ignore la
+colonne (`plan_key` sans `seq`), la nouveauté rend les colonnes jumelles muettes, et
+l'équivalence de but ignore colonne ET position de combat (face seule, piège 26) ; seul le
+digest d'état garde la position complète (voulu — fusionner ferait disparaître des lignes,
+piège 47). MAIS `EnumOptions::canonical_zones` (une colonne représentative par type de zone)
+existe, est documenté, et n'est allumé NULLE PART — un candidat d'A/B gratuit pour le
+branchement du finisseur, de la même famille que le « mécanisme silencieusement absent du
+chemin ».
