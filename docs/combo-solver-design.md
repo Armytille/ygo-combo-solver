@@ -3537,3 +3537,70 @@ comme `Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché). Les réser
 `dive_full` et `merged_pop` tiennent sur l'identité exhaustive, pas sur un compteur ; PGO sur
 des distributions disjointes ×3 ; les options sur 6/6 paires (exploitation) et 4/4 paires à
 deux ordres de grandeur (bootstrap).
+
+### 9.20 Session 13 : l'itération du bootstrap MONTE — 1/4 → 2/4, et le corpus CUMULÉ est la forme gagnante
+
+Programme du prompt : itérer le bootstrap (gen2 armée des macros), le run long d'exploitation,
+puis le conditionnement sémantique des macros. Santé d'entrée : binaire PGO de fin de session 12
+vérifié (22 lignes de diff contre `s12_sante_fin.log`, que des durées et le nom d'outdir).
+
+**(a) La gen2 ARMÉE, appariée à la gen1 : mêmes graines, même budget, seule l'armure change —
+et la graine 4242 écrit le PREMIER 2/4 en mode but seul.** Protocole
+(`tools/s13_bootstrap_gen2.ps1`) : les trois graines de génération de la session 12
+(888/1234/4242, 240 s, étalon A but seul) relancées avec `--adapt s12_boot_corpus
+--adapt-passes 4 --options 256`. Comparaison par paire à graine égale :
+
+| graine | gen1 (nue) ≥2 / ≥3 | gen2 (armée) ≥2 / ≥3 | approche écrite gen1 → gen2 |
+|---|---|---|---|
+| 888 | 4 715 / 980 | 183 358 / 33 021 | 1/4 (65 déc.) → 1/4 (76 déc.) |
+| 1234 | 4 671 / 1 099 | 104 347 / 21 614 | 1/4 (72 déc.) → 1/4 (61 déc.) |
+| 4242 | 6 099 / 1 240 | 186 060 / 35 722 | 1/4 (49 déc.) → **2/4 (214 déc.)** |
+
+Le ×20-40 sur ≥2/≥3 re-confirme 9.19 (j) en appariement strict ; le fait NOUVEAU est la
+conversion : la 2ᵉ Liger que la session 12 annonçait comme le fruit attendu de l'itération est
+tombée dès la gen2, à budget de génération inchangé (240 s). `corpus2` = les 3 approches gen2,
+dont la ligne 2/4.
+
+**(b) L'A/B des corpus (le cœur de l'itération) : le CUMUL convertit sur les deux graines de
+mesure.** Trois bras intercalés par graine (300 s, mêmes graines 888/1234, même binaire) :
+`opt1` = adapt+options sur corpus1 (le témoin re-mesuré du jour), `opt2` = corpus2 seul,
+`opt12` = corpus1 + corpus2 (`--adapt` répété) :
+
+| bras | catalogue | absorbées/prise | avortées | ≥2 | ≥3 | best |
+|---|---|---|---|---|---|---|
+| g888 opt1 | 11 macros (moy. 4,4) | 2,9 | 604 k | 218 306 | 65 823 | 1/4 |
+| g888 opt2 | 3 macros (moy. 7,3) | 5,4 | 261 k | 279 280 | 73 319 | 1/4 |
+| g888 **opt12** | 6 macros (moy. 7,0) | 5,3 | 246 k | 273 953 | 73 436 | **2/4** (181 déc.) |
+| g1234 opt1 | 11 | 1,4 | 2 854 k | 272 583 | 75 463 | 1/4 |
+| g1234 opt2 | 3 | 5,5 | 224 k | 291 246 | 81 193 | 1/4 |
+| g1234 **opt12** | 6 | 5,5 | 159 k | 277 241 | 94 665 | **2/4** (189 déc.) |
+
+Trois faits structurels. (1) **best 2/4 dans la MESURE elle-même, sur les deux graines,
+uniquement dans le bras cumul** — les deux autres bras restent 1/4 partout. (2) ≥2 et ≥3
+au-dessus du témoin corpus1 sur les 4 paires (signe cohérent ; amplitudes +7 à +28 %, modestes
+parce que tous les bras partent déjà armés). (3) **La qualité des macros s'améliore d'une
+génération à l'autre** : minées sur des approches déjà armées, elles sont moins nombreuses et
+plus longues (3-6 macros de longueur moyenne 7,0-7,3 contre 11 de 4,4), absorbent 2 à 4× plus
+par prise et avortent 2,3 à 18× moins. Le compteur ≥4 (131/147/537 et 0/342/0) est trop
+dispersé pour en tirer quoi que ce soit. Verdict : **la boucle InnateCoder ne fait pas que
+s'amorcer (9.19 (j)), elle MONTE — et sa forme de production est le corpus CUMULÉ** (on ne
+jette jamais les lignes des générations passées).
+
+**(c) Deux mécanismes écrits cette session, opt-in et dormants par défaut** (bit-à-bit
+identiques éteints), pour profiter du même relink : (1) **`--options-ctx <tol>`** — la garde
+SÉMANTIQUE des macros désignée par 9.19 (g) après la réfutation de la fenêtre positionnelle :
+une macro n'est proposée que si le contexte courant (cartes cibles posées EXACTES, main à
+±tol) est compatible avec un contexte de départ d'une de ses occurrences du corpus. Le même
+test entre dans le modèle de sélection par perte de Levin (le catalogue retenu peut changer) et
+dans le rollout ; `PolicyStep::ctx` existait déjà des deux côtés (relevé inconditionnel dans
+`LiftPolicyRun`, calculé au tirage quand la garde ou `ctx_shrink` l'exigent). `15` ≈ garde sur
+les seules cartes posées ; l'A/B est `tools/s13_options_ctx_ab.ps1`. (2) **`--finisher-post-goal`**
+— le point 9.18 (g) est TRANCHÉ par lecture : `GoalCheck` ENREGISTRE la solution avant que
+`advance()` ne rende `Adv::Goal` (rien n'était perdu), mais sous `--optimize` la récupération
+d'après-but (piège 35) était bien structurellement absente de `RunLevin` (nœud-but = jamais
+d'enfants). Le drapeau fait continuer la ligne après le but sous anytime, comme les rollouts.
+À juger sur A/B avant tout défaut.
+
+**Piège de build reconduit** : après le relink de ces mécanismes, `tools/s13_pgo.ps1` —
+variante s13 du pipeline PGO qui N'ÉCRASE PAS le témoin s12 (`combosolver_lto_s13.exe` neuf)
+et ajoute un 4ᵉ run d'entraînement avec options+ctx pour couvrir le mineur v3 et la garde.
