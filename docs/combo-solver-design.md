@@ -3384,6 +3384,19 @@ cohérent, pas une médiane. Le premier échec (f) n'était donc pas le levier q
 c'était notre écart au papier. Aucune ligne complète avec rips encore (60 s) ; le mécanisme
 reste OPT-IN (`--options 256`, exige `--adapt`) — c'est la forme recommandée.
 
+**QUALIFICATION — ce que le 8/8 prouve, et ce qu'il ne prouve pas** (question soulevée en
+séance). Le run est bien en mode but seul (`--no-plan` : répertoire écarté, politique
+uniforme, les réponses enregistrées ne sont pas candidates). MAIS la référence entre encore
+par le corpus : sur les 17 lignes `--adapt`, 16 sont les replays du run de santé — des
+variantes de RÉPARATION de la référence, à sa signature de coût près (19/56). Les macros sont
+donc des fragments distillés de la ligne de référence via ses variantes, et le board cible
+vient de son rejeu. L'A/B isole proprement « les macros aident-elles AU-DELÀ de l'adaptation
+sur le même corpus ? » (les deux bras adaptent pareil) — oui, 6/6 — mais il mesure une
+meilleure EXPLOITATION d'un corpus quasi-référence, pas une découverte autonome. Le test de
+découverte est le BOOTSTRAP : étalon A en but seul (`--no-ref`, aucune ligne enregistrée),
+corpus = les meilleures approches partielles des tirages eux-mêmes, macros minées dessus —
+le cas d'usage exact qu'InnateCoder vise dans la revue. À monter avant de généraliser.
+
 *La FENÊTRE DE POSITION, elle, est RÉFUTÉE* : elle réduit bien les avortements (3,8
 absorbées/prise contre 1,3-2,5) mais tue les ≥3 résolutions (0 partout) — les tirages ne
 s'alignent pas positionnellement avec le corpus, la garde bride les macros là où elles
