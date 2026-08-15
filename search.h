@@ -1149,6 +1149,13 @@ struct SearchConfig {
 	// -20 % d'expansions ; neutre combine a dive_full. Reste disponible pour
 	// l'A/B, eteint par defaut.
 	bool lifo_ties = false;
+	// Depilage FUSIONNE (Arena::PopToAndRestore) au retour vers l'ancetre
+	// partage : chaque page chaude recopiee une fois au lieu d'une fois par
+	// niveau. PAR DEFAUT depuis la session 12 (suite) : equivalence exacte
+	// verifiee sur l'etalon 0 (42/b=0/EPUISE, memes best), Restore unitaires
+	// 4,36 -> 0,58/expansion, arene 47 -> 37 % de la phase, +4,5 % d'exp. a
+	// temps egal. --no-merged-pop = temoin d'A/B.
+	bool merged_pop = true;
 	// --- options (chantier 17) ---
 	// Catalogue de macros propose a l'echantillonnage NRPA (nul = eteint,
 	// comportement d'avant a l'octet pres). Voir OptionCatalog.

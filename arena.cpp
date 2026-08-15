@@ -485,6 +485,69 @@ void Arena::Pop() {
 	parent.undo_data.clear();
 }
 
+void Arena::PopToAndRestore(size_t k) {
+	if(k == 0) {
+		Restore();
+		return;
+	}
+	if(checkpoints.size() < k + 1)
+		k = checkpoints.empty() ? 0 : checkpoints.size() - 1;
+	if(k == 0) {
+		Restore();
+		return;
+	}
+	prof::Scope ps(prof::kArenaPop);
+	ArenaPause off;
+	SyncDirty();
+	const size_t target = checkpoints.size() - 1 - k;
+	// L'union des pages modifiees depuis l'empilement du niveau cible : sa
+	// periode propre plus celles des k niveaux depiles. (La fusion montante
+	// des Pop sequentiels construit exactement cet ensemble, un niveau a la
+	// fois ; ici on le prend d'un coup.)
+	std::vector<uint64_t> uni = checkpoints[target].dirty;
+	for(size_t i = target + 1; i < checkpoints.size(); ++i) {
+		const std::vector<uint64_t>& d = checkpoints[i].dirty;
+		if(uni.size() < d.size())
+			uni.resize(d.size(), 0);
+		for(size_t w = 0; w < d.size(); ++w)
+			uni[w] |= d[w];
+	}
+	// Ramener le MIROIR a l'etat de l'empilement du niveau cible : le journal
+	// du niveau i ramene le miroir de l'empilement de son fils au sien —
+	// application du haut vers le bas, chaque journal consomme.
+	for(size_t i = checkpoints.size() - 1; i-- > target;) {
+		Checkpoint& cp = checkpoints[i];
+		for(size_t j = 0; j < cp.undo_pages.size(); ++j) {
+			size_t off_p = size_t(cp.undo_pages[j]) * page_size;
+			if(off_p + page_size <= mirror.size())
+				std::memcpy(mirror.data() + off_p,
+							cp.undo_data.data() + j * page_size, page_size);
+		}
+		cp.undo_pages.clear();
+		cp.undo_data.clear();
+	}
+	// L'arene depuis le miroir, chaque page UNE fois. La borne est l'in_use du
+	// niveau CIBLE : au-dela, les spans n'existent pas a ce niveau —
+	// RestoreMetadata les rend vierges, et Allocate reconstruit leurs chaines
+	// en les recarvant avant tout usage (le contenu residuel n'est jamais lu).
+	Checkpoint& tcp = checkpoints[target];
+	size_t pages = 0;
+	ForEachDirtyPage(uni, [&](size_t page) {
+		size_t off_p = page * page_size;
+		if(off_p + page_size > mirror.size() || off_p >= tcp.in_use)
+			return;
+		std::memcpy(base + off_p, mirror.data() + off_p, page_size);
+		++pages;
+	});
+	checkpoints.resize(target + 1);
+	RestoreMetadata(tcp);
+	std::fill(tcp.dirty.begin(), tcp.dirty.end(), 0);
+	if(write_watch && committed)
+		ResetWriteWatch(base, committed);
+	last_restore = { pages, pages * page_size };
+	prof::Count(prof::kPagesRestored, pages);
+}
+
 void Arena::Discard() {
 	ArenaPause off;
 	if(!checkpoints.empty())

@@ -2416,11 +2416,16 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			// Pile vide (ou sans ancetre commun) : rejeu depuis la racine,
 			// les coups forces se re-derivent.
 			++stats.dive_misses;
-			while(!dive.empty()) {
-				arena.Pop();
-				dive.pop_back();
+			if(cfg.merged_pop) {
+				arena.PopToAndRestore(dive.size());
+				dive.clear();
+			} else {
+				while(!dive.empty()) {
+					arena.Pop();
+					dive.pop_back();
+				}
+				arena.Restore();
 			}
-			arena.Restore();
 			path.clear();
 			actions = 0;
 			turns = cfg.initial_turns;
@@ -2455,11 +2460,17 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			// fusionne ses pages sales), restaurer SON etat — il est A SON
 			// PROMPT — puis rejouer le suffixe de chaine : au plus court, la
 			// seule reponse de idx (enfant ou frere, l'ancien chemin rapide).
-			while(static_cast<int64_t>(dive.size()) > at + 1) {
-				arena.Pop();
-				dive.pop_back();
+			if(cfg.merged_pop) {
+				arena.PopToAndRestore(dive.size() -
+									  static_cast<size_t>(at + 1));
+				dive.resize(static_cast<size_t>(at + 1));
+			} else {
+				while(static_cast<int64_t>(dive.size()) > at + 1) {
+					arena.Pop();
+					dive.pop_back();
+				}
+				arena.Restore();
 			}
-			arena.Restore();
 			if(at >= 0) {
 				const DiveLevel& L = dive[static_cast<size_t>(at)];
 				path.resize(L.path_len);

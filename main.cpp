@@ -833,6 +833,9 @@ struct Options {
 	// PHS* canonique (audit s12) : cout (d + h)/pi du papier au lieu de notre
 	// log(d+1) + h - log pi (facteur e^h, sans garantie).
 	bool phs_canonical = false;
+	// Depilage fusionne de l'arene au retour vers l'ancetre (voir
+	// SearchConfig::merged_pop). GAGNANT etalon 0, par defaut.
+	bool merged_pop = true;
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
@@ -1190,6 +1193,9 @@ void Usage() {
 		"  --phs-canonical    finisseur : cout PHS* du papier, (d + h)/pi, au\n"
 		"                     lieu de log(d+1) + h - log pi (facteur e^h,\n"
 		"                     plus agressif, sans la garantie du papier)\n"
+		"  --no-merged-pop    finisseur : revenir au depilage niveau par niveau\n"
+		"                     (temoin d'A/B ; le depilage fusionne est le\n"
+		"                     defaut — chaque page chaude recopiee une fois)\n"
 		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
 		"                     t < 1 concentre la masse sur les coups les mieux\n"
 		"                     classes SANS changer le classement — le seul\n"
@@ -1494,6 +1500,10 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.options_window = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--phs-canonical") {
 			o.phs_canonical = true;
+		} else if(a == "--merged-pop") {
+			o.merged_pop = true;
+		} else if(a == "--no-merged-pop") {
+			o.merged_pop = false;
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
@@ -5423,6 +5433,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.dive_full = opt.dive_full;
 	cfg.lifo_ties = opt.lifo_ties;
 	cfg.phs_canonical = opt.phs_canonical;
+	cfg.merged_pop = opt.merged_pop;
 	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
 	if(opt.hint_bias >= 0)
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);

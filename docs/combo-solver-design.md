@@ -3413,7 +3413,40 @@ sonde `kPrefix` (rejeu de préfixe des racines) affiche **0,0 %** dans tous les 
 l'étalon 0 depuis `dive_full` — l'hypothèse « restaurer les racines par memcpy comme
 Go-Explore » n'a plus de charge utile à récupérer. Évalué, écarté, rien à implémenter.
 
-**(h) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
+**(h) Suite best-effort : le cadran des workers tranche une conjecture, le dépilage fusionné
+prend les 21 % d'arène.**
+
+*Le cadran du nombre de workers (jamais mesuré, `tools/s12_threads.ps1`, binaire PGO, µs/appel
+par la même sonde) :*
+
+| workers | `Process` µs/appel (méd. ×2) | appels totaux / 60 s |
+|---|---|---|
+| 8 | 11,3 | 19,4 M |
+| 12 | 14,7 | 21,8 M |
+| 16 (défaut) | 18,6 | **23,9 M** |
+| 24 | 34,7 | 19,7 M |
+
+Le coût PAR APPEL croît quasi linéairement avec la concurrence — saturation mémoire/L3, la
+mécanique que le §6ter annonçait — mais le débit AGRÉGÉ culmine bien à 16 : la conjecture
+« l'optimum est bien sous le nombre de threads » est RÉFUTÉE au sens agrégé. Deux enseignements
+fermes : ne JAMAIS sursouscrire (24 : −18 %), et 8→16 ne rend que +23 % pour 2× les threads —
+le mur est la bande passante, pas le CPU ; la marge future est la réduction du working set par
+décision, pas plus de cœurs.
+
+*Le dépilage fusionné (`Arena::PopToAndRestore`) :* revenir à l'ancêtre dépilait k niveaux en
+k passes — chaque page chaude recopiée une fois par niveau où elle était sale, plus une fois au
+Restore final. La fusion fait UNE passe : un seul `SyncDirty`, les journaux d'annulation
+appliqués au miroir du haut vers le bas, puis l'arène restaurée sur l'UNION des pages sales, et
+la table des spans restaurée une fois. Équivalence exacte vérifiée (étalon 0 : 42/b=0/ÉPUISÉ,
+mêmes best par racine) ; Restore unitaires 4,36 → **0,58**/expansion, arène 47,2 → 37,1 % de la
+phase (−21 % de temps d'arène), +4,5 % d'expansions à temps égal (run unique, mais l'économie
+de trafic de pages est MÉCANIQUE — lisible dans les compteurs, pas dans une durée). PAR
+DÉFAUT ; `--no-merged-pop` = témoin. Une subtilité de conception versée au code : les pages
+au-delà de l'`in_use` du niveau cible ne sont PAS restaurées — leurs spans sont rendus vierges
+par `RestoreMetadata` et re-carvés par `Allocate` avant tout usage, le contenu résiduel n'est
+jamais lu.
+
+**(i) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
 tirages, même sonde) : 27,2 µs (pré-optimisation) → 23,6 (LTO+C20+C22, re-mesuré ce jour sur
 le même montage) → **18,6 (PGO)**, soit −32 % par appel. Finisseur : **+92 % d'expansions à
 temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et sur l'EXPOSANT :

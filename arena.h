@@ -101,6 +101,13 @@ public:
 	void Push();     // ouvre un niveau : l'etat courant devient le point de reprise
 	void Restore();  // revient au point de reprise SANS depiler (iteration sur les fils)
 	void Pop();      // revient au point de reprise et depile
+	// Equivalent a k x Pop() puis Restore(), en UNE passe : un seul SyncDirty,
+	// les journaux d'annulation appliques au miroir du haut vers le bas, puis
+	// l'arene restauree depuis le miroir sur l'UNION des pages sales — chaque
+	// page chaude est recopiee une fois au lieu d'une fois par niveau, et la
+	// table des spans n'est restauree qu'au niveau cible. Motive par le profil
+	// du finisseur en pile complete (9.19 (c)) : Restore+Pop y pesent 27 %.
+	void PopToAndRestore(size_t k);
 	void Discard();  // depile sans restaurer
 	size_t Depth() const { return checkpoints.size(); }
 
