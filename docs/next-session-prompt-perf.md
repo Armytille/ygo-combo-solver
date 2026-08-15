@@ -1,76 +1,59 @@
-# Session PERFORMANCE (suite) : le profil existe, le levier est le NOMBRE d'appels
+# État PERFORMANCE après la session 12 — lire §9.19 avant tout
 
-Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`) pour
-la suite du chantier performance. Lis d'abord `README.md`, puis
-`docs/combo-solver-design.md` **§9.18** (la session 11 : l'instrument, les deux
-régimes décomposés, le facteur 70 expliqué), §5, §7, et §9.16 (i).
-**Ne redécouvre rien de ce qui y est chiffré.**
+Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`).
+Lis `README.md` puis `docs/combo-solver-design.md` **§9.19** (session 12 : les
+médianes, le compteur déclassé, dive_full, PGO, les options réfutées sans
+contexte), et §9.18. **Ne redécouvre rien de ce qui y est chiffré.**
 
-## L'ÉTAT : l'instrument est posé, il a déjà tranché
+## CE QUE LA SESSION 12 A TRANCHÉ — ne pas re-mesurer
 
-La session 11 a livré `--profile` (sondes rdtsc à temps exclusif, thread_local
-versées par phase, ligne « reste » par construction — §9.18 (a)) et les trois
-premières optimisations tenues par la santé stricte (LTO, C20, C22, plus la
-surcharge à tampon de `RecipeDistance`). Le diff de santé avant/après ne
-contient QUE des durées.
+- **Le compteur tirages/états à graine fixée est DÉCLASSÉ comme instrument
+  d'A/B de débit** (dispersion ±10-18 % par bras, médianes ×3). Le « +31,8 % »
+  de la s11 est RETIRÉ. Les juges : le µs/appel sous `--profile` (même sonde
+  des deux côtés), et les contrôles exhaustifs déterministes.
+- **`Process` par appel (tirages)** : 27,2 (pré-opt) → 23,6 (LTO) → **18,6
+  (PGO, −21,4 %, distributions disjointes ×3)**. PGO gardé.
+- **`dive_full` PAR DÉFAUT** (pile de plongée complète) : rj 12/12 → 1,5/14,
+  Process/expansion 54,5 → 12,8, **+92 % d'expansions à temps égal**, ordre
+  d'extraction inchangé (contrôle : 42/b=0/ÉPUISÉ, mêmes best). `--no-dive-full`
+  = témoin. `--lifo-ties` réfuté seul, neutre combiné.
+- **Options (chantier 17) : implémentées, VIVANTES, et leur forme SANS CONTEXTE
+  est réfutée** (deux A/B perdants — 8-9 prises/tirage, absorption 1,0-2,1
+  contre ~6,6 visées, 78-84 % d'avortements). Diagnostic : une macro minée aux
+  décisions 40-47 est proposée dès la décision 5. Éteintes par défaut
+  (`--options 256` pour reprendre, exige `--adapt`).
+- La prévision (lue enfin — le script s10 tournait sur un chemin où `--adapt`
+  était IGNORÉ, corrigé) : seul le gros catalogue vaut (256/support 2 :
+  8,5 ordres, 93 % absorbé) ; 16 et 64 contre-productifs.
 
-**Ce que le profil a tranché — ne pas le re-mesurer :**
+## PIÈGE DE BUILD NOUVEAU — reproductibilité PGO
 
-- **Tirages** (étalon B contraint) : `Process` 82 %, 2,79 appels/décision à
-  27,2 µs ; Restore 9 % (1/tirage) ; TOUT l'hôte ~18 %. Le softmax/politique
-  (« reste ») : 2 % — **C27 est mort avant d'être tenté**, C21/C23-C28 ne
-  peuvent pas rendre plus que des miettes.
-- **Finisseur** (RunLevin) : `Process` 86 %, **79,9 appels par expansion** à
-  131 µs — le coût est le REJEU du chemin à chaque saut de la file best-first,
-  pas le développement des fils. Digest 0,03 %, requêtes 0,4 % : les hypothèses
-  « digest/requêtes refaits par fils » sont éliminées.
-- **Le coût d'un pas de core CROÎT avec la profondeur de l'état** : 27 µs
-  (départ) → 90 µs (reculs profonds) → 131 µs (finisseur). Les 0,18 ms du
-  jalon 0 étaient justes le long de la référence, pas représentatifs.
-- **369 allocations d'arène par décision**, toutes dans `Process` (trafic
-  Lua/core).
+Un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` : le binaire redevient LTO nu,
+en silence. Après tout changement de moteur : rebuild, santé, puis re-dérouler
+`tools/s12_pgo.ps1` AVANT toute mesure. Témoins conservés :
+`combosolver_preopt.exe` (pré-s11), `combosolver_lto_s12.exe` (LTO, code s12).
 
-## À FAIRE, dans l'ordre
+## À FAIRE, par rendement estimé décroissant
 
-1. **Les trois répétitions et les médianes.** Les gains de la session 11 sont
-   des runs uniques à graine fixée (piège 39). Refaire l'A/B binaire s11
-   (`bin\Release\combosolver_preopt.exe` est le témoin pré-optimisation
-   conservé) : étalon B contraint 60 s ×3 par bras, lire `tirages` et `etats`
-   de la phase tirages, comparer des médianes. Chiffrer aussi le coût de
-   l'instrument (même commande ±`--profile`, ×3).
-2. **PGO.** Le profil d'exécution est extrêmement stable : cas d'école.
-   `/GL` est déjà posé (LTO) ; ajouter l'instrumentation PGO, un run
-   d'entraînement (santé + étalon B court), recompiler optimisé, mesurer comme
-   en 1. Garder seulement si la santé stricte passe ET si la médiane gagne.
-3. **Le chantier NOUVEAU désigné par l'instrument : réduire les REJEUX du
-   finisseur.** 80 `Process` par expansion. Pistes, par coût croissant :
-   allonger la pile de plongée (aujourd'hui elle ne retient que la branche
-   courante) ; des checkpoints d'arène aux nœuds chauds de la file (attention
-   mémoire : 441 pages/Restore aux états profonds) ; trier la file pour
-   favoriser les voisins de la pile. CONTRÔLE : étalon 0 (`s9_ab_alpha.ps1`),
-   la racine `recul 0` doit rendre 42 exp., b=0, ÉPUISÉ dans tous les bras —
-   et le contrôle de GAIN est « plus d'expansions à temps égal ».
-4. **Les OPTIONS (chantier 17)** restent le levier de l'EXPOSANT pour les
-   tirages — `tools/s10_options.ps1` (30 s) n'a toujours pas été lu.
+1. **Options CONDITIONNÉES** : miner et proposer les macros avec leur contexte
+   (`PolicyStep::ctx` existe des deux côtés du releveur) et/ou fenêtre de
+   position sur la ligne d'origine. Juge : « ≥ k résolutions » et « 8/8 AVEC
+   rips » — jamais le compteur de tirages. Montage : `tools/s12_options_ab2.ps1`.
+2. **Coût fixe d'arène du finisseur** (44,5 % de la phase depuis dive_full :
+   Restore 22,6 %, Push 17,4 %, Pop 4,5 %) : stride de pile, journaux plus
+   légers, Restore paresseux. Contrôle : étalon 0 (`tools/s12_rejeux.ps1`).
+3. **`Adv::Goal` traité comme `Adv::Dead`** dans `advance()` (9.18 (g)) :
+   toujours non tranché — pas de récupération d'après-but dans le finisseur.
+4. Observation ouverte : binaire `/GENPROFILE` → 1898 indécodables C10 en
+   santé (binaires normal et PGO : zéro). À trancher si un run normal en
+   remonte un jour.
 
-## Ce qu'il ne faut PAS faire
+## Montage de mesure (inchangé par ailleurs)
 
-- Pas de C21/C23-C28 : le « reste » pèse 2 %, il n'y a rien à y gagner.
-- Ne pas chronométrer les allocations d'arène (l'instrument fabriquerait le
-  ralentissement — §9.18 (a)) ; comptées, jamais chronométrées.
-- Ne pas relier le binaire pendant qu'une mesure tourne ; runs séquentiels ;
-  un `--outdir` par run ; santé avant/après tout changement de moteur — ici le
-  diff attendu est « exactement les mêmes nombres, durées plus basses ».
-- Le digest : C22 a changé les VALEURS (contrôle structurel passé). Toute
-  nouvelle modification exige le même contrôle : 273 digests deux à deux
-  distincts, 210/273, 209 candidates, 16 replays, 19/56/272.
-
-## Le montage de mesure (inchangé)
-
-- **Santé** : commande dans `docs/next-session-prompt.md` (60 s).
-- **Étalon B contraint** : `tools/s9_etalon_b_contraint.ps1` (90 s ; la session
-  11 a utilisé 60 s).
-- **Étalon 0 déterministe** : `tools/s9_ab_alpha.ps1` (finisseur seul).
-- **Fumée** : `--solve-ms 5000` sur l'étalon A — l'en-tête s'imprime avant
-  toute recherche.
-- Logs PowerShell 5.1 en UTF-16 : lire avec `Select-String`/`pwsh`, pas `grep`.
+- Santé : commande dans `docs/next-session-prompt.md` (60 s) — diff attendu :
+  QUE des durées.
+- Étalon B contraint : `tools/s9_etalon_b_contraint.ps1` ; ±`--profile` pour le
+  µs/appel ; bras intercalés, médianes ×3 minimum.
+- Étalon 0 : `tools/s12_rejeux.ps1` (contrôle 42/b=0/ÉPUISÉ, colonne rj=).
+- Runs séquentiels, un `--outdir` par run, jamais de relink pendant une mesure.
+- Logs PowerShell 5.1 en UTF-16 : `Select-String`/`pwsh`, pas `grep`.

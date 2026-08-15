@@ -3305,7 +3305,9 @@ confrontée à un prompt désynchronisé en réparation) que seul le rythme diff
 instrumenté fait apparaître — auquel cas le classement `Undecodable` de ce cas est trop
 sévère : un désaccord SÉMANTIQUE attendu en réparation y est compté comme dérive de FORMAT.
 Sans effet sur les binaires livrés (santés propres) ; à trancher si un run normal remonte un
-jour ce compteur.
+jour ce compteur. Complément de fin de session : le SECOND pipeline PGO (déroulé sur le code
+final, options comprises) a rendu sa santé instrumentée PROPRE (EXIT=0) — l'anomalie ne s'est
+pas reproduite ; elle reste versée au dossier comme observation isolée, non reproduite.
 
 **(f) Le chantier 17 IMPLÉMENTÉ — et son premier A/B perd, avec le diagnostic au chiffre
 près.** La session a poursuivi au-delà du programme : le catalogue d'options est passé de
