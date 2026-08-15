@@ -3357,18 +3357,65 @@ pour reprendre l'A/B. À noter aussi : les décisions absorbées paient toujours
 complète), pas de débit ; leur juge est « ≥ k résolutions » et « 8/8 AVEC rips », jamais le
 compteur de tirages.
 
-**(g) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
+**(g) L'audit littérature exécuté — la sélection par perte de Levin retourne le verdict des
+options.** Un audit de fidélité aux papiers (demandé en séance) a identifié trois rustines ;
+les trois ont été traitées dans la même session.
+
+*1. Options v3 : le critère du papier au lieu du nôtre — et le mécanisme GAGNE.* La v1/v2
+classait les macros au gain brut `support × (longueur−1)` ; Alikhasi & Lelis (2410.11262)
+sélectionnent en MINIMISANT LA PERTE DE LEVIN du catalogue, par ajout glouton avec
+ré-évaluation — une macro paie sa présence au dénominateur PARTOUT où elle est proposable, et
+la sélection s'arrête quand plus rien n'améliore. Implémenté (`MineOptionCatalog` v3 :
+programmation dynamique de segmentation par ligne, vivier 1024, faisceau 64, approximations
+documentées). Effet immédiat : **la taille du catalogue devient un résultat — 19 macros
+retenues sur plafond 256** — et la perte modèle passe de 85,4 → 33,8 log10 (contre 87,6 →
+79,1 pour la forme naïve). A/B (étalon B contraint + `--adapt`, 60 s ×3,
+`tools/s12_suite_audit.ps1`) :
+
+| lecture | témoin ×3 | sélection Levin ×3 | + fenêtre ±16 ×3 |
+|---|---|---|---|
+| best | 7/8, 7/8, 6/8 | **8/8, 8/8, 8/8** | 7/8, 6/8, 7/8 |
+| ≥2 résolutions | 156, 19, 184 | **172, 81, 191** | 72, 14, 198 |
+| ≥3 résolutions | 22, 3, 23 | **37, 31, 77** | 0, 0, 0 |
+| racines de rip (départ) | 2/8 | **5-6/8**, crête 7/8 | — |
+
+**GAGNANT sur toutes les paires** (6/6 sur ≥2 et ≥3, 3/3 sur le best) — un fait structurel
+cohérent, pas une médiane. Le premier échec (f) n'était donc pas le levier qui était faux :
+c'était notre écart au papier. Aucune ligne complète avec rips encore (60 s) ; le mécanisme
+reste OPT-IN (`--options 256`, exige `--adapt`) — c'est la forme recommandée.
+
+*La FENÊTRE DE POSITION, elle, est RÉFUTÉE* : elle réduit bien les avortements (3,8
+absorbées/prise contre 1,3-2,5) mais tue les ≥3 résolutions (0 partout) — les tirages ne
+s'alignent pas positionnellement avec le corpus, la garde bride les macros là où elles
+servent. La précondition devra être SÉMANTIQUE (`ctx`, cartes posées), pas positionnelle.
+
+*2. PHS* canonique (`--phs-canonical`, coût (d+h)/π du papier au lieu de notre facteur e^h) :
+NEUTRE sur l'étalon 0* — contrôle et best identiques, −1,7 % d'expansions (bruit). Attendu :
+h ≈ 1 aux racines de ce montage, les deux formes y coïncident presque. Le vrai juge est
+l'étalon A (h_root = 4-6), où e^h et d+h divergent massivement — à trancher là-bas avant tout
+défaut. Le flag existe, la garantie du papier est disponible au prix d'un drapeau.
+
+*3. Snapshots Go-Explore aux cellules d'archive : RÉSOLU PAR L'INSTRUMENT, non rentable.* La
+sonde `kPrefix` (rejeu de préfixe des racines) affiche **0,0 %** dans tous les profils de
+l'étalon 0 depuis `dive_full` — l'hypothèse « restaurer les racines par memcpy comme
+Go-Explore » n'a plus de charge utile à récupérer. Évalué, écarté, rien à implémenter.
+
+**(h) Où en est le chantier performance, en trois nombres.** `Process` au par-appel (phase
 tirages, même sonde) : 27,2 µs (pré-optimisation) → 23,6 (LTO+C20+C22, re-mesuré ce jour sur
 le même montage) → **18,6 (PGO)**, soit −32 % par appel. Finisseur : **+92 % d'expansions à
-temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et l'INSTRUMENT a
-changé de statut : le compteur de tirages/états à graine fixée est déclassé pour l'A/B de
-débit ; le par-appel sous `--profile` et les contrôles exhaustifs déterministes le remplacent.
+temps égal** (pile de plongée complète), l'ordre d'extraction inchangé. Et sur l'EXPOSANT :
+les options sélectionnées par perte de Levin (g) rendent **8/8 sur 3 runs sur 3** et des ≥3
+résolutions au-dessus du témoin sur toutes les paires — le premier mécanisme de MASSE gagnant
+du projet. L'INSTRUMENT a aussi changé de statut : le compteur de tirages/états à graine
+fixée est déclassé pour l'A/B de débit ; le par-appel sous `--profile`, les contrôles
+exhaustifs déterministes et les sorties structurelles (≥k résolutions, best) le remplacent.
 
-**Ce qui reste, par rendement estimé décroissant :** (1) les OPTIONS dans leur forme
-CONDITIONNÉE — le mécanisme existe et est instrumenté ((f) : contexte ou fenêtre de position ;
-la forme libre est réfutée) ; (2) le coût fixe d'arène du finisseur (44,5 % de la phase :
-stride de pile, journaux plus légers, ou Restore paresseux) ; (3) `Adv::Goal` traité comme
-`Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché). Les réserves d'usage :
-`dive_full` tient sur UN run par bras — mais son contrôle est l'identité exhaustive
-(42/b=0/ÉPUISÉ, mêmes `best` par racine), pas un compteur ; PGO tient sur des distributions
-disjointes ×3.
+**Ce qui reste, par rendement estimé décroissant :** (1) pousser les options gagnantes —
+précondition SÉMANTIQUE (`ctx` ; la positionnelle est réfutée), corpus plus riche, et un run
+long pour convertir les 8/8 en lignes complètes avec rips ; (2) `--phs-canonical` à juger sur
+l'étalon A (h_root = 4-6, là où e^h et d+h divergent) ; (3) le coût fixe d'arène du finisseur
+(44,5 % de la phase : stride de pile, journaux plus légers, ou Restore paresseux) ;
+(4) `Adv::Goal` traité comme `Adv::Dead` dans `advance()` (9.18 (g), toujours non tranché).
+Les réserves d'usage : `dive_full` tient sur UN run par bras — mais son contrôle est
+l'identité exhaustive (42/b=0/ÉPUISÉ, mêmes `best` par racine), pas un compteur ; PGO tient
+sur des distributions disjointes ×3 ; les options tiennent sur 6/6 paires structurelles.

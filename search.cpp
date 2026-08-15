@@ -1708,6 +1708,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const std::vector<uint64_t>* active_macro = nullptr;
 	size_t macro_pos = 0;
 	std::vector<std::pair<uint32_t, uint32_t>> applicable;   // (macro, choix)
+	// Decisions ENREGISTREES (choix multiples) depuis le debut du tirage :
+	// l'unite dans laquelle les positions du corpus sont exprimees — la
+	// fenetre de proposition des macros se compare a ce compteur, pas a la
+	// profondeur en prompts (qui compte aussi les coups forces).
+	uint32_t nsteps = 0;
 
 	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
 		if(BudgetExhausted()) {
@@ -1901,12 +1906,21 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// biais repertoire, 82 % des prises avortaient apres ~1,3 pas).
 			applicable.clear();
 			if(cfg.options) {
+				const uint32_t W = cfg.options->window;
 				for(size_t i = 0; i < choices.size(); ++i) {
 					auto it = cfg.options->by_first.find(choices[i].plan_key);
 					if(it == cfg.options->by_first.end())
 						continue;
-					applicable.emplace_back(it->second.front(),
-											static_cast<uint32_t>(i));
+					// Precondition-proxy : la macro n'est proposee qu'a
+					// portee de fenetre de sa position d'origine dans le
+					// corpus — le meme test que le modele de selection.
+					for(uint32_t mi : it->second) {
+						const uint32_t p = cfg.options->pos[mi];
+						if(W && (nsteps + W < p || nsteps > p + W))
+							continue;
+						applicable.emplace_back(mi, static_cast<uint32_t>(i));
+						break;   // une macro par premiere cle
+					}
 				}
 				for(const auto& [mi, ci] : applicable) {
 					const double w =
@@ -1960,6 +1974,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			run.steps.push_back(std::move(step));
 		}
 
+		if(choices.size() > 1)
+			++nsteps;
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 	}
@@ -2673,6 +2689,13 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				// constante : le best-first y est invariant.
 				lcost = std::log((std::max)(child.lam - 1.0, 1e-300)) +
 						static_cast<double>(cfg.levin_h) * hgoal;
+			} else if(cfg.phs_canonical) {
+				// PHS* du papier : (d + h)/pi. h s'ajoute a la profondeur —
+				// une carte manquante compte comme une decision de plus, pas
+				// comme un facteur e^h.
+				lcost = std::log(static_cast<double>(child.depth) + 1.0 +
+								 static_cast<double>(cfg.levin_h) * hgoal) -
+						child.logpi;
 			} else {
 				lcost = std::log(static_cast<double>(child.depth) + 1.0) +
 						static_cast<double>(cfg.levin_h) * hgoal - child.logpi;
@@ -3131,53 +3154,203 @@ OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
 	return out;
 }
 
-// Le MEME minage que ForecastOptionGain (support = occurrences dans le corpus,
-// gain brut = (longueur - 1) x support, les max_options premieres) — mais il
-// rend le catalogue EXECUTABLE au lieu d'une prevision : sequences, cle de
-// politique par macro (id propre dans le meme espace que les plan_key), et
-// index par premiere cle pour le test d'applicabilite au prompt.
+// Catalogue EXECUTABLE d'options (chantier 17, v3 apres l'audit) : minage des
+// sous-sequences du corpus, puis selection GLOUTONNE PAR PERTE DE LEVIN au
+// lieu du gain brut — le critere du papier (2410.11262). Le modele evalue,
+// sous politique uniforme, Sigma log10(b_i + proposables_i) le long de chaque
+// ligne avec la MEILLEURE segmentation (programmation dynamique) : une macro
+// paie sa presence au denominateur PARTOUT ou elle est proposable, et ne
+// crédite que la ou la ligne l'a jouee. La selection s'arrete quand plus
+// aucun candidat n'ameliore la perte : la taille du catalogue est un RESULTAT,
+// pas un parametre — max_options n'est qu'un plafond.
 OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 								size_t max_options, uint32_t min_support,
-								size_t max_len) {
+								size_t max_len, uint32_t window) {
 	OptionCatalog cat;
-	std::vector<std::vector<uint64_t>> played;
+	cat.window = window;
+	// 1. Les lignes : coup joue, largeur legale et cles legales par decision.
+	struct Line {
+		std::vector<uint64_t> played;
+		std::vector<uint32_t> legal;
+		std::vector<const std::vector<uint64_t>*> keys;
+	};
+	std::vector<Line> lines;
 	for(const NrpaRun& r : runs) {
 		if(r.steps.empty())
 			continue;
-		played.emplace_back();
-		for(const PolicyStep& s : r.steps)
-			played.back().push_back(s.keys[s.chosen]);
+		lines.emplace_back();
+		for(const PolicyStep& s : r.steps) {
+			lines.back().played.push_back(s.keys[s.chosen]);
+			lines.back().legal.push_back(static_cast<uint32_t>(
+				(std::max)(s.keys.size(), size_t{ 1 })));
+			lines.back().keys.push_back(&s.keys);
+		}
 	}
-	std::map<std::vector<uint64_t>, uint32_t> support;
-	for(const std::vector<uint64_t>& seq : played)
-		for(size_t i = 0; i < seq.size(); ++i)
-			for(size_t len = 2; len <= max_len && i + len <= seq.size(); ++len)
-				++support[std::vector<uint64_t>(seq.begin() + i,
-												seq.begin() + i + len)];
-	std::vector<std::pair<double, const std::vector<uint64_t>*>> ranked;
-	for(const auto& [seq, n] : support) {
-		if(n < min_support)
+	if(lines.empty())
+		return cat;
+
+	// 2. Le vivier : sous-sequences a support >= min_support, position
+	// moyenne d'occurrence, plafonne aux 1024 meilleures au gain brut (le
+	// glouton exact sur tout le treillis couterait un ordre de plus).
+	struct Cand {
+		std::vector<uint64_t> seq;
+		uint32_t n = 0;
+		uint32_t pos = 0;
+		double brut = 0;
+	};
+	std::map<std::vector<uint64_t>, std::pair<uint32_t, uint64_t>> sup;
+	for(const Line& L : lines)
+		for(size_t i = 0; i < L.played.size(); ++i)
+			for(size_t len = 2; len <= max_len && i + len <= L.played.size();
+				++len) {
+				auto& e = sup[std::vector<uint64_t>(
+					L.played.begin() + i, L.played.begin() + i + len)];
+				++e.first;
+				e.second += i;
+			}
+	std::vector<Cand> pool;
+	for(auto& [seq, e] : sup) {
+		if(e.first < min_support)
 			continue;
-		ranked.emplace_back(static_cast<double>(n) *
-								static_cast<double>(seq.size() - 1),
-							&seq);
+		pool.push_back({ seq, e.first,
+						 static_cast<uint32_t>(e.second / e.first),
+						 static_cast<double>(e.first) *
+							 static_cast<double>(seq.size() - 1) });
 	}
-	std::sort(ranked.begin(), ranked.end(),
-			  [](const auto& a, const auto& b) {
-				  if(a.first != b.first) return a.first > b.first;
-				  return a.second->size() > b.second->size();
-			  });
-	for(const auto& [gain, seq] : ranked) {
-		if(cat.seqs.size() >= max_options)
+	std::sort(pool.begin(), pool.end(), [](const Cand& a, const Cand& b) {
+		if(a.brut != b.brut) return a.brut > b.brut;
+		return a.seq.size() > b.seq.size();
+	});
+	constexpr size_t kPool = 1024;
+	if(pool.size() > kPool)
+		pool.resize(kPool);
+	if(pool.empty())
+		return cat;
+
+	// 3. Pre-calculs par position globale : ou chaque candidat est PROPOSABLE
+	// (premiere cle legale + fenetre — le meme test que le rollout) et ou il
+	// est JOUE (la ligne a joue exactement sa sequence ici).
+	std::vector<size_t> line_base(lines.size());
+	size_t total = 0;
+	for(size_t li = 0; li < lines.size(); ++li) {
+		line_base[li] = total;
+		total += lines[li].played.size();
+	}
+	std::unordered_map<uint64_t, std::vector<uint32_t>> cand_by_first;
+	for(size_t ci = 0; ci < pool.size(); ++ci)
+		cand_by_first[pool[ci].seq.front()].push_back(
+			static_cast<uint32_t>(ci));
+	auto in_window = [&](const Cand& c, size_t i) {
+		if(!window)
+			return true;
+		const uint32_t p = c.pos;
+		return i + window >= p && i <= size_t{ p } + window;
+	};
+	std::vector<std::vector<uint32_t>> proposable(total), playable(total);
+	for(size_t li = 0; li < lines.size(); ++li) {
+		const Line& L = lines[li];
+		for(size_t i = 0; i < L.played.size(); ++i) {
+			const size_t g = line_base[li] + i;
+			for(uint64_t k : *L.keys[i]) {
+				auto it = cand_by_first.find(k);
+				if(it == cand_by_first.end())
+					continue;
+				for(uint32_t ci : it->second)
+					if(in_window(pool[ci], i) &&
+					   (proposable[g].empty() || proposable[g].back() != ci))
+						proposable[g].push_back(ci);
+			}
+			auto it = cand_by_first.find(L.played[i]);
+			if(it == cand_by_first.end())
+				continue;
+			for(uint32_t ci : it->second) {
+				const auto& s = pool[ci].seq;
+				if(in_window(pool[ci], i) && i + s.size() <= L.played.size() &&
+				   std::equal(s.begin(), s.end(), L.played.begin() + i))
+					playable[g].push_back(ci);
+			}
+		}
+	}
+
+	// 4. Selection gloutonne. prop_count[g] = proposables du catalogue
+	// courant a la position g ; l'evaluation d'un candidat ajoute son propre
+	// bit a la volee. Faisceau : les 64 meilleurs candidats bruts restants.
+	std::vector<uint32_t> prop_count(total, 0);
+	std::vector<char> chosen_mask(pool.size(), 0);
+	std::vector<double> cost;
+	auto loss = [&](int extra) -> double {
+		double sum = 0;
+		for(size_t li = 0; li < lines.size(); ++li) {
+			const Line& L = lines[li];
+			const size_t n = L.played.size();
+			cost.assign(n + 1, 0.0);
+			for(size_t i = n; i-- > 0;) {
+				const size_t g = line_base[li] + i;
+				uint32_t extra_here = 0;
+				if(extra >= 0)
+					for(uint32_t ci : proposable[g])
+						if(ci == static_cast<uint32_t>(extra)) {
+							extra_here = 1;
+							break;
+						}
+				const double denom = std::log10(static_cast<double>(
+					L.legal[i] + prop_count[g] + extra_here));
+				double best = denom + cost[i + 1];
+				for(uint32_t ci : playable[g])
+					if(chosen_mask[ci] ||
+					   (extra >= 0 && ci == static_cast<uint32_t>(extra))) {
+						const double c =
+							denom + cost[i + pool[ci].seq.size()];
+						best = (std::min)(best, c);
+					}
+				cost[i] = best;
+			}
+			sum += cost[0];
+		}
+		return sum / static_cast<double>(lines.size());
+	};
+	cat.model_flat = loss(-1);
+	double current = cat.model_flat;
+	std::vector<uint32_t> chosen;
+	constexpr size_t kBeam = 64;
+	while(chosen.size() < max_options) {
+		double best_loss = current;
+		int best_ci = -1;
+		size_t seen = 0;
+		for(size_t ci = 0; ci < pool.size() && seen < kBeam; ++ci) {
+			if(chosen_mask[ci])
+				continue;
+			++seen;
+			const double l = loss(static_cast<int>(ci));
+			if(l < best_loss) {
+				best_loss = l;
+				best_ci = static_cast<int>(ci);
+			}
+		}
+		// Plus aucun candidat du faisceau n'ameliore la perte : le catalogue
+		// a atteint sa taille NATURELLE.
+		if(best_ci < 0)
 			break;
-		cat.seqs.push_back(*seq);
+		chosen_mask[best_ci] = 1;
+		chosen.push_back(static_cast<uint32_t>(best_ci));
+		current = best_loss;
+		for(size_t g = 0; g < total; ++g)
+			for(uint32_t ci : proposable[g])
+				if(ci == static_cast<uint32_t>(best_ci)) {
+					++prop_count[g];
+					break;
+				}
+	}
+	cat.model_opt = current;
+
+	// 5. Le catalogue, dans l'ordre de selection (front() = la meilleure).
+	for(uint32_t ci : chosen) {
+		cat.seqs.push_back(pool[ci].seq);
+		cat.pos.push_back(pool[ci].pos);
 	}
 	for(size_t m = 0; m < cat.seqs.size(); ++m) {
-		// Identite de la macro dans l'espace des poids. Les plan_key sont des
-		// hachages 64 bits arbitraires : une collision id/cle reelle est du
-		// meme ordre qu'une collision entre deux plan_key — negligee des deux
-		// cotes. Le sel evite qu'une macro d'UNE cle (impossible ici,
-		// longueur >= 2) ne s'identifie a cette cle.
+		// Identite de la macro dans l'espace des poids. Collision id/plan_key
+		// du meme ordre qu'entre deux plan_key : negligee des deux cotes.
 		uint64_t id = 0x9E3779B97F4A7C15ull;
 		for(uint64_t k : cat.seqs[m])
 			id = (id ^ k) * 0x100000001B3ull;

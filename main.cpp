@@ -826,6 +826,13 @@ struct Options {
 	uint32_t options_n = 0;
 	uint32_t options_support = 2;
 	uint32_t options_len = 8;
+	// Fenetre de proposition (v3) : une macro n'est proposee qu'a +/- window
+	// decisions enregistrees de sa position d'origine dans le corpus.
+	// 0 = pas de garde.
+	uint32_t options_window = 0;
+	// PHS* canonique (audit s12) : cout (d + h)/pi du papier au lieu de notre
+	// log(d+1) + h - log pi (facteur e^h, sans garantie).
+	bool phs_canonical = false;
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
@@ -1177,6 +1184,12 @@ void Usage() {
 		"                     le gros catalogue : 256.\n"
 		"  --options-support <n>  occurrences minimales d'une macro (defaut 2)\n"
 		"  --options-len <n>  longueur maximale d'une macro (defaut 8)\n"
+		"  --options-window <n>  ne proposer une macro qu'a +/- n decisions de\n"
+		"                     sa position d'origine dans le corpus (defaut 0 =\n"
+		"                     pas de garde). La precondition-proxy de la v3.\n"
+		"  --phs-canonical    finisseur : cout PHS* du papier, (d + h)/pi, au\n"
+		"                     lieu de log(d+1) + h - log pi (facteur e^h,\n"
+		"                     plus agressif, sans la garantie du papier)\n"
 		"  --nrpa-temp <t>    temperature du softmax des tirages (defaut 1.0).\n"
 		"                     t < 1 concentre la masse sur les coups les mieux\n"
 		"                     classes SANS changer le classement — le seul\n"
@@ -1476,6 +1489,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--options-len") {
 			const char* v = next("--options-len"); if(!v) return false;
 			o.options_len = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--options-window") {
+			const char* v = next("--options-window"); if(!v) return false;
+			o.options_window = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--phs-canonical") {
+			o.phs_canonical = true;
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
@@ -5309,20 +5327,26 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		} else {
 			option_catalog = MineOptionCatalog(adapt_runs, opt.options_n,
 											   opt.options_support,
-											   opt.options_len);
+											   opt.options_len,
+											   opt.options_window);
 			size_t max_len = 0, sum_len = 0;
 			for(const auto& s : option_catalog.seqs) {
 				max_len = (std::max)(max_len, s.size());
 				sum_len += s.size();
 			}
-			std::printf("\n  options : %zu macro(s) minee(s) (support >= %u, "
-						"longueur 2-%zu, moyenne %.1f) sur %zu ligne(s) de "
-						"corpus\n",
-						option_catalog.Size(), opt.options_support, max_len,
+			// La taille est un RESULTAT de la selection par perte de Levin
+			// (elle s'arrete quand plus rien n'ameliore), pas le parametre.
+			std::printf("\n  options : %zu macro(s) retenue(s) sur plafond %u "
+						"(support >= %u, longueur 2-%zu, moyenne %.1f, fenetre "
+						"%s%u) ; perte modele %.1f -> %.1f log10\n",
+						option_catalog.Size(), opt.options_n,
+						opt.options_support, max_len,
 						option_catalog.Size()
 							? double(sum_len) / double(option_catalog.Size())
 							: 0.0,
-						adapt_runs.size());
+						opt.options_window ? "+/-" : "",
+						opt.options_window,
+						option_catalog.model_flat, option_catalog.model_opt);
 		}
 	}
 
@@ -5398,6 +5422,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
 	cfg.dive_full = opt.dive_full;
 	cfg.lifo_ties = opt.lifo_ties;
+	cfg.phs_canonical = opt.phs_canonical;
 	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
 	if(opt.hint_bias >= 0)
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);

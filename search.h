@@ -465,13 +465,35 @@ OptionForecast ForecastOptionGain(const std::vector<NrpaRun>& runs,
 struct OptionCatalog {
 	std::vector<std::vector<uint64_t>> seqs;
 	std::vector<uint64_t> ids;   // cle de politique de chaque macro
-	// premiere cle -> indices des macros qui commencent par elle
+	// Position MOYENNE (en decisions enregistrees) des occurrences de la
+	// macro dans le corpus : la precondition-proxy. Les macro-operateurs de
+	// la litterature portent des preconditions ; sans elles, une sous-
+	// sequence minee aux decisions 40-47 est proposee des la decision 5, ou
+	// sa premiere cle est legale mais pas sa suite (9.19 (f)).
+	std::vector<uint32_t> pos;
+	// premiere cle -> indices des macros qui commencent par elle (ordre de
+	// selection : front() = la mieux classee)
 	std::unordered_map<uint64_t, std::vector<uint32_t>> by_first;
+	// Fenetre de proposition : la macro n'est proposee qu'a
+	// |decision courante - pos| <= window. 0 = pas de garde.
+	uint32_t window = 0;
+	// Perte de Levin MODELE (log10, moyenne par ligne, politique uniforme)
+	// sans puis avec le catalogue : l'instrument de la selection.
+	double model_flat = 0, model_opt = 0;
 	size_t Size() const { return seqs.size(); }
 };
+// Selection GLOUTONNE PAR PERTE DE LEVIN (Alikhasi & Lelis 2410.11262) et non
+// plus par gain brut support x (longueur - 1) : chaque macro ajoutee grossit
+// le denominateur de TOUTES les decisions ou elle est proposable — la
+// selection s'arrete d'elle-meme quand ce cout depasse l'absorption. C'est le
+// correctif du premier A/B (9.19 (f) : le catalogue inondait le softmax).
+// Approximations documentees dans l'implementation : vivier plafonne aux 1024
+// meilleurs candidats bruts, faisceau de 64 par tour, denominateur non plafonne
+// a une macro par premiere cle (la realite est moins chere que le modele), et
+// le terme log10(d) du papier neglige (~2 contre ~87).
 OptionCatalog MineOptionCatalog(const std::vector<NrpaRun>& runs,
 								size_t max_options, uint32_t min_support,
-								size_t max_len);
+								size_t max_len, uint32_t window);
 
 // PLAFOND de la famille de politiques, mesure sur le corpus lui-meme.
 //
@@ -1131,6 +1153,13 @@ struct SearchConfig {
 	// Catalogue de macros propose a l'echantillonnage NRPA (nul = eteint,
 	// comportement d'avant a l'octet pres). Voir OptionCatalog.
 	const OptionCatalog* options = nullptr;
+	// PHS* CANONIQUE (audit session 12) : le cout du papier (2103.11505) est
+	// (d + h)/pi — log(d + levin_h*h) - log pi — l'heuristique s'AJOUTE a la
+	// profondeur et la borne d'expansions est preservee. Notre forme par
+	// defaut, log(d+1) + levin_h*h - log pi, multiplie le cout par
+	// exp(levin_h*h) : une ponderation type weighted-A*, plus agressive, SANS
+	// la garantie — elle portait le nom du papier sans en etre. A/B etalon 0.
+	bool phs_canonical = false;
 	// --- graphe de recettes (chantier 16) ---
 	// Non nul : le graphe est ALIMENTE par les invocations observees, et `h`
 	// devient la distance sur ce graphe au lieu du compte de cartes manquantes.
