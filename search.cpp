@@ -430,7 +430,8 @@ Search::Step Search::StepToPrompt() {
 }
 
 uint64_t Search::Digest() const {
-	return StateDigest(const_cast<Duel&>(duel), prompt_type, prompt_payload);
+	return StateDigest(const_cast<Duel&>(duel), prompt_type, prompt_payload,
+					   cfg.canonical_digest);
 }
 
 bool Search::FillChoices(ChoiceList& out) {
@@ -470,8 +471,96 @@ bool Search::FillChoices(ChoiceList& out) {
 	return true;
 }
 
+// ATTRIBUTION DU DIGEST (session 17) — decoupe la cle de transposition en ses
+// trois composantes, SANS changer sa valeur.
+//
+// LA QUESTION : aux points stables (prompt idle), le solveur maintient 284 etats
+// distincts par BOARD, et le rapport CROIT avec la profondeur. La cle vaut
+// zones + type + charge utile du prompt + etat du processeur ; les zones cachees
+// sont deja canonicalisees par tri, donc le gonflement vient des deux derniers.
+// LESQUELS, et dans quelle proportion ? Sans cette reponse, corriger serait
+// parier — et la regle du dossier est l'attribution avant le correctif.
+//
+// `StateDigest` appelle cette fonction et combine EXACTEMENT dans le meme ordre :
+// la valeur produite est identique a l'octet pres, donc aucune mesure anterieure
+// n'est invalidee.
+DigestParts StateDigestParts(Duel& d, uint8_t prompt_type,
+							 const std::vector<uint8_t>& prompt_payload) {
+	prof::Scope ps(prof::kDigest);
+	static thread_local std::vector<QueriedCard> cards;
+	static thread_local std::vector<uint64_t> entries;
+	DigestParts out;
+	uint64_t h = 0xcbf29ce484222325ull;
+	// VARIANTE TRIEE du terrain, calculee en parallele et sans rien changer a
+	// `h` : c'est elle qui ISOLE LE PRIX DE LA COLONNE. `StateDigest` conserve
+	// l'ordre des zones de terrain (« la colonne pouvant compter : fleches de
+	// lien, effets colonne-dependants ») — c'est un choix CONSERVATEUR, pas une
+	// necessite, et `BoardKey` l'ignore explicitement de son cote. L'ecart entre
+	// `zones` et `zones_sorted` dit exactement ce que ce choix coute.
+	uint64_t hs = 0xcbf29ce484222325ull;
+	static thread_local std::vector<uint64_t> field;
+	for(uint8_t con = 0; con < 2; ++con) {
+		field.clear();
+		for(uint32_t loc : { LOCATION_MZONE, LOCATION_SZONE }) {
+			h = Mix(h, loc * 131ull + con);
+			d.Query(con, loc, kBoardFlags, cards);
+			for(const auto& c : cards) {
+				if(!c.present) { h = Mix(h, 1); continue; }
+				const uint64_t e = EntryOf(loc, c, d.Db());
+				h = Mix(h, e);
+				// La zone entre dans l'entree triee, la COLONNE non : deux
+				// monstres qui echangent leurs colonnes donnent la meme valeur.
+				field.push_back(e ^ (loc * 0x9e3779b97f4a7c15ull));
+			}
+		}
+		std::sort(field.begin(), field.end());
+		hs = Mix(hs, con);
+		for(uint64_t e : field)
+			hs = Mix(hs, e);
+		for(uint32_t loc : { LOCATION_HAND, LOCATION_GRAVE, LOCATION_REMOVED,
+							 LOCATION_EXTRA }) {
+			entries.clear();
+			d.Query(con, loc, kHiddenFlags, cards);
+			for(const auto& c : cards)
+				if(c.present)
+					entries.push_back(EntryOf(loc, c, d.Db()));
+			std::sort(entries.begin(), entries.end());
+			h = Mix(h, loc * 131ull + con);
+			hs = Mix(hs, loc * 131ull + con);
+			for(uint64_t e : entries) {
+				h = Mix(h, e);
+				hs = Mix(hs, e);
+			}
+		}
+		h = Mix(h, d.Count(con, LOCATION_DECK));
+		hs = Mix(hs, d.Count(con, LOCATION_DECK));
+	}
+	out.zones = h;
+	out.zones_sorted = hs;
+	h = Mix(h, prompt_type);
+	h = MixBytes(h, prompt_payload.data(), prompt_payload.size());
+	out.with_payload = h;
+	const std::vector<uint8_t>& pstate = d.ProcessorState();
+	out.procstate = MixBytes(0xcbf29ce484222325ull, pstate.data(), pstate.size());
+	out.full = MixBytes(h, pstate.data(), pstate.size());
+	return out;
+}
+
 uint64_t StateDigest(Duel& d, uint8_t prompt_type,
-					 const std::vector<uint8_t>& prompt_payload) {
+					 const std::vector<uint8_t>& prompt_payload,
+					 bool sort_field) {
+	// CANONICALISATION DES COLONNES (session 17). Le chemin trie passe par
+	// StateDigestParts, qui calcule les deux variantes : c'est deux fois plus
+	// cher, mais ce chemin n'est pris QUE sous le drapeau. Le chemin par defaut
+	// ci-dessous est inchange a l'octet pres.
+	if(sort_field) {
+		const DigestParts p = StateDigestParts(d, prompt_type, prompt_payload);
+		// Meme composition que la version ordonnee, en partant du terrain trie.
+		uint64_t h = Mix(p.zones_sorted, prompt_type);
+		h = MixBytes(h, prompt_payload.data(), prompt_payload.size());
+		const std::vector<uint8_t>& ps2 = d.ProcessorState();
+		return MixBytes(h, ps2.data(), ps2.size());
+	}
 	// Self : les 12 Query, les 2 Count et le ProcessorState internes vont a
 	// leurs propres sondes ; ici ne reste que EntryOf + tri + melange.
 	prof::Scope ps(prof::kDigest);
@@ -599,6 +688,21 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 			++stats.states_idle;
 			seen_idle.insert(board_scratch.hash);
 			stats.boards_idle = seen_idle.size();
+			// ATTRIBUTION : les memes noeuds, comptes par composante de la cle.
+			// C'est l'ecart entre ces quatre nombres qui designe le coupable —
+			// corriger sans cette lecture serait un pari.
+			const DigestParts dp =
+				StateDigestParts(duel, prompt_type, prompt_payload);
+			dz_set.insert(dp.zones);
+			dzs_set.insert(dp.zones_sorted);
+			dp_set.insert(dp.with_payload);
+			dpr_set.insert(dp.procstate);
+			df_set.insert(dp.full);
+			stats.d_zones = dz_set.size();
+			stats.d_zsort = dzs_set.size();
+			stats.d_payload = dp_set.size();
+			stats.d_proc = dpr_set.size();
+			stats.d_full = df_set.size();
 		}
 		stats.boards_entries = seen_boards.size();
 		stats.boards_loose = seen_loose.size();

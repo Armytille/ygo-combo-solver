@@ -5135,6 +5135,67 @@ choisissent donc pas de sortir de la MP1 : **ils en sortent parce qu'ils n'ont p
 « Coupure de tour à 100 % » est la **fin normale** d'un tirage, pas une pathologie — et le compteur
 doit être relu ainsi partout dans le dossier.
 
+#### (j) LA CLÉ DE TRANSPOSITION VAUT 200 FOIS LE NOMBRE DE BOARDS — attribution et correctif
+
+Objection de l'opérateur : « 99 386 états à profondeur 20 paraît absurdement grand ; combien de
+BOARDS différents peut-on faire, la position et l'emplacement n'ayant aucune importance ? » Le
+solveur comptait des **états** et n'avait jamais compté les **boards**. `--growth` le fait désormais,
+à trois granularités, et surtout **aux points STABLES** (prompt idle — le seul instant où le board
+est formé et où deux états de même board *devraient* être le même nœud) :
+
+| prof. | états | b.exact | états idle | **boards idle** | rapport |
+|---|---|---|---|---|---|
+| 14 | 11 283 | 24 | 564 | 14 | 40 : 1 |
+| 20 | 99 386 | 61 | 5 955 | 43 | 138 : 1 |
+| 24 | 271 842 | 68 | 17 634 | 62 | **284 : 1** |
+
+**Les 99 386 états de la profondeur 20 sont 43 boards.** L'opérateur avait raison, et le rapport
+**croît** avec la profondeur.
+
+**ATTRIBUTION, avant tout correctif** (`StateDigestParts` découpe la clé sans changer sa valeur —
+`full` est identique à l'octet près à ce que rendait `StateDigest`) :
+
+```
+board (BoardKey)                          65   x1.0
++ etat de jeu, COLONNES CONFONDUES       257   x4.0     <- legitime (materiaux)
++ la COLONNE distingue                  9584   x147.4   <== x37.3 pour ELLE SEULE
++ charge utile du prompt               13639   x209.8   <- x1.42
++ etat du processeur (= cle reelle)    13639   x209.8   <- x1.00 (pile vide ici)
+```
+
+Trois résultats d'un coup : le `ProcessorState` n'ajoute **rien** aux points idle (sa pile y est
+vide) ; la charge utile du prompt ne coûte que ×1,42 ; **la colonne est le premier poste et de très
+loin**. Et c'est le seul qui soit du bruit — `BoardKey` l'ignore explicitement, le critère de but
+l'ignore, deux monstres qui échangent leurs colonnes réalisent la même intention.
+
+**`--canonical-digest`** trie donc le terrain avant de le hacher. Opt-in, et pour une raison qui
+s'est révélée fondée : **les flèches de LIEN pointent des colonnes**, et une zone pointée autorise
+une invocation depuis l'extra deck. `main` lit `TYPE_LINK` dans l'extra deck et avertit.
+
+**MESURE — et elle corrige une erreur de raisonnement de la session.**
+
+| | témoin | `--canonical-digest` |
+|---|---|---|
+| états à profondeur 24 | 271 842 | **162 639** (×1,67) |
+| profondeur atteinte à budget égal | 26 (*temps*) | **30 (*épuisé*)** |
+| étalon A nu, 90 s : Perfume / Sabre | 20 819 / 2 205 | 11 101 / 179 |
+
+Le gain sur l'exhaustif est réel et reproductible (sans graine) : **+4 profondeurs**. Mais il vaut
+**×1,67**, pas ×37. **L'erreur** : l'attribution mesure le prix d'une composante *aux seuls points
+idle*, et j'ai extrapolé ce prix à tous les nœuds — or les points idle sont une **minorité** des
+nœuds, et aux prompts intermédiaires c'est le `ProcessorState` qui domine (698 → 1 220 valeurs
+distinctes). Une attribution sur un sous-ensemble ne se transporte pas à l'ensemble.
+
+**Sur le juge de recherche, le mécanisme est RÉFUTÉ pour ce deck** (poses divisées par 2 et par 12),
+avec une cause nommée : **3 monstres Lien dans la decklist**. Il reste opt-in et pourrait valoir sur
+un deck sans Lien — non mesuré. Santé identique, chemin par défaut inchangé à l'octet près.
+
+**Ce que l'attribution laisse comme piste** : la majorité des nœuds ne sont pas des points stables.
+Le levier restant n'est donc pas d'affiner la clé mais de **ne pas mettre les états intermédiaires
+dans la table** — c'est-à-dire chercher sur les macro-transitions d'un idle au suivant. Le dossier a
+déjà le chiffre qui le chiffre : 141 des 284 décisions de la ligne sont FORCÉES, et « profondeur
+après élision : 143 au lieu de 284 ».
+
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 
 | bras | tirages | Perfume | Sabre | coupures de tour |

@@ -183,8 +183,55 @@ private:
 //
 // Sous-hacher fusionne des etats distincts et fait DISPARAITRE des solutions
 // sans le signaler : c'est le mode de defaillance a surveiller.
+// `sort_field` : confondre les COLONNES du terrain (chantier de la session 17).
+//
+// CE QUE CELA CORRIGE, mesure avant d'etre ecrit. Aux points stables (prompt
+// idle), la cle prend 7 033 valeurs distinctes pour 51 boards. L'attribution,
+// composante par composante :
+//     board (BoardKey)                    51   x1.0
+//     + etat de jeu, colonnes confondues 151   x3.0    <- legitime (materiaux)
+//     + la COLONNE distingue            5088   x99.8   <- x33.7 pour ELLE SEULE
+//     + charge utile du prompt          7033   x137.9  <- x1.38
+//     + etat du processeur              7033   x137.9  <- x1.00 (pile vide ici)
+// La colonne est de loin le premier poste, et c'est le seul qui soit du BRUIT :
+// `BoardKey` l'ignore explicitement, le critere de but l'ignore, et deux
+// monstres qui echangent leurs colonnes realisent la meme intention.
+//
+// POURQUOI C'EST OPT-IN MALGRE CA. Les FLECHES DE LIEN pointent des colonnes, et
+// une zone pointee autorise une invocation depuis l'extra deck : confondre les
+// colonnes peut alors fusionner deux etats qui ne sont PAS equivalents, et
+// SUPPRIMER une solution en silence — le mode de defaillance que ce dossier
+// redoute le plus (piege 47). L'appelant doit donc l'activer sciemment, et
+// `main` avertit si le deck contient un monstre Lien.
 uint64_t StateDigest(Duel& duel, uint8_t prompt_type,
-					 const std::vector<uint8_t>& prompt_payload);
+					 const std::vector<uint8_t>& prompt_payload,
+					 bool sort_field = false);
+
+// COMPOSANTES de la cle de transposition, pour l'ATTRIBUTION (session 17).
+// `full` est EXACTEMENT ce que rend StateDigest — la decoupe ne change aucune
+// valeur, elle expose seulement les etapes intermediaires :
+//   zones        : les six zones des deux joueurs + comptes de deck. Les zones
+//                  CACHEES y sont deja canonicalisees par tri.
+//   with_payload : zones + type de prompt + charge utile du prompt.
+//   procstate    : l'etat du processeur SEUL (pile de resolution).
+//   full         : with_payload + procstate.
+// Le nombre de valeurs DISTINCTES de chacune, compte aux memes noeuds, dit
+// laquelle fait exploser la table — et de combien.
+struct DigestParts {
+	uint64_t zones = 0;
+	// La MEME chose, mais le terrain TRIE au lieu d'ordonne : la colonne cesse
+	// de distinguer. `StateDigest` conserve l'ordre « la colonne pouvant compter
+	// (fleches de lien, effets colonne-dependants) » — choix CONSERVATEUR, que
+	// `BoardKey` ne fait pas de son cote. L'ecart `zones` / `zones_sorted` EST
+	// le prix de ce choix, et c'est le seul chiffre qui dit s'il y a un
+	// correctif a faire.
+	uint64_t zones_sorted = 0;
+	uint64_t with_payload = 0;
+	uint64_t procstate = 0;
+	uint64_t full = 0;
+};
+DigestParts StateDigestParts(Duel& duel, uint8_t prompt_type,
+							 const std::vector<uint8_t>& prompt_payload);
 
 // Une etape de la ligne de reference, exprimee en CARTES et non en indices.
 //
@@ -1856,6 +1903,18 @@ struct SearchConfig {
 	// Cout : une requete de zone par noeud developpe. Reserve au mode --growth,
 	// qui est un mode de DIAGNOSTIC.
 	bool count_boards = false;
+	// CANONICALISATION DES COLONNES DANS LA CLE DE TRANSPOSITION (session 17).
+	// Le terrain est TRIE avant d'etre hache : deux etats qui ne different que
+	// par la colonne des cartes deviennent le meme noeud. Mesure d'attribution :
+	// x33,7 de valeurs distinctes en moins aux points stables, premier poste et
+	// de loin.
+	//
+	// NE PRUNE PAS L'ESPACE — aucune branche n'est retiree de l'enumeration,
+	// c'est la TABLE qui fusionne davantage. Mais fusionner peut couper : si
+	// deux etats confondus ne sont pas equivalents (fleches de LIEN), une
+	// solution disparait en silence. D'ou l'opt-in et l'avertissement de `main`.
+	// Filet : la verification finale rejoue chaque candidat depuis zero.
+	bool canonical_digest = false;
 
 	// Partition du travail entre workers. Le sous-arbre ouvert par la PREMIERE
 	// deviation est independant de tous les autres, ce qui permet de partager
@@ -2628,6 +2687,15 @@ struct SearchStats {
 	// intermediaires — et ne prouve rien.
 	uint64_t states_idle = 0;
 	size_t boards_idle = 0;
+	// ATTRIBUTION du gonflement, comptee AUX MEMES NOEUDS (points idle) :
+	// combien de valeurs DISTINCTES prend chaque composante de la cle. Lues
+	// ensemble, elles disent laquelle fait exploser la table et de combien —
+	// `d_zones` est le plancher (l'etat de jeu visible), `d_full` est la cle
+	// actuelle, et l'ecart entre `d_zones` et `d_payload` isole la charge utile.
+	size_t d_zones = 0, d_payload = 0, d_proc = 0, d_full = 0;
+	// Le meme etat de jeu, colonnes CONFONDUES. `d_zones / d_zsort` est le prix
+	// exact de la colonne dans la cle de transposition.
+	size_t d_zsort = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -3114,6 +3182,8 @@ private:
 	std::unordered_map<uint32_t, HindsightGoal> hindsight;
 	// BOARDS DISTINCTS (cfg.count_boards) — vides et jamais touches sinon.
 	std::unordered_set<uint64_t> seen_boards, seen_loose, seen_codes, seen_idle;
+	// Attribution : une valeur distincte par composante, aux points idle.
+	std::unordered_set<uint64_t> dz_set, dp_set, dpr_set, df_set, dzs_set;
 	// Changements de tour vus par le dernier StepToPrompt. Le board cible est
 	// celui de la fin du tour 1 : au-dela, il est fige et tout etat explore est
 	// du temps perdu.

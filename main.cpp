@@ -1232,6 +1232,12 @@ struct Options {
 	// fabriques entre dans la PARTITION de la table de nouveaute (Serialized IW
 	// sur la decomposition apprise, au lieu du but litteral).
 	bool backward = false;
+	// (5) --canonical-digest : confondre les COLONNES dans la cle de
+	// transposition. Mesure d'attribution (session 17, points stables) : la
+	// colonne vaut x33,7 de valeurs distinctes a elle seule, premier poste et de
+	// loin, devant la charge utile du prompt (x1,38) et l'etat du processeur
+	// (x1,00). Opt-in : les fleches de LIEN sont colonne-dependantes.
+	bool canonical_digest = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -2123,6 +2129,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			}
 		} else if(a == "--backward") {
 			o.backward = true;
+		} else if(a == "--canonical-digest") {
+			o.canonical_digest = true;
 		} else if(a == "--goal-bias") {
 			o.goal_bias = true;
 		} else if(a == "--watch") {
@@ -6504,6 +6512,46 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.hindsight_k = opt.hindsight_k;
 	cfg.recipe_weight = static_cast<float>(opt.recipe_weight);
 	cfg.backward = opt.backward;
+	// CANONICALISATION DES COLONNES DANS LA CLE (session 17). Avertissement
+	// AUTOMATIQUE et non decoratif : une fleche de Lien pointe une colonne, et
+	// une zone pointee autorise une invocation depuis l'extra deck — confondre
+	// les colonnes fusionnerait alors deux etats qui ne sont pas equivalents et
+	// SUPPRIMERAIT une solution en silence. On ne peut pas lire « effet
+	// colonne-dependant » dans la base, mais on peut lire TYPE_LINK, qui en est
+	// la source de tres loin la plus frequente.
+	cfg.canonical_digest = opt.canonical_digest;
+	if(opt.canonical_digest) {
+		size_t links = 0;
+		{
+			// L'EXTRA DECK est la seule zone ou vivent les monstres Lien ; on
+			// l'interroge sur le duel deja construit plutot que de re-lire la
+			// decklist, qui n'est pas dans cette portee.
+			std::vector<QueriedCard> xq;
+			duel.Query(static_cast<uint8_t>(opt.target_player), LOCATION_EXTRA,
+					   QUERY_CODE | QUERY_ALIAS, xq);
+			for(const QueriedCard& qc : xq)
+				if(qc.present)
+					if(const CardRow* r = db.Find(db.Canonical(qc.Code()));
+					   r && (r->type & TYPE_LINK))
+						++links;
+		}
+		std::printf("  --canonical-digest : les COLONNES sont confondues dans la "
+					"cle de transposition\n"
+					"                       (mesure : x33,7 de valeurs "
+					"distinctes en moins aux points stables)\n");
+		if(links)
+			std::printf("!! %zu monstre(s) LIEN dans la decklist : leurs FLECHES "
+						"pointent des colonnes.\n"
+						"   Confondre les colonnes peut fusionner deux etats NON "
+						"equivalents et supprimer\n"
+						"   une solution EN SILENCE. Le filet est la verification "
+						"finale, qui rejoue chaque\n"
+						"   candidat depuis zero — mais une solution jamais "
+						"trouvee ne s'y rattrape pas.\n", links);
+		else
+			std::printf("                       aucun monstre Lien dans la "
+						"decklist : aucune fleche ne depend d'une colonne.\n");
+	}
 	if(opt.assign || opt.recipe_weight > 0.0 || opt.backward) {
 		if(!cfg.recipes)
 			std::printf("!! --assign / --recipe-w / --backward sans graphe de "
@@ -8755,9 +8803,8 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 	// idle). C'est LEUR rapport qui mesure le prix de la cle de transposition —
 	// ailleurs on est au milieu d'une resolution et deux etats de meme board
 	// sont legitimement distincts.
-	std::printf("  %-6s %10s %8s %8s %8s %9s %8s %9s %7s\n", "prof.", "etats",
-				"b.exact", "b.lache", "b.codes", "et.idle", "b.idle", "duree",
-				"statut");
+	std::printf("  %-6s %10s %8s %8s %9s %8s %9s %7s\n", "prof.", "etats",
+				"b.exact", "b.codes", "et.idle", "b.idle", "duree", "statut");
 	uint64_t prev = 0;
 	for(uint32_t depth = 2; depth <= opt.growth_max; depth += 2) {
 		SearchConfig cfg;
@@ -8770,6 +8817,10 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 		// La question de l'operateur : combien de BOARDS, pas combien d'etats.
 		cfg.count_boards = true;
+		// Le correctif est mesurable ICI et nulle part mieux : `--growth` rend
+		// la PROFONDEUR atteinte a budget egal, qui est la grandeur que la
+		// fusion doit ameliorer.
+		cfg.canonical_digest = opt.canonical_digest;
 
 		Search search(duel, arena, yrp, cfg);
 		search.Run(target);
@@ -8778,11 +8829,10 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		const SearchStats& s = search.Stats();
 		const char* status = s.hit_time_limit ? "temps"
 							 : s.hit_node_limit ? "noeuds" : "epuise";
-		std::printf("  %-6u %10llu %8zu %8zu %8zu %9llu %8zu %6.0f ms %7s",
+		std::printf("  %-6u %10llu %8zu %8zu %9llu %8zu %6.0f ms %7s",
 					depth, (unsigned long long)s.nodes, s.boards_entries,
-					s.boards_loose, s.boards_codes,
-					(unsigned long long)s.states_idle, s.boards_idle, s.ms,
-					status);
+					s.boards_codes, (unsigned long long)s.states_idle,
+					s.boards_idle, s.ms, status);
 		if(prev)
 			std::printf("   x%.1f", double(s.nodes) / double(prev));
 		std::printf("\n");
@@ -8812,6 +8862,33 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 			std::printf("\n  terminaux : %llu   impasses : %llu\n",
 						(unsigned long long)s.terminals,
 						(unsigned long long)s.dead_ends);
+			// ATTRIBUTION DE LA CLE DE TRANSPOSITION, aux points STABLES.
+			// Chaque ligne ajoute une composante a la precedente : l'ecart entre
+			// deux lignes consecutives EST le prix de la composante ajoutee.
+			// Sans cette lecture, corriger la cle serait un pari.
+			if(s.d_full) {
+				std::printf("\n  attribution de la cle (valeurs distinctes aux "
+							"points idle) :\n");
+				std::printf("    board (BoardKey)                    %8zu   "
+							"x1.0\n", s.boards_idle);
+				auto rap = [&](size_t v) {
+					return s.boards_idle ? double(v) / double(s.boards_idle)
+										 : 0.0;
+				};
+				std::printf("    + etat de jeu, COLONNES CONFONDUES  %8zu   "
+							"x%.1f\n", s.d_zsort, rap(s.d_zsort));
+				std::printf("    + la COLONNE distingue              %8zu   "
+							"x%.1f   <== prix de la colonne : x%.2f\n",
+							s.d_zones, rap(s.d_zones),
+							s.d_zsort ? double(s.d_zones) / double(s.d_zsort)
+									  : 0.0);
+				std::printf("    + charge utile du prompt            %8zu   "
+							"x%.1f\n", s.d_payload, rap(s.d_payload));
+				std::printf("    + etat du processeur (= cle reelle) %8zu   "
+							"x%.1f\n", s.d_full, rap(s.d_full));
+				std::printf("    (le processeur SEUL vaut %zu valeurs "
+							"distinctes)\n", s.d_proc);
+			}
 		}
 		if(s.hit_time_limit || s.hit_node_limit) {
 			std::printf("\n  Arret : le budget est atteint des la profondeur %u,\n"
