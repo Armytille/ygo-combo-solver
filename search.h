@@ -2351,6 +2351,31 @@ struct SearchConfig {
 	// qu'il biaisait vers Liger, un coup qui n'existe pas encore ; celui-ci
 	// biaise vers ce qu'il faut faire AVANT.
 	float assign_bias = 0.0f;
+	// BIAIS D'OPERATEUR (--op-bias, chantier 2 de la session 19).
+	//
+	// CE QU'IL BIAISE, ET EN QUOI IL DIFFERE DE `--assign-bias`. Ce dernier
+	// designe des MATERIAUX et agit surtout sur les prompts de SELECTION (« quel
+	// Lunalight envoyer au cimetiere »). Celui-ci designe des OPERATEURS — les
+	// cartes dont la decomposition a rebours exige la PRESENCE SUR LE TERRAIN
+	// pour qu'une arete d'acquisition existe — et agit donc sur « que jouer ».
+	//
+	// POURQUOI CE PROMPT-LA, ET L'ARITHMETIQUE EST DANS LE DOSSIER. Le plan
+	// resolu compte 143 decisions LIBRES, dont 32 seulement sont des `IDLECMD`.
+	// La politique plafonne a 66 % d'accord par decision (9.13) ; il en faudrait
+	// 91 % pour esperer un succes sur 143. Mais `0,66^32 ~ 1,7e-6`, soit de
+	// l'ordre d'un succes par run de 90 s. Un plan ne remplace pas
+	// l'echantillonnage : il conditionne la distribution sur les 32 decisions
+	// qui comptent, et c'est le seul levier que l'arithmetique autorise.
+	//
+	// REGLE 2 DU CHANTIER 16, NON NEGOCIABLE : un plan est un BIAIS, jamais un
+	// elagage. Rien n'est retire de l'espace ; si le planificateur se trompe,
+	// l'echantillonneur couvre encore tout.
+	//
+	// La liste est `snap_operators`, derivee de `snap_reqs` par un critere
+	// DECLARATIF : une exigence NOMMEE dont la zone est le TERRAIN. Une arete
+	// d'acquisition est la seule a en poser une — un materiau se prend au
+	// cimetiere, a la main ou a la reserve, jamais « en jeu ».
+	float op_bias = 0.0f;
 	// TRONCATURE DU GRADIENT AU PIC DU SCORE (audit session 18, --adapt-to-peak).
 	//
 	// Voir NrpaRun::peak_steps pour le defaut corrige. Opt-in, pour que l'A/B ne
@@ -2828,6 +2853,13 @@ struct SearchStats {
 	// dernier : a 0 produits, les trois mecanismes sont VIVANTS ET INERTES.
 	uint64_t recipe_snaps = 0;
 	uint64_t snap_products = 0, snap_useful = 0, snap_backward = 0;
+	// LA VIE DU BIAIS D'OPERATEUR (--op-bias). Sans elle, un A/B mesurerait deux
+	// fois le temoin — c'est ce que le dossier a paye deux sessions durant avec
+	// `--assign-bias`, inerte tout en imprimant qu'il agissait (9.26 (e)).
+	// `offered` : decisions ou au moins un operateur designe etait proposable ;
+	// `taken` : celles ou le coup joue en engageait un.
+	uint64_t op_bias_offered = 0, op_bias_taken = 0;
+	uint64_t op_bias_listed = 0;   // taille de la liste au dernier instantane
 	// (4) sous-produits deja fabriques, sommes sur les evaluations. Rapporte a
 	// `snap_backward`, c'est la profondeur de decomposition reellement atteinte.
 	double backward_sum = 0.0;
@@ -3380,6 +3412,9 @@ private:
 	// Decomposition a rebours (chantier 4) : sous-produits en ordre de
 	// fabrication, dedoublonnes.
 	std::vector<uint32_t> snap_backward;
+	// Codes que la decomposition exige SUR LE TERRAIN : les OPERATEURS a jouer
+	// maintenant (--op-bias). Trie, pour la recherche binaire du chemin chaud.
+	std::vector<uint32_t> snap_operators;
 	std::vector<Requirement> snap_reqs;   // tampon de RecipeGraph::Expand
 	// Distance de recettes a la PREMIERE decision du tirage courant : la
 	// reference qui transforme une distance en PROGRES (sans elle, le terme

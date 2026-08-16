@@ -1072,9 +1072,19 @@ void Search::RecipeSnapshot() {
 	// mecanisme qui touche la liste des cartes, et il est paye une fois par
 	// instantane, jamais par decision.
 	snap_useful.clear();
+	// OPERATEURS A JOUER MAINTENANT (chantier 2, session 19). Le critere est
+	// DECLARATIF et tient en une ligne : une exigence NOMMEE dont la zone est le
+	// TERRAIN. Seule une arete d'ACQUISITION en pose une — un materiau se prend
+	// au cimetiere, a la main ou a la reserve, jamais « en jeu ». La liste
+	// designe donc exactement les cartes dont la presence en jeu DEBLOQUE un
+	// sous-but, et rien d'autre.
+	snap_operators.clear();
 	for(const Requirement& q : snap_reqs)
-		if(q.kind == kReqCard)
+		if(q.kind == kReqCard) {
 			snap_useful.push_back(q.code);
+			if(q.zone == 0x0c)
+				snap_operators.push_back(q.code);
+		}
 	for(uint32_t c : roots)
 		snap_useful.push_back(c);
 	if(recipe_snap.HasCardinal()) {
@@ -1120,6 +1130,11 @@ void Search::RecipeSnapshot() {
 	// d'actions, et c'est ce qui les rend separables.
 	cfg.enumeration.assign_useful =
 		(cfg.assign && !snap_useful.empty()) ? &snap_useful : nullptr;
+	std::sort(snap_operators.begin(), snap_operators.end());
+	snap_operators.erase(std::unique(snap_operators.begin(),
+									 snap_operators.end()),
+						 snap_operators.end());
+	stats.op_bias_listed = snap_operators.size();
 	++stats.recipe_snaps;
 	stats.snap_products = recipe_snap.Products();
 	stats.snap_useful = snap_useful.size();
@@ -2534,8 +2549,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// h moyen 0.00 sur ZERO evaluation(s) » — le graphe apprenait et personne ne
 	// le lisait. C'est aussi ce qui explique que 9.24 (n) ait mesure x27 sur
 	// « Leo au cimetiere » : ce bras-la portait `--assign` en plus.
+	// `op_bias` y figure d'entree, pour la meme raison : il lit `snap_operators`,
+	// que seul l'instantane remplit. L'oublier reproduirait a l'identique le
+	// defaut ci-dessus, un an de dossier plus tard.
 	const bool rec_on =
-		cfg.recipes && (cfg.assign || cfg.backward || cfg.assign_bias > 0.0f);
+		cfg.recipes && (cfg.assign || cfg.backward || cfg.assign_bias > 0.0f ||
+						cfg.op_bias > 0.0f);
 	if(qhat_on) {
 		qh_nodes.clear();
 		qh_moves.clear();
@@ -2997,6 +3016,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			step.hinted.reserve(choices.size());
 			logit.resize(choices.size());
 			double mx = -1e300;
+			// VIE DU BIAIS D'OPERATEUR : « au moins un operateur designe etait
+			// proposable a cette decision ». Remis a zero A CHAQUE decision —
+			// un drapeau qui fuite d'une decision a l'autre est le defaut
+			// `ChoiceList::Emit` de 9.24 (o), et il a deja coute une session.
+			bool any_op_useful = false;
 			for(size_t i = 0; i < choices.size(); ++i) {
 				uint64_t key = choices[i].plan_key;
 				// Les changements de phase sont au repertoire (la reference
@@ -3044,11 +3068,23 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					!snap_useful.empty() &&
 					std::binary_search(snap_useful.begin(), snap_useful.end(),
 									   choices[i].card);
+				// BIAIS D'OPERATEUR (--op-bias, chantier 2). Ce choix joue-t-il
+				// une carte dont la decomposition exige la PRESENCE EN JEU ?
+				// C'est « que jouer », pas « quoi choisir » — l'autre moitie du
+				// probleme, et celle que `--assign-bias` n'atteint pas.
+				const bool op_useful =
+					cfg.op_bias > 0.0f && choices[i].card &&
+					!IsSubsetPrompt(prompt_type) && !snap_operators.empty() &&
+					std::binary_search(snap_operators.begin(),
+									   snap_operators.end(), choices[i].card);
+				if(op_useful)
+					any_op_useful = true;
 				double w = EffectiveWeight(pol, &ctx_weights, key, step.cctx,
 										   cfg.ctx_shrink);
 				logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
 							(hinted ? cfg.hint_bias : 0.0f) +
-							(useful ? cfg.assign_bias : 0.0f)) /
+							(useful ? cfg.assign_bias : 0.0f) +
+							(op_useful ? cfg.op_bias : 0.0f)) /
 						   (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f);
 				mx = (std::max)(mx, logit[i]);
 				step.keys.push_back(key);
@@ -3247,6 +3283,18 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					qh_moves.push_back(cfg.options->ids[mi]);
 			} else {
 				pick = pick_index;
+			}
+			// VIE DU BIAIS D'OPERATEUR, relevee APRES le tirage : combien de
+			// decisions offraient un operateur designe, et dans combien le coup
+			// joue en engageait un. A `offered = 0` le mecanisme est INERTE et
+			// aucun juge de recherche ne le concerne (piege 42).
+			if(cfg.op_bias > 0.0f && any_op_useful) {
+				++stats.op_bias_offered;
+				if(pick < choices.size() && choices[pick].card &&
+				   !snap_operators.empty() &&
+				   std::binary_search(snap_operators.begin(),
+									  snap_operators.end(), choices[pick].card))
+					++stats.op_bias_taken;
 			}
 			// Le CHEMIN du bandit s'allonge du coup effectivement choisi (id de
 			// macro compris). Au-dela de k il n'est plus consulte : inutile de

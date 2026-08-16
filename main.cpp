@@ -1247,7 +1247,13 @@ struct Options {
 	uint64_t max_rollouts = 0;
 	uint64_t max_nodes = 0;
 	// TRONCATURE DU GRADIENT AU PIC DU SCORE. Cf. NrpaRun::peak_steps.
-	bool adapt_to_peak = false;
+	//
+	// DEFAUT DEPUIS LA SESSION 19. Mesure sur les DEUX etalons : x2,6 sur
+	// l'arite 3 dans deux paires independantes de l'etalon A (9.26 (f)), et sur
+	// l'etalon B en PROPORTION sur dix runs par bras, la pile porte `>=2` de
+	// 3/10 a 9/10 (9.28 (e)). Le drapeau devient NEGATIF (`--no-adapt-to-peak`)
+	// pour que l'A/B reste possible — regle 2 du README.
+	bool adapt_to_peak = true;
 	// Nombre maximal de sous-ensembles emis par prompt de selection. C'est ce
 	// qui plafonne le facteur de branchement de TOUS les prompts de selection ;
 	// il etait ecrit en dur (24) a douze endroits, sans drapeau ni mesure, et
@@ -1326,6 +1332,16 @@ struct Options {
 	// DRAPEAU LE TEMPS DE LE MESURER (regle 2 du README), pas plus : passe sur
 	// les deux etalons, il devient le defaut et le drapeau devient negatif.
 	bool op_recipes = false;
+	// CHANTIER 2 (session 19) : LE CHAINAGE ARRIERE COMME BIAIS.
+	//
+	// Poids ajoute au logit des choix qui JOUENT une carte dont la
+	// decomposition a rebours exige la presence SUR LE TERRAIN — c'est-a-dire
+	// l'hote d'une arete d'acquisition. `--assign-bias` designe des MATERIAUX et
+	// mord sur les prompts de SELECTION ; celui-ci designe des OPERATEURS et
+	// mord sur « que jouer ». Exige `--op-recipes` pour avoir de la matiere.
+	//
+	// REGLE 2, NON NEGOCIABLE : un plan est un BIAIS, jamais un elagage.
+	double op_bias = 0.0;
 	// Cartes OBSERVEES par la sonde, sans aucune contrainte (`--watch`).
 	// Objection de l'operateur qui les a fait ecrire : `--resolve` est un
 	// INDICE DEGUISE (biais d'indices d'office + gradient + exigence au but),
@@ -1359,7 +1375,12 @@ struct Options {
 	// (2) --hindsight <f> : chaque monstre d'extra deck reellement invoque
 	// devient un but de substitution, et la meilleure ligne qui l'atteint subit
 	// le gradient NRPA a f x alpha (HER, NeurIPS 2017).
-	double hindsight = 0.0;
+	//
+	// DEFAUT 0,5 DEPUIS LA SESSION 19. La valeur n'est pas neuve : c'est celle
+	// que les deux etalons ont mesuree (x20,6 sur l'arite 3, separation complete
+	// des supports a deux graines sur A ; `>=2` de 3/10 a 9/10 sur B). Elle
+	// s'eteint par `--no-hindsight`.
+	double hindsight = 0.5;
 	size_t hindsight_k = 16;
 	// (3) --recipe-w <f> : la distance de recettes dans le SCORE DES TIRAGES,
 	// en progres. C'est le chantier que la session 16 a ecrit sans le brancher —
@@ -1377,6 +1398,13 @@ struct Options {
 	// en ligne — ni profondeur, ni entree de table, ni instantane d'arene. Ce
 	// que l'attribution de la cle designe : la majorite des noeuds ne sont pas
 	// des points de decision. Le finisseur le fait deja ; l'exhaustif, non.
+	//
+	// NON PROMU, ET LA RAISON EST UNE MESURE DE LA SESSION 19 : le drapeau
+	// n'etait CABLE QUE dans `--growth`. Les +61 % de debit et le x2,1 de boards
+	// de 9.24 (k) valent donc pour le chemin EXHAUSTIF, jamais pour la
+	// recherche. Le cablage est corrige (c'est un correctif : le drapeau
+	// pretendait agir) ; le DEFAUT, lui, reste eteint tant que le mecanisme n'a
+	// pas ete juge la ou il agit desormais.
 	bool elide_forced = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
@@ -1620,19 +1648,28 @@ void Usage() {
 		"                     deux executions font exactement le meme travail.\n"
 		"                     Cout mesure du mono-worker : /5,1 a /5,9.\n"
 		"  --max-nodes <n>    idem, en NOEUDS developpes par worker.\n"
-		"  --adapt-to-peak    n'adapter que le PREFIXE qui a produit le score.\n"
-		"                     Le score d'un tirage est un MAX sur les prefixes,\n"
-		"                     mais AdaptRun renforcait TOUS les pas : une ligne\n"
-		"                     qui culmine au pas 200 puis erre 230 pas apprenait\n"
-		"                     l'effondrement aussi fort que la montee (audit 18).\n"
+		"  --no-adapt-to-peak DEFAUT DEPUIS LA s19 : n'adapter que le PREFIXE qui\n"
+		"                     a produit le score. Le score d'un tirage est un MAX\n"
+		"                     sur les prefixes, mais AdaptRun renforcait TOUS les\n"
+		"                     pas : une ligne qui culmine au pas 200 puis erre 230\n"
+		"                     pas apprenait l'effondrement aussi fort que la\n"
+		"                     montee. x2,6 sur l'arite 3 (deux paires, etalon A),\n"
+		"                     et >=2 de 3/10 a 9/10 sur B. Ce drapeau l'ETEINT,\n"
+		"                     pour rejouer l'A/B.\n"
 		"  --max-decisions <n>  plafond de profondeur des tirages, en decisions.\n"
 		"                     Defaut : derive de la reference (1,5x + 32).\n"
 		"  --elide-forced     un prompt a REPONSE UNIQUE est joue en ligne, avant\n"
 		"                     la table : ni entree, ni instantane, ni profondeur,\n"
 		"                     ni evaluation. 74,6 %% des noeuds n'offrent aucun\n"
-		"                     choix ; +61 %% de debit et x2,1 de boards en\n"
-		"                     exhaustif (9.24 (k)). La comptabilite d'actions, de\n"
-		"                     tours, d'invocations et de resolutions est conservee.\n"
+		"                     choix ; +61 %% de debit et x2,1 de boards (9.24 (k)).\n"
+		"                     La comptabilite d'actions, de tours, d'invocations\n"
+		"                     et de resolutions est conservee.\n"
+		"                     ATTENTION s19 : jusqu'ici il n'etait CABLE QUE dans\n"
+		"                     --growth. Les chiffres ci-dessus valent donc pour le\n"
+		"                     chemin EXHAUSTIF ; sur la RECHERCHE il etait inerte\n"
+		"                     (preuve deterministe : 3000 tirages / 149334 etats /\n"
+		"                     3002 adaptations a l'octet pres avec et sans). Le\n"
+		"                     cablage est corrige, le mecanisme reste A JUGER la.\n"
 		"  --assign-bias <f>  poids d'echantillonnage des coups qui engagent un\n"
 		"                     code que le graphe de RECETTES designe comme\n"
 		"                     MATERIAU. Allume --card-on-select. Sur l'etalon A :\n"
@@ -1796,6 +1833,9 @@ void Usage() {
 		"                     subit le gradient NRPA a f x alpha. Le solveur pose\n"
 		"                     deja des milliers de Fusions bon marche par run et\n"
 		"                     jette tout : le signal existe, il n'est pas lu.\n"
+		"                     DEFAUT 0,5 DEPUIS LA s19 (x20,6 sur l'arite 3 et\n"
+		"                     separation complete des supports sur A ; >=2 de\n"
+		"                     3/10 a 9/10 sur B). --no-hindsight l'eteint.\n"
 		"  --hindsight-k <n>  buts de substitution retenus au plus (defaut 16).\n"
 		"  --backward         (4) SERIALISATION A REBOURS (Retro*, AO*). Une\n"
 		"                     invocation est un noeud ET : l'arite, fatale en\n"
@@ -1842,6 +1882,15 @@ void Usage() {
 		"                     comme un PRODUIT A FABRIQUER, d'ou l'echec de\n"
 		"                     --backward (9.24 (e)). Les aretes posees sont\n"
 		"                     IMPRIMEES une par une. Exige --recipes.\n"
+		"  --op-bias <f>      poids ajoute aux coups qui JOUENT une carte que la\n"
+		"                     decomposition a rebours exige SUR LE TERRAIN — les\n"
+		"                     hotes des aretes d'acquisition. --assign-bias\n"
+		"                     designe des MATERIAUX et mord sur les prompts de\n"
+		"                     SELECTION ; celui-ci designe des OPERATEURS et mord\n"
+		"                     sur « que jouer ». Un plan est un BIAIS, jamais un\n"
+		"                     elagage : rien n'est retire de l'espace. Exige\n"
+		"                     --recipes et --op-recipes ; sa VIE est imprimee\n"
+		"                     (proposees / prises) et a zero il est INERTE.\n"
 		"  --no-seed-recipes  n'amorce PAS le graphe avec le texte de carte : le\n"
 		"                     graphe n'apprend plus que des invocations reussies.\n"
 		"  --no-seed-quant    amorce les seuls materiaux NOMMES, sans les\n"
@@ -2031,6 +2080,24 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				if(a == f.name) { o.*(f.member) = true; matched = true; break; }
 			if(matched)
 				continue;
+			// DRAPEAUX NEGATIFS DES MECANISMES PROMUS EN DEFAUT (session 19).
+			// Regle 2 du README : passe sur les DEUX etalons, un mecanisme
+			// devient le defaut, et le drapeau devient negatif — il ne sert plus
+			// qu'a rejouer l'A/B qui l'a fait promouvoir.
+			{
+				static const struct { const char* name; bool Options::* member; }
+				kNoFlags[] = {
+					{ "--no-adapt-to-peak", &Options::adapt_to_peak },
+				};
+				for(const auto& f : kNoFlags)
+					if(a == f.name) { o.*(f.member) = false; matched = true; break; }
+				if(matched)
+					continue;
+			}
+			if(a == "--no-hindsight") {
+				o.hindsight = 0.0;
+				continue;
+			}
 		}
 		// DRAPEAUX A VALEUR ENTIERE NON SIGNEE, meme raison : la chaine `else if`
 		// est a la limite du compilateur, et un drapeau de plus la faisait sauter
@@ -2310,6 +2377,13 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.assign_bias = std::atof(v);
 			if(o.assign_bias < 0) {
 				std::printf("!! --assign-bias attend un poids >= 0\n");
+				return false;
+			}
+		} else if(a == "--op-bias") {
+			const char* v = next("--op-bias"); if(!v) return false;
+			o.op_bias = std::atof(v);
+			if(o.op_bias < 0) {
+				std::printf("!! --op-bias attend un poids >= 0\n");
 				return false;
 			}
 		} else if(a == "--watch") {
@@ -6795,6 +6869,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.adapt_to_peak = opt.adapt_to_peak;
 	if(opt.adapt_to_peak)
 		std::printf("  gradient TRONQUE AU PIC du score (--adapt-to-peak)\n");
+	// CORRECTIF (session 19) : `--elide-forced` N'ETAIT CABLE NULLE PART SAUF
+	// DANS `--growth`. Trois sessions de bancs lui ont passe le drapeau sur le
+	// chemin de RECHERCHE, ou il ne faisait rien. Preuve en mode deterministe :
+	// `--no-elide-forced` rend « 3000 tirages, 149334 etats, 3002 adaptations »
+	// a l'octet pres. C'est la TROISIEME occurrence du piege 42 (9.26 (e)) et la
+	// plus chere : un drapeau qui se declare allume en etant eteint.
+	//
+	// Ce n'est pas un drapeau, c'est un CORRECTIF : le drapeau existait et
+	// pretendait agir. Ce qui devient discutable, c'est sa VALEUR PAR DEFAUT —
+	// et elle repasse a « eteint », parce que les +61 % de debit de 9.24 (k) ont
+	// ete mesures sur le chemin `--growth`, jamais sur celui-ci.
+	cfg.elide_forced = opt.elide_forced;
+	if(opt.elide_forced)
+		std::printf("  coups FORCES joues en ligne (--elide-forced) — NON JUGE "
+					"sur ce chemin : il y etait inerte jusqu'a la s19\n");
 	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
 	// Le graphe de recettes est cree et amorce PLUS HAUT (avant le rejeu
 	// d'adaptation, qui le nourrit) ; ici, seulement le cablage dans cfg.
@@ -6808,6 +6897,25 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
 	cfg.assign = opt.assign;
 	cfg.assign_bias = static_cast<float>(opt.assign_bias);
+	cfg.op_bias = static_cast<float>(opt.op_bias);
+	if(opt.op_bias > 0.0) {
+		// LES DEUX FACONS DONT CE MECANISME PEUT ETRE INERTE, DITES AVANT LE
+		// RUN. C'est la lecon de 9.26 (e), et elle a coute deux sessions : un
+		// mecanisme eteint qui se declare allume fait mesurer deux fois le
+		// temoin.
+		if(opt.recipes < 0.0)
+			std::printf("!! --op-bias sans --recipes : le mecanisme lit "
+						"`snap_operators`, que seul l'instantane du graphe "
+						"remplit. Il serait INERTE.\n");
+		else if(!opt.op_recipes)
+			std::printf("!! --op-bias sans --op-recipes : la decomposition n'a "
+						"aucune arete d'ACQUISITION, donc aucune exigence de "
+						"presence sur le TERRAIN, donc la liste sera VIDE.\n");
+		else
+			std::printf("  biais d'OPERATEUR : %.2f sur les coups qui jouent une "
+						"carte exigee EN JEU par la decomposition a rebours\n",
+						opt.op_bias);
+	}
 	if(opt.assign_bias > 0.0) {
 		std::printf("  --assign-bias %.2f : les choix engageant un MATERIAU du "
 					"graphe de recettes sont favorises\n"
@@ -7120,6 +7228,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint64_t hindsight_goals = 0, hindsight_adapts = 0;
 			uint64_t recipe_snaps = 0, snap_products = 0, snap_useful = 0,
 					 snap_backward = 0;
+		// Vie du biais d'operateur (--op-bias, chantier 2 de la session 19).
+		uint64_t op_offered = 0, op_taken = 0, op_listed = 0;
 			// SONDE DE REPETITION (--probe-repeat). Tout y est ADDITIF entre
 			// workers sauf min/max et la reference d0 — qui est la meme pour
 			// tous (meme etat de depart), donc n'importe laquelle vaut.
@@ -7394,6 +7504,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											   s.Stats().snap_useful);
 					m.snap_backward = (std::max)(m.snap_backward,
 												 s.Stats().snap_backward);
+					// La TAILLE de la liste est la meme pour tous (meme graphe) ;
+					// les EMPLOIS, eux, s'additionnent — ce sont des decisions.
+					m.op_listed = (std::max)(m.op_listed,
+											 s.Stats().op_bias_listed);
+					m.op_offered += s.Stats().op_bias_offered;
+					m.op_taken += s.Stats().op_bias_taken;
 					for(int k = 0; k < 4; ++k)
 						m.rr[k] += s.Stats().resolve_reached[k];
 					m.burn_cuts += s.Stats().burn_cuts;
@@ -7730,6 +7846,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													   greedy.snap_useful),
 						(unsigned long long)(std::max)(nrpa.snap_backward,
 													   greedy.snap_backward));
+		}
+		// LA VIE DU BIAIS D'OPERATEUR (--op-bias). Imprimee AVANT tout juge de
+		// recherche : a `proposé = 0`, le mecanisme est INERTE et un A/B
+		// mesurerait deux fois le temoin (piege 42, 9.26 (e)).
+		if(opt.op_bias > 0.0) {
+			const uint64_t off = nrpa.op_offered + greedy.op_offered;
+			const uint64_t tak = nrpa.op_taken + greedy.op_taken;
+			std::printf("  biais d'OPERATEUR : %llu carte(s) designee(s) par la "
+						"decomposition ; %llu decision(s) en offraient une, "
+						"%llu l'ont prise (%.2f %%)%s\n",
+						(unsigned long long)(std::max)(nrpa.op_listed,
+													   greedy.op_listed),
+						(unsigned long long)off, (unsigned long long)tak,
+						off ? 100.0 * double(tak) / double(off) : 0.0,
+						off ? "" : "   <-- INERTE : aucun juge ne le concerne");
 		}
 		if(nrpa.rec_roll_count + greedy.rec_roll_count) {
 			const uint64_t n1 = nrpa.rec_roll_count + greedy.rec_roll_count;
