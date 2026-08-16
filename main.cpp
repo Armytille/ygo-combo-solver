@@ -59,6 +59,12 @@ struct CutCounts {
 	// --- ce qui n'est PAS un elagage, mais une amputation de l'espace ---
 	uint64_t forced = 0;          // prompts reduits a la reponse par defaut
 	uint64_t forced_mask = 0;     // quels types de prompts
+	// DISTINCT DU PRECEDENT (audit 18) : ici la branche ne survit PAS. Le
+	// compteur unique melangeait les deux et comptait la seconde famille deux
+	// fois (elle tombe aussi dans `dead_ends`) — d'ou le « 90 forces / 90
+	// impasses » de 9.24 (h), qui etait UN fait et non deux.
+	uint64_t killed = 0;
+	uint64_t killed_mask = 0;
 	// --- sante de la recherche, jamais imprimee jusqu'ici ---
 	uint64_t dead_ends = 0, terminals = 0;
 	uint64_t novel = 0, stale = 0;   // taux de nouveaute des tirages
@@ -80,6 +86,8 @@ struct CutCounts {
 		subsets    += s.subsets_capped;
 		forced     += s.forced_default;
 		forced_mask |= s.forced_default_prompts;
+		killed     += s.forced_killed;
+		killed_mask |= s.forced_killed_prompts;
 		dead_ends  += s.dead_ends;
 		terminals  += s.terminals;
 		novel      += s.novelty_novel;
@@ -884,8 +892,21 @@ void PrintCuts(const CutCounts& c) {
 		for(int b = 0; b < 64; ++b)
 			if(c.forced_mask & (1ull << b))
 				std::printf(" %d", b);
-		std::printf(")\n              Ces branches n'ont jamais existe : un "
-					"combo qui les traverse est hors d'atteinte.\n");
+		std::printf(")\n              La branche SURVIT, reduite a un seul "
+					"choix : tout le reste de ce prompt est hors d'atteinte.\n");
+	}
+	// SEPARE DU PRECEDENT (audit 18) : ici il n'existe aucune reponse par
+	// defaut, donc la branche MEURT — et elle compte AUSSI dans `impasses`
+	// ci-dessus. Les confondre faisait lire un seul fait comme deux.
+	if(c.killed) {
+		std::printf("           !! %llu prompt(s) sans AUCUNE reponse par "
+					"defaut : BRANCHE TUEE (types :",
+					(unsigned long long)c.killed);
+		for(int b = 0; b < 64; ++b)
+			if(c.killed_mask & (1ull << b))
+				std::printf(" %d", b);
+		std::printf(")\n              Ces branches n'ont jamais existe, et "
+					"elles sont DEJA comptees dans « impasses ».\n");
 	}
 	if(c.num_broken)
 		std::printf("           !! %llu debordement(s) arithmetiques sqrt-LTS : "
@@ -965,7 +986,6 @@ struct Options {
 	// PORTEE REELLE : la phase de tirages seulement. Ni le finisseur enracine,
 	// ni les fenetres --fire. Une re-mesure ne porterait donc que sur un tiers
 	// du flux (audit §5).
-	uint32_t nrpa_lr = 0;
 	// ADAPTATION LENTE ET LONGUE (session 14, chantier 2 — recette Montparnasse,
 	// arXiv:2505.02110 / 2606.07562, Eterna100 resolu ainsi) : le pas
 	// d'adaptation NRPA et le nombre d'iterations par niveau. Jusqu'ici gardes en
@@ -1105,7 +1125,6 @@ struct Options {
 	uint32_t options_per_worker = 2;
 	// PHS* canonique (audit s12) : cout (d + h)/pi du papier au lieu de notre
 	// log(d+1) + h - log pi (facteur e^h, sans garantie).
-	bool phs_canonical = false;
 	// Depilage fusionne de l'arene au retour vers l'ancetre (voir
 	// SearchConfig::merged_pop). GAGNANT etalon 0, par defaut.
 	bool merged_pop = true;
@@ -1129,7 +1148,6 @@ struct Options {
 	// chemin », le notre etait un descripteur a deux axes qui vaut (0, 3) pour
 	// TOUTES les branches a la premiere decision — donc incapable, par
 	// construction, de distinguer deux ouvertures l'une de l'autre.
-	uint32_t mcps_depth = 0;
 	// BANDIT DE TETE A STATISTIQUE DE PERMUTATION (session 15, --qhat) : la
 	// regle de selection de MCPS — argmax de (n Q + n^ Q^)/(n + n^), poids
 	// proportionnels aux effectifs — sur les k premieres decisions du tirage.
@@ -1150,19 +1168,16 @@ struct Options {
 	// verdict de nouveaute est deja calcule a chaque decision de PolicyRollout
 	// et jete apres un simple departage de score. Opt-in — le mecanisme a un
 	// mode de defaillance documente (9.3) et il doit se juger, pas se supposer.
-	bool novelty_rollout_cut = false;
 	// Sorties de phase (Battle/End) retirees de l'enumeration : le board cible
 	// est celui de la FIN DU TOUR 1, donc changer de phase ne peut que
 	// raccourcir la ligne. Le drapeau existait dans EnumOptions sans aucun
 	// cadran, et il n'etait lu qu'au prompt idle — au prompt de bataille les
 	// deux sorties etaient emises inconditionnellement (repare s15).
-	bool no_phase_change = false;
 	// Une seule zone libre representative par type de zone : declare et
 	// documente depuis des sessions, ALLUME NULLE PART (9.20 (e)).
 	bool canonical_zones = false;
 	// QUOTA PAR NIVEAU DE PROGRES dans l'archive Go-Explore (s15) : rend a
 	// l'archive sa nature de COUVERTURE quand sa cle de tri sature.
-	bool archive_spread = false;
 	// BUT PAR INCLUSION (s15) : le board final doit CONTENIR la cible au lieu
 	// de lui etre EGAL. Voir SearchConfig::goal_subset.
 	//
@@ -1189,6 +1204,14 @@ struct Options {
 	// celui-ci n'avait rien, et le §9.14 chiffre la contribution du biais
 	// `known` sans jamais isoler celui-ci (2.7). Negatif = defaut du moteur.
 	double hint_bias = -1.0;
+	// MODE DETERMINISTE (audit 18) : budget en TIRAGES par worker, au lieu du
+	// temps de mur. Combine a `--threads 1`, deux executions font exactement le
+	// meme travail — c'est le seul mode ou un A/B fin veut dire quelque chose.
+	// 0 = illimite (comportement d'avant a l'octet pres).
+	uint64_t max_rollouts = 0;
+	uint64_t max_nodes = 0;
+	// TRONCATURE DU GRADIENT AU PIC DU SCORE. Cf. NrpaRun::peak_steps.
+	bool adapt_to_peak = false;
 	// Nombre maximal de sous-ensembles emis par prompt de selection. C'est ce
 	// qui plafonne le facteur de branchement de TOUS les prompts de selection ;
 	// il etait ecrit en dur (24) a douze endroits, sans drapeau ni mesure, et
@@ -1254,7 +1277,6 @@ struct Options {
 	//      decide QUELLE Fusion invoquer reste invisible au biais.
 	// Ce n'est PAS de la connaissance metier : c'est lire l'enonce. C'est la
 	// difference avec `--hint`, qui est une bequille.
-	bool goal_bias = false;
 	// --- SESSION 17 : LES QUATRE LEVIERS CONTRE LA LOI D'ARITE --------------
 	// Tous eteints par defaut, tous separables, tous A/B-ables seuls. Voir
 	// SearchConfig pour le raisonnement complet de chacun.
@@ -1277,7 +1299,6 @@ struct Options {
 	// (3) --recipe-w <f> : la distance de recettes dans le SCORE DES TIRAGES,
 	// en progres. C'est le chantier que la session 16 a ecrit sans le brancher —
 	// `RecipeDistance` n'existait que dans le finisseur.
-	double recipe_weight = 0.0;
 	// (4) --backward : le nombre de sous-produits de la decomposition ET/OU deja
 	// fabriques entre dans la PARTITION de la table de nouveaute (Serialized IW
 	// sur la decomposition apprise, au lieu du but litteral).
@@ -1287,7 +1308,6 @@ struct Options {
 	// colonne vaut x33,7 de valeurs distinctes a elle seule, premier poste et de
 	// loin, devant la charge utile du prompt (x1,38) et l'etat du processeur
 	// (x1,00). Opt-in : les fleches de LIEN sont colonne-dependantes.
-	bool canonical_digest = false;
 	// (6) --elide-forced : un prompt qui n'offre qu'UNE reponse legale est joue
 	// en ligne — ni profondeur, ni entree de table, ni instantane d'arene. Ce
 	// que l'attribution de la cle designe : la majorite des noeuds ne sont pas
@@ -1301,7 +1321,6 @@ struct Options {
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
-	bool subsets_ascending = false;
 	// sqrt-LTS : re-enraciner le finisseur a chaque indice (chantier 10).
 	bool levin_reroot = false;
 	// sqrt-LTS-H (session 8, chantier 11 — arXiv:2605.30664 §3.2) : rerooter
@@ -1532,6 +1551,42 @@ void Usage() {
 		"  --solve            recherche guidee vers le board cible\n"
 		"  --solve-ms <ms>    budget temps de la recherche (defaut 120000)\n"
 		"  --threads <n>      workers de recherche (defaut : tous les coeurs)\n"
+		"  --max-rollouts <n> MODE DETERMINISTE (audit 18) : budget en TIRAGES\n"
+		"                     par worker au lieu du temps de mur. Le budget en\n"
+		"                     millisecondes est la CAUSE du non-determinisme —\n"
+		"                     deux runs --threads 1 a la meme graine font 41 232\n"
+		"                     et 42 179 tirages, donc ne s'arretent pas au meme\n"
+		"                     point de la trajectoire NRPA. Avec --threads 1,\n"
+		"                     deux executions font exactement le meme travail.\n"
+		"                     Cout mesure du mono-worker : /5,1 a /5,9.\n"
+		"  --max-nodes <n>    idem, en NOEUDS developpes par worker.\n"
+		"  --adapt-to-peak    n'adapter que le PREFIXE qui a produit le score.\n"
+		"                     Le score d'un tirage est un MAX sur les prefixes,\n"
+		"                     mais AdaptRun renforcait TOUS les pas : une ligne\n"
+		"                     qui culmine au pas 200 puis erre 230 pas apprenait\n"
+		"                     l'effondrement aussi fort que la montee (audit 18).\n"
+		"  --max-decisions <n>  plafond de profondeur des tirages, en decisions.\n"
+		"                     Defaut : derive de la reference (1,5x + 32).\n"
+		"  --elide-forced     un prompt a REPONSE UNIQUE est joue en ligne, avant\n"
+		"                     la table : ni entree, ni instantane, ni profondeur,\n"
+		"                     ni evaluation. 74,6 %% des noeuds n'offrent aucun\n"
+		"                     choix ; +61 %% de debit et x2,1 de boards en\n"
+		"                     exhaustif (9.24 (k)). La comptabilite d'actions, de\n"
+		"                     tours, d'invocations et de resolutions est conservee.\n"
+		"  --card-on-select   renseigne Choice::card sur les prompts de SELECTION\n"
+		"                     (premier code du sous-ensemble — identite\n"
+		"                     APPROXIMATIVE). Etend donc le biais d'indices a ces\n"
+		"                     prompts ; la part concernee se lit dans la colonne\n"
+		"                     « sous-ens. » de la visibilite des indices.\n"
+		"  --assign-bias <f>  poids d'echantillonnage des coups qui engagent un\n"
+		"                     code que le graphe de RECETTES designe comme\n"
+		"                     MATERIAU. Allume --card-on-select. Sur l'etalon A :\n"
+		"                     Leo Dancer au cimetiere 56 -> 1 537 (x27), chaine\n"
+		"                     causale verifiee (9.24 (n)).\n"
+		"  --dive-full        finisseur : empiler un niveau d'arene a chaque\n"
+		"                     plongee (A/B de --no-dive-full).\n"
+		"  --merged-pop       finisseur : depilage fusionne (A/B de\n"
+		"                     --no-merged-pop).\n"
 		"  --width            mesure la largeur effective (atomes IW) le long\n"
 		"                     de la ligne de reference, sans recherche\n"
 		"  --novelty <n>      patience de l'elagage par nouveaute (defaut :\n"
@@ -1544,10 +1599,6 @@ void Usage() {
 		"  --nrpa-keep <x>    persistance de la politique NRPA au redemarrage :\n"
 		"                     poids attenues par x au lieu de repartir de zero\n"
 		"                     (defaut 0.5 ; 0 = politique vierge)\n"
-		"  --nrpa-lr <n>      repetitions limitees (GNRPA-LR) : arrete un niveau\n"
-		"                     apres n re-trouvailles de la meilleure sequence\n"
-		"                     (defaut 0 = stagnation seule — R=2 mesure perdant :\n"
-		"                     8/8 -> 7/8 sur la transplantation test 4)\n"
 		"  --nrpa-alpha <x>   pas d'adaptation NRPA (defaut 1.0). Petit = la\n"
 		"                     politique se deplace LENTEMENT — la moitie de la\n"
 		"                     recette Montparnasse (l'autre est --nrpa-iters)\n"
@@ -1628,9 +1679,6 @@ void Usage() {
 		"  --options-per-worker <n>  et au plus n par worker (defaut 2) — c'est\n"
 		"                     la POMPE A DIVERSITE : sans quota, les seize workers\n"
 		"                     versent seize fois la meme meilleure ligne partagee.\n"
-		"  --phs-canonical    finisseur : cout PHS* du papier, (d + h)/pi, au\n"
-		"                     lieu de log(d+1) + h - log pi (facteur e^h,\n"
-		"                     plus agressif, sans la garantie du papier)\n"
 		"  --no-merged-pop    finisseur : revenir au depilage niveau par niveau\n"
 		"                     (temoin d'A/B ; le depilage fusionne est le\n"
 		"                     defaut — chaque page chaude recopiee une fois)\n"
@@ -1694,24 +1742,12 @@ void Usage() {
 		"                     deja des milliers de Fusions bon marche par run et\n"
 		"                     jette tout : le signal existe, il n'est pas lu.\n"
 		"  --hindsight-k <n>  buts de substitution retenus au plus (defaut 16).\n"
-		"  --recipe-w <f>     (3) LA DISTANCE DE RECETTES DANS LES TIRAGES.\n"
-		"                     `RecipeDistance` existe depuis le chantier 16 mais\n"
-		"                     n'etait appelee que dans le finisseur — pas la ou\n"
-		"                     99 %% du travail se fait. Comptee EN PROGRES\n"
-		"                     (d0 - d) et non en distance. Implique --recipes 0.\n"
 		"  --backward         (4) SERIALISATION A REBOURS (Retro*, AO*). Une\n"
 		"                     invocation est un noeud ET : l'arite, fatale en\n"
 		"                     avant, devient une DECOMPOSITION en arriere. Le\n"
 		"                     nombre de sous-produits deja fabriques entre dans\n"
 		"                     la partition de la table de nouveaute, qui se\n"
 		"                     rouvre donc AVANT qu'aucune cible ne soit posee.\n"
-		"  --goal-bias        BIAIS DERIVE DE LA CIBLE (session 16). Verse les\n"
-		"                     codes du board cible dans le biais\n"
-		"                     d'echantillonnage, ET renseigne l'identite de\n"
-		"                     carte sur MSG_SELECT_CARD — le prompt qui decide\n"
-		"                     QUELLE Fusion/Synchro invoquer, jusqu'ici\n"
-		"                     invisible au biais. Ce n'est pas de la\n"
-		"                     connaissance metier : c'est lire l'enonce.\n"
 		"  --watch <carte>    carte OBSERVEE par --probe-repeat, SANS aucune\n"
 		"                     contrainte, aucun gradient, aucun biais d'indice.\n"
 		"                     A utiliser des qu'on mesure « le solveur\n"
@@ -1767,14 +1803,6 @@ void Usage() {
 		"                     du board cible deja posees. k negatif (defaut) =\n"
 		"                     eteint, comportement d'avant. La courbe d'accord\n"
 		"                     imprimee par --adapt calibre k sans depenser un run.\n"
-		"  --mcps <k>         REFUTE (9.21 (k)) — conserve pour rejouer l'A/B.\n"
-		"                     Conditionnement du niveau ci-dessus par le CHEMIN.\n"
-		"                     Zero comparaison gagnee sur quatre contre\n"
-		"                     --ctx-shrink 8 seul, effondrement total a k=6 sur\n"
-		"                     une graine, et meme palier d'accord. Diagnostic :\n"
-		"                     il greffe le conditionnement de MCPS sur le MAUVAIS\n"
-		"                     OBJET (un logit NRPA au lieu d'une moyenne de\n"
-		"                     recompense). Le mecanisme du papier est --qhat.\n"
 		"  --qhat <k>         BANDIT DE TETE A STATISTIQUE DE PERMUTATION\n"
 		"                     (MCPS 2510.06381, pour de vrai) : sur les k\n"
 		"                     premieres decisions du tirage, le coup est choisi\n"
@@ -1796,17 +1824,6 @@ void Usage() {
 		"                     reference de son sous-arbre (defaut 32).\n"
 		"  --qhat-nodes <n>   plafond de noeuds du bandit par worker (65536).\n"
 		"  --no-qhat-probe    ne pas imprimer la sonde de la premiere decision.\n"
-		"  --novelty-rollout-cut\n"
-		"                     couper aussi les tirages SOUS POLITIQUE quand la\n"
-		"                     patience de nouveaute est epuisee. Le verdict y\n"
-		"                     etait deja calcule a chaque decision et jete\n"
-		"                     (repare s15) ; opt-in, mode de defaillance connu.\n"
-		"  --no-phase-change  retirer les sorties Battle/End Phase de\n"
-		"                     l'enumeration : le board cible est celui de la fin\n"
-		"                     du tour 1. Les deux prompts sont couverts (le\n"
-		"                     prompt de bataille les emettait inconditionnellement\n"
-		"                     jusqu'a la s15) ; un prompt qui n'offrirait plus\n"
-		"                     rien les garde.\n"
 		"  --canonical-zones  n'explorer qu'une zone libre representative par\n"
 		"                     type de zone. Declare depuis longtemps, allume\n"
 		"                     nulle part jusqu'a la s15. Les fleches de lien et\n"
@@ -1825,11 +1842,6 @@ void Usage() {
 		"                     pour une cible POSEE par --target, dont la zone\n"
 		"                     S/T est VIDE alors qu'une magie continue de la\n"
 		"                     main (Tenki) y reste des qu'on l'active.\n"
-		"  --archive-spread   QUOTA PAR NIVEAU DE PROGRES dans l'archive\n"
-		"                     Go-Explore. Sans lui, quand la cle de tri sature\n"
-		"                     (tout a r4 en but seul) l'archive range des FINS\n"
-		"                     DE LIGNE et le finisseur s'epuise en 0-13\n"
-		"                     expansions (9.21 (f)).\n"
 		"  --ctx-max <n>      plafond d'entrees du niveau contextuel par worker\n"
 		"                     (defaut 262144, 0 = illimite). Au plafond, les\n"
 		"                     cases existantes vivent, aucune neuve n'est creee.\n"
@@ -1931,13 +1943,35 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			kBoolFlags[] = {
 				{ "--assign",           &Options::assign },
 				{ "--backward",         &Options::backward },
-				{ "--canonical-digest", &Options::canonical_digest },
 				{ "--elide-forced",     &Options::elide_forced },
 				{ "--card-on-select",   &Options::card_on_select },
+				{ "--adapt-to-peak",    &Options::adapt_to_peak },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
 				if(a == f.name) { o.*(f.member) = true; matched = true; break; }
+			if(matched)
+				continue;
+		}
+		// DRAPEAUX A VALEUR ENTIERE NON SIGNEE, meme raison : la chaine `else if`
+		// est a la limite du compilateur, et un drapeau de plus la faisait sauter
+		// (C1061 mesure). Toute option a valeur ajoutee ensuite passe par ici.
+		{
+			static const struct { const char* name; uint64_t Options::* member; }
+			kU64Flags[] = {
+				{ "--max-rollouts", &Options::max_rollouts },
+				{ "--max-nodes",    &Options::max_nodes },
+			};
+			bool matched = false;
+			for(const auto& f : kU64Flags)
+				if(a == f.name) {
+					const char* v = next(f.name);
+					if(!v)
+						return false;
+					o.*(f.member) = std::strtoull(v, nullptr, 10);
+					matched = true;
+					break;
+				}
 			if(matched)
 				continue;
 		}
@@ -2029,9 +2063,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--nrpa-iters") {
 			const char* v = next("--nrpa-iters"); if(!v) return false;
 			o.nrpa_iters = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--nrpa-lr") {
-			const char* v = next("--nrpa-lr"); if(!v) return false;
-			o.nrpa_lr = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--finisher") {
 			const char* v = next("--finisher"); if(!v) return false;
 			o.finisher = v;
@@ -2114,8 +2145,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--options-per-worker") {
 			const char* v = next("--options-per-worker"); if(!v) return false;
 			o.options_per_worker = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--phs-canonical") {
-			o.phs_canonical = true;
 		} else if(a == "--merged-pop") {
 			o.merged_pop = true;
 		} else if(a == "--no-merged-pop") {
@@ -2204,22 +2233,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --assign-bias attend un poids >= 0\n");
 				return false;
 			}
-		} else if(a == "--recipe-w") {
-			const char* v = next("--recipe-w"); if(!v) return false;
-			o.recipe_weight = std::atof(v);
-			if(o.recipe_weight < 0) {
-				std::printf("!! --recipe-w attend un poids >= 0\n");
-				return false;
-			}
-		} else if(a == "--goal-bias") {
-			o.goal_bias = true;
 		} else if(a == "--watch") {
 			const char* v = next("--watch"); if(!v) return false;
 			o.watch_specs.emplace_back(v);
 		} else if(a == "--probe-repeat") {
 			o.probe_repeat = true;
-		} else if(a == "--subsets-ascending") {
-			o.subsets_ascending = true;
+		} else if(false) {
 		} else if(a == "--no-seed-recipes") {
 			o.seed_recipes = false;
 		} else if(a == "--no-seed-quant") {
@@ -2240,9 +2259,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--ctx-shrink") {
 			const char* v = next("--ctx-shrink"); if(!v) return false;
 			o.ctx_shrink = std::atof(v);
-		} else if(a == "--mcps") {
-			const char* v = next("--mcps"); if(!v) return false;
-			o.mcps_depth = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--qhat") {
 			const char* v = next("--qhat"); if(!v) return false;
 			o.qhat_depth = static_cast<uint32_t>(std::atoi(v));
@@ -2257,14 +2273,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.qhat_nodes = static_cast<size_t>(std::atoll(v));
 		} else if(a == "--no-qhat-probe") {
 			o.qhat_probe = false;
-		} else if(a == "--novelty-rollout-cut") {
-			o.novelty_rollout_cut = true;
-		} else if(a == "--no-phase-change") {
-			o.no_phase_change = true;
+		} else if(false) {
+		} else if(false) {
 		} else if(a == "--canonical-zones") {
 			o.canonical_zones = true;
-		} else if(a == "--archive-spread") {
-			o.archive_spread = true;
+		} else if(false) {
 		} else if(a == "--target-subset") {
 			o.target_subset = true;
 		} else if(a == "--target-exact") {
@@ -2312,37 +2325,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			return false;
 		}
 	}
-	// `--mcps` sans niveau contextuel serait un CALCUL SANS LECTEUR : le
-	// conditionnement par le chemin ne sert qu'a indexer la table du niveau
-	// contextuel, que `ctx_shrink < 0` eteint. Plutot que d'accepter un drapeau
-	// inerte (la famille du « mecanisme silencieusement absent du chemin »), on
-	// allume le niveau et on le DIT.
-	if(o.mcps_depth && o.ctx_shrink < 0) {
-		o.ctx_shrink = 8.0;
-		std::printf("  --mcps %u implique --ctx-shrink %.0f (sans niveau "
-					"contextuel, le conditionnement par le chemin n'est lu par "
-					"personne)\n", o.mcps_depth, o.ctx_shrink);
-	}
-	// `--mcps` EST REFUTE et le run doit le dire, pas le laisser deviner. Il
-	// reste utilisable — un mecanisme refute qu'on ne peut plus rejouer n'est
-	// plus refutable — mais aucune mesure ne doit sortir d'ici en croyant
-	// mesurer MCPS : ce drapeau conditionne un LOGIT, le papier conditionne une
-	// MOYENNE DE RECOMPENSE, et c'est --qhat qui l'implemente.
-	if(o.mcps_depth)
-		std::printf("  !! --mcps est REFUTE (9.21 (k)) : 0 comparaison gagnee "
-					"sur 4 contre --ctx-shrink seul, effondrement a k=6, meme "
-					"palier d'accord.\n     Il greffe le conditionnement de "
-					"MCPS sur un LOGIT NRPA ; le mecanisme du papier (moyennes "
-					"de recompense) est --qhat.\n");
-	// Le bandit et l'ancien conditionnement visent la MEME decision par deux
-	// mecanismes incompatibles (argmax de moyennes contre softmax de logits) :
-	// les composer ne mesurerait plus rien d'attribuable.
-	if(o.qhat_depth && o.mcps_depth) {
-		std::printf("!! --qhat et --mcps ne se composent pas : le premier "
-					"DECIDE les k premieres decisions, le second conditionne "
-					"les poids que le premier n'utilise plus.\n");
-		return false;
-	}
+	// `--mcps` (conditionnement du LOGIT par le chemin) a vecu ici. SUPPRIME
+	// (audit 18) : REFUTE DEUX FOIS — 0 comparaison gagnee sur 4 contre
+	// `--ctx-shrink` seul, effondrement total a k = 6, meme palier d'accord
+	// (9.21 (k)). Et la refutation portait une lecon de fond : il greffait le
+	// conditionnement de MCPS sur un LOGIT NRPA, alors que le papier conditionne
+	// une MOYENNE DE RECOMPENSE — c'est `--qhat` qui implemente le mecanisme.
 	return !o.replay.empty();
 }
 
@@ -3583,7 +3571,6 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 	EnumOptions eo;
 	eo.dedup_by_code = true;
 	eo.max_subsets = opt.max_subsets;
-	eo.subsets_ascending = opt.subsets_ascending;
 
 	// Comparer les octets serait trop strict : EDOPro encode ses selections en
 	// bitset (type 3), l'enumerateur en liste d'index (type 2), et la
@@ -3875,14 +3862,10 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	}
 	cfg.enumeration.dedup_by_code = true;
 	cfg.enumeration.max_subsets = opt.max_subsets;
-	cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 	// Deux drapeaux d'enumeration qui existaient sans cadran (repares s15) :
 	// les sorties de phase (lues au seul prompt idle jusqu'ici) et les zones
 	// canoniques (declarees, allumees nulle part).
-	cfg.enumeration.allow_phase_change = !opt.no_phase_change;
 	cfg.enumeration.canonical_zones = opt.canonical_zones;
-	cfg.novelty_rollout_cut = opt.novelty_rollout_cut;
-	cfg.archive_spread = opt.archive_spread;
 	// Cible POSEE -> inclusion par defaut ; cible CAPTUREE -> egalite exacte.
 	cfg.goal_subset = opt.target_subset ||
 					  (!opt.target_specs.empty() && !opt.target_exact);
@@ -3918,7 +3901,6 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		// trouerait le repertoire en silence. --no-phase-change borne la
 		// RECHERCHE, pas la lecture de ce qui a ete joue.
 		EnumOptions leo = cfg.enumeration;
-		leo.allow_phase_change = true;
 		LiftRefLine(duel, arena, yrp, opt.target_player, ref_decisions,
 					leo, ref_digests, ref_keys);
 		arena.Restore();
@@ -4688,7 +4670,6 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					EnumOptions eo;
 					eo.dedup_by_code = true;
 					eo.max_subsets = opt.max_subsets;
-					eo.subsets_ascending = opt.subsets_ascending;
 					eo.db = &db;
 					std::vector<PlanStep> steps;
 					size_t unknown = LiftPlan(pd, pa, *pr, opt.target_player,
@@ -4818,7 +4799,6 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					EnumOptions eo;
 					eo.dedup_by_code = true;
 					eo.max_subsets = opt.max_subsets;
-					eo.subsets_ascending = opt.subsets_ascending;
 					eo.db = &db;
 					NrpaRun run;
 					LandmarkTrace trace;
@@ -5007,13 +4987,11 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					EnumOptions eo;
 					eo.dedup_by_code = true;
 					eo.max_subsets = opt.max_subsets;
-					eo.subsets_ascending = opt.subsets_ascending;
 					eo.db = &db;
 					NrpaRun run;
 					size_t unknown =
 						LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX,
-									  eo, repertoire, target, run, recipes,
-									  opt.mcps_depth);
+									  eo, repertoire, target, run, recipes);
 					if(!run.steps.empty()) {
 						total_steps += run.steps.size();
 						total_unknown += unknown;
@@ -5402,7 +5380,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		EnumOptions eo;
 		eo.dedup_by_code = true;
 		eo.max_subsets = opt.max_subsets;
-		eo.subsets_ascending = opt.subsets_ascending;
 		eo.db = &db;
 		// La valeur de retour est le nombre d'etapes NON IDENTIFIEES. Les trois
 		// autres sites l'impriment ; ici elle etait jetee, et un plan a 90 % de
@@ -5500,7 +5477,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 				EnumOptions oeo;   // enumeration ADVERSE : brute, sans nos filtres
 				oeo.dedup_by_code = true;
 				oeo.max_subsets = opt.max_subsets;
-				oeo.subsets_ascending = opt.subsets_ascending;
 				oeo.db = &db;
 				std::vector<std::vector<uint8_t>> prefix;
 				size_t oi = 0, ti = 0;
@@ -5794,7 +5770,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 								EnumOptions reo;
 								reo.dedup_by_code = true;
 								reo.max_subsets = opt.max_subsets;
-								reo.subsets_ascending = opt.subsets_ascending;
 								reo.db = &db;
 								auto ropts = Enumerate(
 									rtype, rpayload.data(),
@@ -5838,7 +5813,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						fcfg.max_solutions = 4;
 						fcfg.enumeration.dedup_by_code = true;
 						fcfg.enumeration.max_subsets = opt.max_subsets;
-						fcfg.enumeration.subsets_ascending = opt.subsets_ascending;
 						fcfg.enumeration.db = &db;
 						if(!cons.no_activate.empty())
 							fcfg.enumeration.no_activate = &cons.no_activate;
@@ -5880,16 +5854,11 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						// Conditionnement par le chemin (MCPS) et plafond de la
 						// table contextuelle : les deux doivent voyager ENSEMBLE,
 						// sinon le contexte est calcule et jamais borne.
-						fcfg.mcps_depth = opt.mcps_depth;
 						fcfg.qhat_depth = opt.qhat_depth;
 						fcfg.qhat_window = opt.qhat_window;
 						fcfg.qhat_rho = opt.qhat_rho;
 						fcfg.qhat_max_nodes = opt.qhat_nodes;
-						fcfg.enumeration.allow_phase_change =
-							!opt.no_phase_change;
 						fcfg.enumeration.canonical_zones = opt.canonical_zones;
-						fcfg.novelty_rollout_cut = opt.novelty_rollout_cut;
-						fcfg.archive_spread = opt.archive_spread;
 						fcfg.goal_subset =
 							opt.target_subset ||
 							(!opt.target_specs.empty() && !opt.target_exact);
@@ -6004,7 +5973,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 									EnumOptions deo;
 									deo.dedup_by_code = true;
 									deo.max_subsets = opt.max_subsets;
-									deo.subsets_ascending = opt.subsets_ascending;
 									deo.db = &db;
 									auto cold = Enumerate(
 										sc_ptype, sc_payload.data(),
@@ -6298,7 +6266,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		EnumOptions eo;
 		eo.dedup_by_code = true;
 		eo.max_subsets = opt.max_subsets;
-		eo.subsets_ascending = opt.subsets_ascending;
 		eo.db = &db;
 		arena.Restore();
 		auto t0 = Clock::now();
@@ -6502,12 +6469,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.max_solutions = 16;
 	cfg.enumeration.dedup_by_code = true;
 	cfg.enumeration.max_subsets = opt.max_subsets;
-	cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 	cfg.enumeration.db = &db;
-	cfg.enumeration.allow_phase_change = !opt.no_phase_change;
 	cfg.enumeration.canonical_zones = opt.canonical_zones;
-	cfg.novelty_rollout_cut = opt.novelty_rollout_cut;
-	cfg.archive_spread = opt.archive_spread;
 	// Cible POSEE -> inclusion par defaut ; cible CAPTUREE -> egalite exacte.
 	cfg.goal_subset = opt.target_subset ||
 					  (!opt.target_specs.empty() && !opt.target_exact);
@@ -6541,7 +6504,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.finisher_post_goal = opt.finisher_post_goal;
 	cfg.finisher_options = opt.finisher_options;
 	cfg.lifo_ties = opt.lifo_ties;
-	cfg.phs_canonical = opt.phs_canonical;
 	cfg.merged_pop = opt.merged_pop;
 	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
 	// MINAGE EN LIGNE (session 14) : le corpus vivant du run. Il est declare
@@ -6576,6 +6538,24 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.hint_bias = static_cast<float>(opt.hint_bias);
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
 				opt.hint_bias >= 0 ? "--hint-bias" : "defaut du moteur");
+	// MODE DETERMINISTE (audit 18). Imprime, parce qu'un budget qui n'est plus
+	// du temps change la lecture de TOUS les compteurs de debit du rapport.
+	cfg.max_rollouts = opt.max_rollouts;
+	if(opt.max_nodes)
+		cfg.max_nodes = opt.max_nodes;
+	if(opt.max_rollouts || opt.max_nodes) {
+		std::printf("  BUDGET EN COMPTE : %llu tirage(s), %llu noeud(s) par "
+					"worker\n",
+					(unsigned long long)opt.max_rollouts,
+					(unsigned long long)cfg.max_nodes);
+		if(opt.threads != 1)
+			std::printf("     !! plusieurs workers : le budget est deterministe, "
+						"l'ORDRE des echanges ne l'est pas. Ajouter "
+						"--threads 1 pour un run reproductible.\n");
+	}
+	cfg.adapt_to_peak = opt.adapt_to_peak;
+	if(opt.adapt_to_peak)
+		std::printf("  gradient TRONQUE AU PIC du score (--adapt-to-peak)\n");
 	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
 	// Le graphe de recettes est cree et amorce PLUS HAUT (avant le rejeu
 	// d'adaptation, qui le nourrit) ; ici, seulement le cablage dans cfg.
@@ -6599,59 +6579,35 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					"graphe de recettes sont favorises\n"
 					"                     (prompts de selection compris — "
 					"card_on_select allume)\n", opt.assign_bias);
+		// LE MECANISME LIT `snap_useful`, QUI VIENT DU GRAPHE. Sans graphe il ne
+		// peut rien lire et le drapeau est INERTE — il l'etait en silence
+		// jusqu'a la session 18bis, tout en imprimant la ligne ci-dessus. Le
+		// relevé le dit desormais, et la ligne « instantanes du graphe » du bilan
+		// des tirages donne la vie du mecanisme (piege 52).
+		if(!cfg.recipes)
+			std::printf("!! --assign-bias SANS graphe de recettes : le "
+						"mecanisme est INERTE (il lit `snap_useful`).\n"
+						"   Ajouter --recipes 0 — le graphe est alors alimente "
+						"et lu sans entrer dans aucun cout.\n");
 	}
 	cfg.hindsight = static_cast<float>(opt.hindsight);
 	cfg.hindsight_k = opt.hindsight_k;
-	cfg.recipe_weight = static_cast<float>(opt.recipe_weight);
 	cfg.backward = opt.backward;
-	// CANONICALISATION DES COLONNES DANS LA CLE (session 17). Avertissement
-	// AUTOMATIQUE et non decoratif : une fleche de Lien pointe une colonne, et
-	// une zone pointee autorise une invocation depuis l'extra deck — confondre
-	// les colonnes fusionnerait alors deux etats qui ne sont pas equivalents et
-	// SUPPRIMERAIT une solution en silence. On ne peut pas lire « effet
-	// colonne-dependant » dans la base, mais on peut lire TYPE_LINK, qui en est
-	// la source de tres loin la plus frequente.
-	cfg.canonical_digest = opt.canonical_digest;
-	if(opt.canonical_digest) {
-		size_t links = 0;
-		{
-			// L'EXTRA DECK est la seule zone ou vivent les monstres Lien ; on
-			// l'interroge sur le duel deja construit plutot que de re-lire la
-			// decklist, qui n'est pas dans cette portee.
-			std::vector<QueriedCard> xq;
-			duel.Query(static_cast<uint8_t>(opt.target_player), LOCATION_EXTRA,
-					   QUERY_CODE | QUERY_ALIAS, xq);
-			for(const QueriedCard& qc : xq)
-				if(qc.present)
-					if(const CardRow* r = db.Find(db.Canonical(qc.Code()));
-					   r && (r->type & TYPE_LINK))
-						++links;
-		}
-		std::printf("  --canonical-digest : les COLONNES sont confondues dans la "
-					"cle de transposition\n"
-					"                       (mesure : x33,7 de valeurs "
-					"distinctes en moins aux points stables)\n");
-		if(links)
-			std::printf("!! %zu monstre(s) LIEN dans la decklist : leurs FLECHES "
-						"pointent des colonnes.\n"
-						"   Confondre les colonnes peut fusionner deux etats NON "
-						"equivalents et supprimer\n"
-						"   une solution EN SILENCE. Le filet est la verification "
-						"finale, qui rejoue chaque\n"
-						"   candidat depuis zero — mais une solution jamais "
-						"trouvee ne s'y rattrape pas.\n", links);
-		else
-			std::printf("                       aucun monstre Lien dans la "
-						"decklist : aucune fleche ne depend d'une colonne.\n");
-	}
-	if(opt.assign || opt.recipe_weight > 0.0 || opt.backward) {
+	// `--canonical-digest` (confondre les COLONNES dans la cle de transposition)
+	// a vecu ici, avec l'avertissement automatique sur les monstres LIEN.
+	// SUPPRIME (audit 18) : REFUTE sur l'etalon A — poses divisees par 2 et par
+	// 12 — et la cause est NOMMEE : ce deck porte trois monstres Lien, dont les
+	// FLECHES pointent des colonnes, et une zone pointee autorise une invocation
+	// depuis l'extra deck. Le gain sur l'exhaustif etait reel (x1,67, +4
+	// profondeurs) et il ne convertit pas.
+	if(opt.assign || opt.backward) {
 		if(!cfg.recipes)
-			std::printf("!! --assign / --recipe-w / --backward sans graphe de "
+			std::printf("!! --assign / --backward sans graphe de "
 						"recettes : les mecanismes sont INERTES.\n");
 		else
-			std::printf("  session 17 : assign %s, recipe-w %.2f, backward %s "
+			std::printf("  session 17 : assign %s, backward %s "
 						"(instantane du graphe tous les %llu tirages)\n",
-						opt.assign ? "OUI" : "non", opt.recipe_weight,
+						opt.assign ? "OUI" : "non",
 						opt.backward ? "OUI" : "non",
 						(unsigned long long)cfg.recipe_snap_period);
 	}
@@ -6659,26 +6615,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::printf("  session 17 : hindsight %.2f x alpha, au plus %zu but(s) de "
 					"substitution par worker\n",
 					opt.hindsight, opt.hindsight_k);
-	// BIAIS DERIVE DE LA CIBLE (--goal-bias). Les codes du board cible entrent
-	// dans le biais d'echantillonnage, et les prompts de SELECTION recoivent
-	// une identite de carte pour que ce biais puisse s'y appliquer. Les deux
-	// ensemble, parce qu'aucun des deux ne sert seul.
-	if(opt.goal_bias) {
-		cfg.enumeration.card_on_select = true;
-		size_t added = 0;
-		for(uint32_t code : target.codes) {
-			const uint32_t c = db.Canonical(code);
-			if(std::find(cfg.hint_cards.begin(), cfg.hint_cards.end(), c) ==
-			   cfg.hint_cards.end()) {
-				cfg.hint_cards.push_back(c);
-				++added;
-			}
-		}
-		std::printf("  --goal-bias : %zu code(s) de la CIBLE verses au biais "
-					"d'echantillonnage, et les prompts\n              de "
-					"selection portent desormais une identite de carte "
-					"(MSG_SELECT_CARD).\n", added);
-	}
 	cfg.probe_repeat = opt.probe_repeat;
 	// LE JUGE « CONVERSION OFFRE -> CHOIX » a besoin de savoir quelle carte le
 	// coup retenu engage, donc de `card_on_select` sur les prompts de selection.
@@ -6920,6 +6856,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		struct ModeStats {
 			uint64_t nodes = 0, rollouts = 0, cuts = 0, turn_cuts = 0, adapts = 0;
 			uint64_t hint_seen = 0, hint_taken = 0;
+			// Ventilation (audit 18) : `sel` = prompts de SOUS-ENSEMBLE, ou
+			// l'identite de carte est approximative et n'existe que sous
+			// `--card-on-select` ; `exact` = le reste, ou elle designe vraiment
+			// le coup. Sans cette separation le compteur avait trois causes.
+			uint64_t hint_exact = 0, hint_sel = 0;
+			// Vie de --adapt-to-peak, et travail refait par la transposition.
+			uint64_t peak_trunc = 0, tt_reexplored = 0;
 			uint64_t rr[4] = { 0, 0, 0, 0 };
 			uint64_t burn_cuts = 0, goal_hits = 0;
 			// LES CONTRAINTES COUPENT ICI, dans les tirages — pas dans les
@@ -7045,14 +6988,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// Le cadran d'adaptation, imprime des qu'il quitte le defaut : un
 			// reglage qui change l'algorithme sans se nommer est une variable
 			// cachee (C15).
-			if(opt.nrpa_alpha > 0 || opt.nrpa_lr)
-				std::printf("  adaptation  : alpha %.3f (%s), repetitions "
-							"limitees %u (%s)\n",
-							opt.nrpa_alpha > 0 ? opt.nrpa_alpha
-											   : SearchConfig{}.nrpa_alpha,
-							opt.nrpa_alpha > 0 ? "--nrpa-alpha" : "defaut",
-							opt.nrpa_lr,
-							opt.nrpa_lr ? "--nrpa-lr" : "stagnation seule");
+			// (`--nrpa-lr`, les repetitions limitees de GNRPA-LR, etait imprime
+			// ici. SUPPRIME — audit 18, REFUTE en 9.19. La sortie de niveau se
+			// fait desormais sur la seule stagnation.)
+			if(opt.nrpa_alpha > 0)
+				std::printf("  adaptation  : alpha %.3f (%s), sortie de niveau "
+							"sur stagnation seule\n",
+							opt.nrpa_alpha,
+							"--nrpa-alpha");
 		}
 		// Meilleure sequence GLOBALE, partagee entre les workers NRPA : les
 		// redemarrages repartent de la meilleure ligne connue de tous au lieu
@@ -7107,7 +7050,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						wcfg.nrpa_bias_known = static_cast<float>(opt.nrpa_bias);
 					wcfg.nrpa_restart_keep = static_cast<float>(opt.nrpa_keep);
 					wcfg.nrpa_shared = &shared_best;
-					wcfg.nrpa_lr = opt.nrpa_lr;
 					// Recette Montparnasse (chantier 2) : pas d'adaptation et
 					// iterations par niveau, jusqu'ici en dur. 0 = defaut du
 					// moteur, a l'octet pres.
@@ -7142,7 +7084,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					// Conditionnement par le chemin (MCPS) et plafond de la
 					// table contextuelle : les deux doivent voyager ENSEMBLE,
 					// sinon le contexte est calcule et jamais borne.
-					wcfg.mcps_depth = opt.mcps_depth;
 					// BANDIT DE TETE (--qhat) : les quatre cadrans voyagent
 					// ensemble ; sans la fenetre ni le plafond, la profondeur
 					// seule ferait un mecanisme non borne.
@@ -7205,6 +7146,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 					m.hint_seen += s.Stats().hint_seen;
 					m.hint_taken += s.Stats().hint_taken;
+					m.hint_exact += s.Stats().hint_seen_exact;
+					m.hint_sel += s.Stats().hint_seen_sel;
+					m.peak_trunc += s.Stats().peak_truncations;
+					m.tt_reexplored += s.Stats().tt_reexplored;
 					m.AddRepeat(s.Stats());
 					m.lm_h_sum += s.Stats().landmark_h_sum;
 					m.lm_h_count += s.Stats().landmark_h_count;
@@ -7305,8 +7250,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						"worker%s  (conditionnement : %s)\n",
 						nrpa.ctx_entries,
 						nrpa.ctx_capped ? "  !! PLAFOND ATTEINT (--ctx-max)" : "",
-						opt.mcps_depth ? "CHEMIN (--mcps, REFUTE)"
-									   : "posees+main");
+"posees+main");
 		// --- LA VIE DU BANDIT DE TETE, ET SA SONDE (--qhat) ---
 		//
 		// Trois lectures avant toute autre. (1) `decisions` a zero = le bandit
@@ -7477,15 +7421,41 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
 					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
 					best_monsters);
-		if(!cfg.hint_cards.empty())
+		if(!cfg.hint_cards.empty()) {
+			const uint64_t hs = nrpa.hint_seen + greedy.hint_seen;
+			const uint64_t hx = nrpa.hint_exact + greedy.hint_exact;
+			const uint64_t hl = nrpa.hint_sel + greedy.hint_sel;
 			std::printf("  visibilite des indices : legaux dans %llu etat(s), "
 						"pris %llu fois%s\n",
-						(unsigned long long)(nrpa.hint_seen + greedy.hint_seen),
+						(unsigned long long)hs,
 						(unsigned long long)(nrpa.hint_taken + greedy.hint_taken),
-						(nrpa.hint_seen + greedy.hint_seen) == 0
-							? "  <-- JAMAIS LEGAL : le probleme est la "
-							  "disponibilite des materiaux, pas la recherche"
-							: "");
+						hs == 0 ? "  <-- JAMAIS LEGAL : le probleme est la "
+								  "disponibilite des materiaux, pas la recherche"
+								: "");
+			// VENTILATION (audit 18) : sans elle ce compteur avait TROIS causes
+			// — le drapeau --card-on-select, la qualite du run et le volume de
+			// travail — et ne pouvait donc en juger aucune. Seule la colonne
+			// `coup exact` parle d'un coup ; la colonne `sous-ens.` n'existe que
+			// sous --card-on-select et y designe le premier code d'une
+			// selection, pas la carte engagee.
+			std::printf("     dont coup EXACT (idle/chaine/position) %llu, "
+						"sous-ensemble (identite approximative) %llu\n",
+						(unsigned long long)hx, (unsigned long long)hl);
+		}
+		// VIE DE --adapt-to-peak (piege 52) : a zero le mecanisme est INERTE et
+		// aucun juge de recherche ne le concerne.
+		if(cfg.adapt_to_peak)
+			std::printf("  gradient tronque au pic : %llu pas retires\n",
+						(unsigned long long)(nrpa.peak_trunc +
+											 greedy.peak_trunc));
+		// TRAVAIL REFAIT PAR LA TRANSPOSITION (audit 18) : etats deja vus mais
+		// avec un budget plus petit, donc RE-DEVELOPPES. Le dossier ne comptait
+		// que la coupure et ne pouvait pas dire si le mecanisme paie.
+		if(nrpa.tt_reexplored + greedy.tt_reexplored)
+			std::printf("  transposition : %llu etat(s) RE-EXPLORES faute de "
+						"budget a la premiere visite\n",
+						(unsigned long long)(nrpa.tt_reexplored +
+											 greedy.tt_reexplored));
 		// LE diagnostic du handrip : des tirages atteignent-ils seulement UNE
 		// resolution exigee ? Zero a >=1 = le rip n'est jamais legal/possible
 		// (jeu) ; des >=1 sans >=3 = la sequence complete est hors de portee
@@ -8932,13 +8902,11 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.max_nodes = 5000000;
 		cfg.enumeration.dedup_by_code = true;
 		cfg.enumeration.max_subsets = opt.max_subsets;
-		cfg.enumeration.subsets_ascending = opt.subsets_ascending;
 		// La question de l'operateur : combien de BOARDS, pas combien d'etats.
 		cfg.count_boards = true;
 		// Le correctif est mesurable ICI et nulle part mieux : `--growth` rend
 		// la PROFONDEUR atteinte a budget egal, qui est la grandeur que la
 		// fusion doit ameliorer.
-		cfg.canonical_digest = opt.canonical_digest;
 		cfg.elide_forced = opt.elide_forced;
 
 		Search search(duel, arena, yrp, cfg);
@@ -9070,7 +9038,7 @@ int main(int argc, char** argv) {
 	// `--recipes 0` alimente et mesure le graphe SANS l'introduire dans le `h`
 	// du finisseur : les mecanismes de la session 17 restent donc les seuls
 	// facteurs modifies.
-	if((opt.assign || opt.recipe_weight > 0.0 || opt.backward) &&
+	if((opt.assign || opt.backward) &&
 	   opt.recipes < 0) {
 		opt.recipes = 0.0;
 		std::printf("  --assign / --recipe-w / --backward impliquent --recipes 0 : "

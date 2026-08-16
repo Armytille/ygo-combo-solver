@@ -316,6 +316,22 @@ struct PolicyStep {
 struct NrpaRun {
 	double score = -1;
 	std::vector<PolicyStep> steps;
+	// NOMBRE DE PAS AU MOMENT OU LE SCORE A ATTEINT SON MAXIMUM (audit 18).
+	//
+	// LE DEFAUT QUE CE CHAMP CORRIGE, et il est en deux lignes du source. Le
+	// score d'un tirage est un MAX sur les prefixes (`if(sc > run.score)`), mais
+	// `AdaptRun` parcourt TOUS les pas. Une ligne qui culmine a 7/8 au pas 200
+	// puis erre 230 pas voit donc ses 430 pas renforces a +alpha : la politique
+	// apprend l'effondrement d'apres-pic exactement aussi fort que la montee.
+	//
+	// La signature est mesuree : le regime d'echec de l'etalon B ecrit une
+	// approche de 434 decisions pour un plafond de 435, contre 189-258 quand il
+	// reussit. Le tirage ne s'arrete pas parce qu'il a fini — il s'arrete parce
+	// qu'il est a bout, et tout ce qu'il a fait apres son pic est appris.
+	//
+	// Rempli toujours (cout : une affectation par amelioration) ; CONSOMME
+	// seulement sous `--adapt-to-peak`, pour que l'A/B ne bouge qu'un facteur.
+	size_t peak_steps = 0;
 	// Ligne PLATE (session 14, minage EN LIGNE) : la MEME ligne, mais toutes ses
 	// decisions a choix multiples sous forme ATOMIQUE — y compris celles qu'une
 	// macro a absorbees, qui ne produisent aucun `steps`. Remplie seulement
@@ -1091,9 +1107,13 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // `ctx_max` : plafond d'entrees du niveau contextuel (0 = illimite). Au-dela,
 // les cases existantes continuent d'etre mises a jour, aucune nouvelle n'est
 // creee — le conditionnement par le chemin degrade proprement vers le global.
+// `to_peak` : n'adapter que le PREFIXE qui a produit le score (audit 18). Le
+// score etant un MAX sur les prefixes, les pas d'apres le pic n'ont contribue a
+// rien et etaient pourtant renforces autant que les autres.
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp = 1.0f, size_t ctx_max = 0, float assign_bias = 0.0f);
+			  float temp = 1.0f, size_t ctx_max = 0, float assign_bias = 0.0f,
+			  bool to_peak = false);
 
 // `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
 // `hint_bias` et `temp` sont EXIGES, sans defaut : la session 8 les avait
@@ -1134,17 +1154,6 @@ struct ArchiveEntry {
 	std::vector<std::vector<uint8_t>> path;
 };
 
-// NIVEAU DE PROGRES d'une entree d'archive (session 15, --archive-spread) :
-// le couple (resolutions exigees faites, cartes du board cible posees), qui est
-// exactement l'axe sur lequel la cle de tri SATURE en regime but seul. C'est la
-// dimension le long de laquelle l'archive doit ETALER sa couverture au lieu de
-// n'en garder que le sommet.
-inline uint32_t ArchiveLevel(uint32_t resolves, uint32_t overlap) {
-	if(resolves > 15) resolves = 15;
-	if(overlap > 255) overlap = 255;
-	return resolves * 256u + overlap;
-}
-
 // --- table de transposition partagee (lazy SMP) ----------------------------
 //
 // Slots atomiques a ecrasement lossy : une entree = tag 48 bits | budget
@@ -1170,11 +1179,19 @@ public:
 	// privee : l'entree s'ecrit AVANT l'exploration du sous-arbre (marqueur
 	// "pris"), un timeout peut donc perdre un sous-arbre reclame — c'est la
 	// lossiness assumee du lazy SMP, sans effet sur les passes qui terminent.
-	bool CheckAndClaim(uint64_t key, uint32_t budget) {
+	// `fresh` (optionnel) : le slot ne portait PAS ce tag, donc l'etat est vu
+	// pour la premiere fois — c'est la seule facon de tenir un compte d'etats
+	// distincts sur ce chemin. Sans lui, `distinct_by_depth` restait a zero dans
+	// tout run multi-worker et se lisait pourtant comme une mesure (audit 18).
+	// Lossy comme le reste : une collision de slot fait recompter un etat vu.
+	bool CheckAndClaim(uint64_t key, uint32_t budget, bool* fresh = nullptr) {
 		std::atomic<uint64_t>& s = slots[key & mask];
 		const uint64_t tag = key & ~0xffffull;
 		const uint64_t cur = s.load(std::memory_order_relaxed);
-		if((cur & ~0xffffull) == tag && (cur & 0xffffull) >= budget)
+		const bool same_tag = (cur & ~0xffffull) == tag;
+		if(fresh)
+			*fresh = !same_tag;
+		if(same_tag && (cur & 0xffffull) >= budget)
 			return true;
 		s.store(tag | (budget > 0xffffu ? 0xffffu : budget),
 				std::memory_order_relaxed);
@@ -1881,6 +1898,21 @@ struct SearchConfig {
 	uint32_t max_actions = 0;         // 0 = pas de borne (sinon A_ref)
 	double time_limit_ms = 30000;
 	uint64_t max_nodes = 2000000;
+	// BUDGET EN TIRAGES — LA CONDITION DU DETERMINISME (audit session 18).
+	//
+	// Le budget etait du TEMPS DE MUR, et c'est la cause du non-determinisme que
+	// le dossier attribuait depuis la session 6 aux echanges entre workers. La
+	// mesure a refute cette attribution : deux runs `--threads 1` a la meme
+	// graine, donc SANS aucun echange, font 41 232 et 42 179 tirages — ils ne
+	// s'arretent pas au meme point de la trajectoire NRPA, donc ne rendent pas le
+	// meme resultat. Le nombre de workers n'y est pour rien : c'est l'UNITE du
+	// budget.
+	//
+	// A `--threads 1` et avec ce plafond, deux executions font exactement le meme
+	// travail. C'est le seul mode ou un A/B fin veut dire quelque chose ; il n'est
+	// PAS le mode de production (cout mesure du mono-worker : /5,1 a /5,9).
+	// 0 = illimite, c'est-a-dire le comportement d'avant a l'octet pres.
+	uint64_t max_rollouts = 0;
 	EnumOptions enumeration;
 	bool collect_solutions = true;
 	size_t max_solutions = 64;
@@ -1914,7 +1946,6 @@ struct SearchConfig {
 	// deux etats confondus ne sont pas equivalents (fleches de LIEN), une
 	// solution disparait en silence. D'ou l'opt-in et l'avertissement de `main`.
 	// Filet : la verification finale rejoue chaque candidat depuis zero.
-	bool canonical_digest = false;
 	// ELISION DES COUPS FORCES DANS LA RECHERCHE EXHAUSTIVE (session 17).
 	//
 	// CE QUE L'ATTRIBUTION DESIGNE. La cle de transposition vaut ~200 fois le
@@ -1982,7 +2013,6 @@ struct SearchConfig {
 	// de 6/8 sur le cas de transplantation. C'est le mode de defaillance de
 	// Rollout-IW sans arbre : la variante avec arbre le contourne, mais NRPA
 	// rend ici davantage pour moins de complexite.
-	bool novelty_rollout_cut = false;
 
 	// --- NRPA (tirages par politique apprise) ---
 	// Niveau d'imbrication et iterations par niveau. Le cout d'un appel de
@@ -2036,7 +2066,6 @@ struct SearchConfig {
 	// La troncature borne la table par le nombre de prefixes de profondeur <= k,
 	// c'est-a-dire par la largeur du HAUT de l'arbre — qui est etroite, et c'est
 	// precisement la ou l'information de vie ou de mort se trouve.
-	uint32_t mcps_depth = 0;
 	// --- BANDIT DE TETE A STATISTIQUE DE PERMUTATION (session 15, --qhat) ---
 	// Profondeur, en decisions ENREGISTREES, sur laquelle la regle de selection
 	// de MCPS remplace l'echantillonnage softmax : argmax de
@@ -2083,7 +2112,6 @@ struct SearchConfig {
 	// produirait jamais) avant d'arreter le niveau. Re-trouver la meme ligne
 	// signale la convergence AVANT que la stagnation (8 iterations sans
 	// progres) ne l'admette. 0 = ancien comportement, stagnation seule.
-	uint32_t nrpa_lr = 0;
 	// PHS* (arXiv:2103.11505, meme papier que LTS) : poids de la distance au
 	// but dans le cout du finisseur — cout = log(d+1) + levin_h * h(n) - log
 	// pi(n), h = cartes cibles manquantes + resolutions manquantes au noeud
@@ -2210,13 +2238,10 @@ struct SearchConfig {
 	// Identite du worker, pour le quota par worker du corpus vivant. Sans
 	// effet quand `options_online` est nul.
 	uint32_t worker_id = 0;
-	// PHS* CANONIQUE (audit session 12) : le cout du papier (2103.11505) est
-	// (d + h)/pi — log(d + levin_h*h) - log pi — l'heuristique s'AJOUTE a la
-	// profondeur et la borne d'expansions est preservee. Notre forme par
-	// defaut, log(d+1) + levin_h*h - log pi, multiplie le cout par
-	// exp(levin_h*h) : une ponderation type weighted-A*, plus agressive, SANS
-	// la garantie — elle portait le nom du papier sans en etre. A/B etalon 0.
-	bool phs_canonical = false;
+	// `--phs-canonical` (PHS* du papier, (d + h)/pi) a vecu ici. SUPPRIME
+	// (audit 18) : departage en session 12 et jamais retenu. La forme par defaut
+	// — log(d+1) + levin_h*h - log pi — est conservee ; c'est une ponderation
+	// type weighted-A* sans la garantie du papier, et c'est un choix ASSUME.
 	// --- graphe de recettes (chantier 16) ---
 	// Non nul : le graphe est ALIMENTE par les invocations observees, et `h`
 	// devient la distance sur ce graphe au lieu du compte de cartes manquantes.
@@ -2326,6 +2351,11 @@ struct SearchConfig {
 	// qu'il biaisait vers Liger, un coup qui n'existe pas encore ; celui-ci
 	// biaise vers ce qu'il faut faire AVANT.
 	float assign_bias = 0.0f;
+	// TRONCATURE DU GRADIENT AU PIC DU SCORE (audit session 18, --adapt-to-peak).
+	//
+	// Voir NrpaRun::peak_steps pour le defaut corrige. Opt-in, pour que l'A/B ne
+	// bouge qu'un facteur ; a faux, le chemin est celui d'avant a l'octet pres.
+	bool adapt_to_peak = false;
 
 	// (2) HINDSIGHT (--hindsight w). Andrychowicz et al., NeurIPS 2017 : un
 	// echec re-etiquete par le but qu'il a EFFECTIVEMENT atteint. Notre or
@@ -2350,7 +2380,6 @@ struct SearchConfig {
 	// distance a la premiere decision du tirage — meme convention que les
 	// landmarks, et un score qui reste positif (le score du tirage est un MAX
 	// initialise a 0 ; un terme negatif le tuerait).
-	float recipe_weight = 0.0f;
 	// Periode de rafraichissement de l'instantane du graphe, en tirages.
 	uint64_t recipe_snap_period = 2048;
 
@@ -2407,7 +2436,6 @@ struct SearchConfig {
 	// part des cases a chaque couple (resolutions, cartes posees), c'est-a-dire
 	// rend a l'archive sa nature de COUVERTURE. false = comportement d'avant,
 	// a l'octet pres (palmares global).
-	bool archive_spread = false;
 
 	// --- reparation : resynchronisation semantique ---
 	// digest -> index dans yrp.responses (cf. LiftRefLine). Nul = pas de
@@ -2649,6 +2677,16 @@ inline const char* ZoneSlotName(int slot) {
 	return (slot >= 0 && slot < 6) ? kNames[slot] : "?";
 }
 
+// Prompt dont les choix sont des SOUS-ENSEMBLES : `Choice::card` n'y est qu'une
+// identite APPROXIMATIVE (le premier code du sous-ensemble) et n'y existe que
+// sous `--card-on-select`. C'est exactement la frontiere que la ventilation de
+// `hint_seen` doit suivre — sans elle, le compteur melange l'effet du drapeau a
+// la qualite du run et ne juge plus rien (audit 18).
+inline bool IsSubsetPrompt(uint8_t msg) {
+	return msg == MSG_SELECT_CARD || msg == MSG_SELECT_TRIBUTE ||
+		   msg == MSG_SELECT_SUM;
+}
+
 inline int OfferSlot(uint8_t msg) {
 	switch(msg) {
 	case MSG_SELECT_IDLECMD:       return 0;
@@ -2665,6 +2703,13 @@ inline int OfferSlot(uint8_t msg) {
 struct SearchStats {
 	uint64_t nodes = 0;             // etats developpes
 	uint64_t transpositions = 0;    // fusions par la table
+	// ETATS DEJA VUS MAIS AVEC UN BUDGET PLUS PETIT, donc RE-EXPLORES (audit 18).
+	// La table stocke `disc + 1` et ne coupe que si l'entree existante vaut au
+	// moins autant ; un etat revu avec plus de budget est donc re-developpe. Le
+	// dossier ne comptait que la COUPURE (`transpositions`), jamais ce travail-la
+	// — on ne pouvait donc pas dire si le mecanisme paie. Compte sur le chemin de
+	// la table PRIVEE ; la table partagee (lossy) ne distingue pas les deux cas.
+	uint64_t tt_reexplored = 0;
 	uint64_t dead_ends = 0;         // reponses rejetees par le core
 	uint64_t terminals = 0;
 	// Branches coupees par un PLAFOND (profondeur en decisions, budget
@@ -2685,7 +2730,20 @@ struct SearchStats {
 	// defaut. Ce n'est pas un elagage : c'est un pan de l'espace qui n'a jamais
 	// existe. Le masque retient quels types de messages sont concernes, pour que
 	// le rapport nomme le prompt au lieu de dire seulement « il y en a » (3.5).
+	//
+	// DEUX EVENEMENTS DISTINCTS, SEPARES PAR L'AUDIT 18. Le compteur unique etait
+	// incremente AVANT d'essayer `DefaultResponse` : quand celle-ci echoue, la
+	// branche ne survit pas et compte AUSSI en `dead_ends`. Le texte imprime
+	// disait « reduits a LA reponse par defaut » pour des branches qui etaient en
+	// fait SUPPRIMEES, et le meme evenement etait compte deux fois — c'est ce qui
+	// faisait lire « 90 prompts forces et 90 impasses » comme deux faits
+	// concordants alors que c'en etait un seul (9.24 (h)).
+	//   forced_default : une reponse par defaut EXISTE, la branche survit reduite.
+	//   forced_killed  : aucune reponse par defaut, la BRANCHE MEURT — c'est le
+	//                    cas des trois ANNOUNCE_*, structurellement hors d'atteinte.
 	uint64_t forced_default = 0;
+	uint64_t forced_killed = 0;
+	uint64_t forced_killed_prompts = 0;
 	uint64_t forced_default_prompts = 0;
 	// Nombre d'etats DISTINCTS atteints a chaque profondeur : c'est la courbe
 	// qui decide si "exhaustif" est un mot realiste.
@@ -2841,6 +2899,11 @@ struct SearchStats {
 	uint64_t rollout_count = 0;
 	uint64_t turn_cuts = 0;         // tirages arretes au changement de tour
 	uint64_t nrpa_adapts = 0;
+	// VIE DE --adapt-to-peak (audit 18, piege 52) : pas RETIRES du gradient
+	// parce qu'ils suivaient le pic du score. A zero, le mecanisme est INERTE et
+	// aucun juge de recherche ne le concerne — soit les lignes culminent a leur
+	// dernier pas, soit le drapeau est eteint.
+	uint64_t peak_truncations = 0;
 	// --- options (chantier 17) ---
 	// Le triptyque de vie du mecanisme (piege 52) : macros CHOISIES par
 	// l'echantillonnage, decisions ABSORBEES par leurs pas scriptes (le gain
@@ -2877,7 +2940,22 @@ struct SearchStats {
 	// etait LEGAL, et combien de fois il a ete pris. hint_seen = 0 signifie
 	// que le probleme n'est pas l'echantillonnage mais la LEGALITE — le core
 	// ne propose jamais l'invocation, les materiaux n'y sont pas.
+	//
+	// VENTILE PAR TYPE DE PROMPT (audit 18), et il le fallait : le compteur
+	// unique avait TROIS causes a la fois — le drapeau `--card-on-select` (qui
+	// rend `Choice::card` non nul sur tous les prompts de SELECTION), la qualite
+	// du run (une ligne qui atteint des etats ou la carte indicee est jouable la
+	// voit souvent) et le simple volume de travail. Mesures qui l'ont etabli :
+	// 4 avec le drapeau a UN worker, 64 617 SANS le drapeau a seize. Un compteur
+	// a trois causes ne peut en juger aucune — meme correctif que la sonde
+	// d'offre a recu en 9.24 (a), sur le meme defaut.
+	//   *_exact : IDLECMD, CHAIN, POSITION, BATTLECMD — `card` designe VRAIMENT
+	//             la carte engagee. C'est le seul volet qui parle d'un coup.
+	//   *_sel   : SELECT_CARD, SELECT_TRIBUTE, SELECT_SUM — `card` n'est que le
+	//             premier code d'un sous-ensemble, et n'existe que sous
+	//             `--card-on-select`. C'est le volet qui BOUGE avec le drapeau.
 	uint64_t hint_seen = 0, hint_taken = 0;
+	uint64_t hint_seen_exact = 0, hint_seen_sel = 0;
 	// Tirages ayant atteint >= k resolutions exigees (k = 1..4). LE
 	// diagnostic du handrip : separe « la politique ne rippe jamais »
 	// (echantillonnage, resolve_reached[0] > 0) de « le rip n'est jamais
@@ -3156,8 +3234,16 @@ private:
 	// un garde RAII — PolicyRollout sort par une douzaine de `return`, et un
 	// tirage qui MEURT apres avoir pose une Fusion reste un exemple parfait de
 	// « comment payer cette Fusion ».
+	// `steps` : nombre de PolicyStep enregistres a l'instant de l'invocation.
+	// C'est le pic PROPRE a ce but de substitution — le `peak_steps` du tirage
+	// est celui de l'ANCIEN but et ne s'y applique pas (audit 18).
+	struct HindsightHit {
+		uint32_t code;
+		uint32_t depth;
+		uint32_t steps;
+	};
 	void HindsightCommit(const NrpaRun& run,
-						 const std::vector<std::pair<uint32_t, uint32_t>>& hits);
+						 const std::vector<HindsightHit>& hits);
 	// Liste des cartes que la SONDE observe. `--watch` quand il est donne (pur
 	// comptage, aucun biais) ; a defaut les entrees --resolve/--summon-min,
 	// pour ne pas casser les mesures anterieures — mais celles-la BIAISENT
@@ -3352,25 +3438,6 @@ private:
 	std::vector<ArchiveEntry> archive;
 	std::unordered_map<uint64_t, size_t> archive_cells;
 	uint64_t archive_min_score = 0;
-	// Occupation par niveau de progres (cfg.archive_spread). Vide et jamais
-	// consultee quand le quota est eteint. `archive_k` etant petit (24-64), la
-	// table se recalcule integralement a chaque modification : pas de mise a
-	// jour incrementale a maintenir juste, pour un cout nul.
-	struct LevelStat { uint32_t count = 0; uint64_t min_score = ~0ull; };
-	std::unordered_map<uint32_t, LevelStat> archive_levels;
-	// Part de l'archive reservee a un niveau : les cases divisees par le nombre
-	// de niveaux PRESENTS (le niveau candidat compris s'il est neuf), au moins
-	// une. Un quota qui se recalcule ainsi n'a pas de cadran a regler : il suit
-	// la diversite que la recherche produit reellement.
-	size_t ArchiveQuota(uint32_t lvl) const {
-		size_t n = archive_levels.size();
-		if(!archive_levels.count(lvl))
-			++n;
-		if(!n)
-			n = 1;
-		const size_t q = cfg.archive_k / n;
-		return q ? q : 1;
-	}
 	// Politique finale du run NRPA (exportee pour le finisseur).
 	Policy final_policy;
 	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).

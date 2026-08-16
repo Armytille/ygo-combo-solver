@@ -166,17 +166,33 @@ combosolver.exe ... --landmarks corpus/ --landmark-w 60
 # budgets differents, sur une seule graine — cela ne demontre rien (§9.23 (d)).
 # RESERVE : le mecanisme exige un plan resolu, donc il ne sert a rien A FROID.
 
+# CORRECTIF DE CREDIT (session 18) : le score d'un tirage est un MAX sur ses
+# prefixes, mais le gradient renforcait TOUS ses pas — y compris ceux d'apres le
+# pic, c'est-a-dire ceux qui ont DEFAIT le board. `--adapt-to-peak` tronque le
+# gradient au pic. Mesure etalon A nu, deux paires, un seul facteur :
+# l'arite 3 (Sabre Dancer) fait x2,6 dans les deux (1 442 -> 3 740 et
+# 659 -> 1 690), a -24 a -37 % de debit. La vie du mecanisme est imprimee
+# (« gradient tronque au pic : N pas retires ») : a zero il est INERTE.
+combosolver.exe ... --adapt-to-peak
+
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
-`--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
+`--nrpa-keep`, `--tt-mb`, `--finisher`, `--archive-k`, `--max-rollouts`,
+`--max-nodes`, `--adapt-to-peak`, `--elide-forced`, `--hindsight`,
 `--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
 `--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
-`--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--nrpa-lr`, `--max-subsets`,
+`--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--max-subsets`,
 `--recipes`, `--no-seed-recipes`, `--no-seed-quant`, `--derive-summon-min`,
 `--options`, `--options-ctx`, `--options-online`, `--finisher-options`,
-`--qhat`, `--no-phase-change`, `--archive-spread`, `--canonical-zones`,
-`--novelty-rollout-cut`, `--probe-repeat`, `--landmarks`, `--landmark-w`,
+`--qhat`, `--canonical-zones`, `--card-on-select`, `--assign`,
+`--assign-bias`, `--backward`, `--watch`,
+`--probe-repeat`, `--landmarks`, `--landmark-w`,
 `--landmark-h`, `--profile`, `--verbose`).
+Dix mécanismes réfutés ont été **retirés du code** en session 18 — `--mcps`,
+`--nrpa-lr`, `--recipe-w`, `--goal-bias`, `--canonical-digest`,
+`--no-phase-change`, `--novelty-rollout-cut`, `--archive-spread`,
+`--phs-canonical`, `--subsets-ascending`. `docs/drapeaux.md` tient l'inventaire
+et le verdict de chacun.
 `--profile` imprime le profil du chemin chaud par phase (sondes rdtsc, temps
 exclusif, ligne « reste ») — c'est l'instrument qui a tranché que 82-86 % du
 temps part dans le core (§9.18) ; son coût mesuré est sous le bruit (< 2 %).
@@ -312,10 +328,15 @@ branche du combo est élaguée dès le début.
 
 ## La règle de mesure (session 18)
 
-**Aucun mécanisme n'est retenu sans avoir passé les DEUX étalons.** La session 17
-l'a établi par l'exemple : `--assign-bias` gagne ×27 sur Lunalight avec une
-chaîne causale vérifiée, et un second deck a suffi à le remettre en cause. Un
-mécanisme validé sur un seul étalon est une hypothèse, pas un résultat.
+**Aucun mécanisme n'est retenu sans avoir passé les DEUX étalons.** Un mécanisme
+validé sur un seul étalon est une hypothèse, pas un résultat.
+
+**Et un mécanisme doit prouver qu'il est ALLUMÉ avant qu'on mesure son effet.**
+La session 18 a trouvé `--assign-bias` totalement inerte — l'instantané du
+graphe de recettes n'était pris que sous `--assign` — alors que le run imprimait
+« les choix engageant un MATERIAU du graphe de recettes sont favorises ». Tout
+mécanisme doit imprimer sa **vie** (un compteur non nul quand il agit) ; sans
+elle, un A/B mesure deux fois le témoin.
 
 **Et aucune mesure de l'étalon B ne vaut à UN RUN PAR BRAS.** L'audit de la
 session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la
@@ -324,10 +345,19 @@ session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la
 bruyante, c'est un **événement rare** — un A/B à un tirage par bras ne mesure que
 le tirage.
 
-La cause n'est pas le nombre de workers : deux runs `--threads 1` à la même
-graine font 41 232 et 42 179 tirages, parce que **le budget est du temps de mur**
-(`--solve-ms`) et non un compte d'itérations. Tant qu'un budget en tirages ou en
-nœuds n'existe pas, aucun run n'est reproductible.
+La cause n'était pas le nombre de workers : deux runs `--threads 1` à la même
+graine faisaient 41 232 et 42 179 tirages, parce que **le budget était du temps
+de mur**. C'est **corrigé** (§9.26 (a)) :
+
+```powershell
+# Mode DETERMINISTE : deux executions rendent des relevés identiques.
+combosolver.exe ... --threads 1 --max-rollouts 20000 --max-nodes 500000 `
+    --solve-ms 900000    # le temps ne doit JAMAIS mordre
+```
+
+Contrôle mesuré : **2 lignes de diff sur 397**, et ce sont les deux noms
+d'outdir. Avant : 38 sur 392. Ce mode n'est **pas** le mode de production — le
+mono-worker coûte ÷5,1 à ÷5,9 — c'est un **instrument d'attribution**.
 
 Conséquence pratique, à appliquer sans exception :
 

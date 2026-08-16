@@ -309,7 +309,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// Meme garde-fou qu'au prompt de bataille : un prompt idle sans aucune
 		// commande jouable garde ses sorties de phase, sinon le drapeau
 		// fabriquerait une impasse la ou le jeu en offrait une.
-		if(opt.allow_phase_change || out.empty()) {
+		{
 			if(to_bp) {
 				Choice& c = out.Emit();
 				PutInt32(c.response, 6);
@@ -385,15 +385,14 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// propose RIEN d'autre, elles restent emises — retirer la derniere
 		// reponse legale transformerait un prompt en impasse, ce qui n'est pas
 		// un elagage mais une corruption de l'espace.
-		const bool phase_ok = opt.allow_phase_change || out.empty();
-		if(to_m2 && phase_ok) {
+		if(to_m2) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 2);
 			c.edge = EdgeOf(message, { 2 });
 			c.phase = true;
 			SetLabel(c, opt, "-> Main 2", 0, false);
 		}
-		if(to_ep && (phase_ok || out.empty())) {
+		if(to_ep) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 3);
 			c.edge = EdgeOf(message, { 3 });
@@ -532,7 +531,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 							  c.label = "choisir " + std::to_string(k) +
 										" carte(s)";
 					  },
-					  opt.subsets_capped, opt.subsets_ascending);
+					  opt.subsets_capped, false);
 		EmitAssignExtremes(message, opt, pool, codes, lo, hi, out);
 		if(cancelable) {
 			Choice& c = out.Emit();
@@ -717,7 +716,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  if(opt.labels)
 							  c.label = "somme " + std::to_string(k);
 					  },
-					  opt.subsets_capped, opt.subsets_ascending);
+					  opt.subsets_capped, false);
 		// Le prompt de SOMME est celui des tributs et des materiaux Synchro :
 		// c'est la que l'etalon B paie son arite. Pas de deduplication par code
 		// ici (l'enumeration indexe `codes` directement), donc le pool est

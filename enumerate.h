@@ -37,20 +37,21 @@ struct Choice {
 	// positionner) — 0 si le choix n'en engage aucune. Support des indices de
 	// domaine (--hint) : "cette carte-la, essaie-la plus souvent".
 	uint32_t card = 0;
-	// L'IDENTITE CI-DESSUS EST APPROXIMATIVE (session 17). Vraie seulement sur
-	// les prompts de SELECTION sous `card_on_select` : un sous-ensemble de k > 1
-	// cartes n'a pas d'identite, et l'on retient arbitrairement son premier code.
+	// L'IDENTITE CI-DESSUS EST APPROXIMATIVE sur les prompts de SELECTION sous
+	// `card_on_select` : un sous-ensemble de k > 1 cartes n'a pas d'identite, et
+	// l'on retient arbitrairement son premier code. Le VOLET `*_sel` de
+	// `hint_seen` (search.h) mesure exactement la part du biais qui porte sur ces
+	// identites-la — c'est la ventilation, et non un drapeau, qui separe les deux.
 	//
-	// POURQUOI CE DRAPEAU EXISTE, et il a ete paye : le biais d'INDICES
-	// (`--hint`, `--resolve`) lit `card`. L'allumer sur les prompts de selection
-	// etendait donc un ordre de l'operateur — « cette carte-la, essaie-la plus
-	// souvent » — a une identite qui n'en est pas une. Mesure sur l'etalon B
-	// (deck Synchron, `--resolve` Omega et Trishula) : les tirages atteignant au
-	// moins une resolution passent de 2 239 a ZERO. Le biais d'ASSIGNATION, lui,
-	// s'en accommode : il ne designe pas une carte a jouer mais un ROLE
-	// (materiau), et se tromper de representant dans un sous-ensemble coute une
-	// preference, pas une ligne.
-	bool card_lossy = false;
+	// UN CHAMP `card_lossy` A EXISTE ICI (session 17) pour couper le biais
+	// d'indices sur ces prompts. Il est SUPPRIME (audit 18), et il faut dire
+	// pourquoi plutot que de l'effacer : il n'a JAMAIS ete assigne `true` — ni
+	// dans `EnumerateRaw`, ni ailleurs — donc le garde de `search.cpp` etait
+	// inerte et son commentaire decrivait un comportement inexistant. La mesure
+	// qui le justifiait (« l'etalon B tombe de 2 239 a ZERO ») est elle-meme
+	// retiree : le juge de cet etalon rend 0, 0, 0, 89, 2 239 sur cinq
+	// executions de la MEME commande a la MEME graine (9.25 (b)). Il n'y avait
+	// donc ni effet a couper, ni coupure.
 	// Changement de phase ("-> Battle Phase", "-> End Phase", "-> Main 2").
 	// Porte par un drapeau et non par le label : les chemins chauds n'ont pas
 	// de label, et le biais GNRPA doit continuer a exclure ces coups (finir le
@@ -74,12 +75,10 @@ public:
 		c.edge = 0;
 		c.plan_key = 0;
 		c.card = 0;
-		// SANS CETTE REMISE A ZERO, un Choice reutilise garde le drapeau d'un
-		// prompt precedent : le biais d'indices se coupe alors PARTOUT et le cas
-		// s'effondre en silence (mesure : etalon B, 641 -> 0). Le pool
-		// `ChoiceList` reutilise ses elements — tout champ ajoute a `Choice` doit
-		// etre remis a zero ici, sous peine de fuiter d'une decision a l'autre.
-		c.card_lossy = false;
+		// LE POOL REUTILISE SES ELEMENTS : tout champ ajoute a `Choice` doit etre
+		// remis a zero ici, sous peine de fuiter d'une decision a l'autre. La
+		// leçon vient d'un defaut reel (session 17) : un drapeau non reinitialise
+		// coupait le biais d'indices PARTOUT et le cas s'effondrait en silence.
 		c.phase = false;
 		return c;
 	}
@@ -121,17 +120,14 @@ struct EnumOptions {
 	// preuve d'absence portant sur un prompt de somme n'en est plus une (C9).
 	// Non nul, il pointe un compteur propre au Search appelant.
 	uint64_t* subsets_capped = nullptr;
-	// ORDRE HISTORIQUE (tailles croissantes), pour ATTRIBUER le correctif C9.
-	// L'ordre par defaut alterne depuis les deux bouts ; celui-ci restaure le
-	// parcours croissant qui, a cap = 24 sur 24 candidats, n'emettait que des
-	// singletons. Sert uniquement d'A/B : un correctif dont on ne peut pas
-	// eteindre l'effet n'est pas attribuable.
-	bool subsets_ascending = false;
+	// `subsets_ascending` (ordre HISTORIQUE, tailles croissantes) a vecu ici.
+	// SUPPRIME (audit 18) : son unique role etait de rejouer l'A/B d'attribution
+	// du correctif C9, et cet A/B est TERMINE. L'ordre retenu alterne depuis les
+	// deux bouts ; l'ordre croissant, a cap = 24 sur 24 candidats, n'emettait que
+	// des singletons.
 	// N'explore qu'une zone libre representative par type de zone. Faux par
 	// defaut : les fleches de lien et les colonnes peuvent tout changer.
 	bool canonical_zones = false;
-	// Explorer le passage en Battle Phase / End Phase depuis l'idle command.
-	bool allow_phase_change = true;
 	// IDENTITE DE CARTE SUR LES PROMPTS DE SELECTION (session 16).
 	//
 	// `MSG_SELECT_CARD` / `MSG_SELECT_TRIBUTE` ne renseignaient PAS `card` :

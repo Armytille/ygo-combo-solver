@@ -5980,3 +5980,209 @@ les juger rend deux valeurs à configuration identique. `--elide-forced` garde s
 graine (+61 % de débit, ×2,1 de boards en exhaustif) ; `--hindsight` garde sa séparation de
 supports sur l'étalon A à deux graines. Ce sont les deux seuls résultats de la s17 que le juge de
 l'étalon B n'atteint pas.
+
+---
+
+### 9.26 Session 18bis : les six défauts corrigés — et le run devient REPRODUCTIBLE
+
+Suite directe de l'audit §9.25 : appliquer les corrections qu'il désigne, dans l'ordre qu'il
+impose, puis attaquer le mur avec l'instrument réparé. Santé identique à chaque étape
+(273 digests, 210/273, 209 candidates, 16 replays, 0 `MSG_RETRY`).
+
+#### (a) LE BUDGET EN COMPTE — et le run devient reproductible à l'octet près
+
+`--max-rollouts <n>` et `--max-nodes <n>` : budget par worker en **tirages** ou en **nœuds**, au
+lieu du temps de mur. `BudgetExhausted()` les teste **avant** l'horloge — sinon le temps resterait
+la borne qui mord et le mode n'existerait pas.
+
+**LE CONTRÔLE** (`tools/s18_determinisme.ps1`), étalon B, `--threads 1`, 20 000 tirages,
+500 000 nœuds, graine 888, deux exécutions :
+
+| | avant (budget en ms) | **après (budget en compte)** |
+|---|---|---|
+| tirages | 41 232 · 42 179 | identiques |
+| lignes de relevé différentes | **38 sur 392** | **2 sur 397** |
+| nature des écarts | durées **et grandeurs de travail** | **le nom de l'outdir, rien d'autre** |
+
+Les deux seules lignes qui diffèrent sont `s18d_a/best_approach_3of8.yrp` contre
+`s18d_b/best_approach_3of8.yrp`. **Le travail est identique.**
+
+*Ce que cela retire à l'attribution du dossier* : la cause du non-déterminisme n'était pas
+l'échange asynchrone entre workers — §9.25 (b) l'avait déjà montré en mesure (deux runs
+`--threads 1`, donc sans aucun échange, divergeaient). Elle est l'**unité du budget**, et elle est
+corrigée.
+
+*Ce que le mode n'est pas* : le mode de production. Coût mesuré du mono-worker : **÷5,1 à ÷5,9**
+(41 232 tirages contre 209 434 – 243 372 à seize). C'est un **instrument d'attribution** ; les
+mesures de performance restent à seize workers et se lisent en proportion.
+
+#### (b) LE CRÉDIT : `--adapt-to-peak`
+
+Le défaut est en deux lignes du source, et §9.25 (f) le nomme : le score d'un tirage est un **MAX
+sur les préfixes** (`search.cpp`, `if(sc > run.score)`) mais `AdaptRun` parcourait **tous** les pas.
+Une ligne qui culmine au pas 200 puis erre 230 pas voyait ses 430 pas renforcés à `+alpha` — la
+politique apprenait l'effondrement d'après-pic aussi fort que la montée.
+
+`NrpaRun::peak_steps` retient le nombre de pas au moment du maximum ; `--adapt-to-peak` tronque le
+gradient là. Trois points de soin, tous nécessaires :
+
+1. **remis à zéro dans `PolicyRollout`** — le même objet sert d'un tirage à l'autre, et un pic qui
+   fuiterait tronquerait le gradient du tirage *suivant* à un endroit arbitraire (la famille exacte
+   du défaut `ChoiceList::Emit` de 9.24 (o)) ;
+2. **les buts de substitution ont LEUR pic** — `HindsightHit` porte désormais le compte de pas à
+   l'instant de l'invocation. Le pic du *tirage* est celui de l'ancien but ; s'en servir pour un but
+   ré-étiqueté apprendrait autre chose que ce que HER promet ;
+3. **jamais de troncature sans pic mesuré** — les lignes du CORPUS ne passent pas par
+   `PolicyRollout` et ont `peak_steps = 0` ; le rejeu d'adaptation serait devenu muet en silence.
+
+Vie du mécanisme imprimée (piège 52) : `gradient tronque au pic : N pas retires`. **À zéro, le
+mécanisme est inerte et aucun juge de recherche ne le concerne.**
+
+#### (c) TROIS INSTRUMENTS RÉPARÉS, ET UN POSÉ
+
+**`hint_seen` est ventilé par TYPE de prompt.** §9.25 (h) l'avait établi : le compteur avait trois
+causes — le drapeau `--card-on-select`, la qualité du run, le volume de travail — et n'en jugeait
+donc aucune. Le relevé sépare désormais :
+
+- **`coup EXACT`** (IDLECMD, CHAIN, POSITION, BATTLECMD) : `card` désigne vraiment la carte engagée ;
+- **`sous-ensemble`** (SELECT_CARD, TRIBUTE, SUM) : `card` n'est que le premier code d'une sélection
+  et n'existe que sous `--card-on-select`. C'est le volet qui bouge avec le drapeau.
+
+*Défaut de plus, trouvé en réparant* : le test lisait `step.hinted[i] != 0`, or ce champ porte
+**deux** bits (bit 0 = `--hint`, bit 1 = `--assign-bias`). Un run sous `--assign-bias` seul faisait
+donc monter un compteur nommé « visibilité des indices ». Corrigé (`& 1`).
+
+**`forced_default` est séparé de `forced_killed`.** L'ancien compteur était incrémenté *avant*
+d'essayer `DefaultResponse` : quand celle-ci échoue, la branche meurt et comptait **aussi** en
+`dead_ends`. Le texte imprimé disait « réduits à LA réponse par défaut » pour des branches
+**supprimées**. Deux compteurs, deux messages, et le second dit explicitement qu'il est déjà compté
+dans les impasses. Le « 90 prompts forcés et 90 impasses » de §9.24 (h) était **un** fait, pas deux.
+
+**`distinct_by_depth` compte enfin sous table partagée.** `SharedTT::CheckAndClaim` rend désormais
+`fresh` (le slot ne portait pas ce tag). Sans lui, le compteur restait à **zéro dans tout run
+multi-worker** — `tt_mb` vaut 64 par défaut — et un zéro structurel se lisait comme une mesure.
+
+**Compteur POSÉ : `tt_reexplored`.** La table stocke `disc + 1` et ne coupe que si l'entrée vaut au
+moins autant ; un état revu avec **plus** de budget est re-développé. Le dossier ne comptait que la
+coupure et ne pouvait donc pas dire si le mécanisme paie. Il le compte maintenant.
+
+#### (d) DIX MÉCANISMES RETIRÉS DU CODE
+
+Le dossier garde la trace ; le code n'a pas à la porter. Un par un, santé avant et après.
+
+| retiré | verdict | où |
+|---|---|---|
+| `--mcps` | RÉFUTÉ deux fois, effondrement à k = 6 | 9.19 (k), 9.21 |
+| `--nrpa-lr` | RÉFUTÉ | 9.19 |
+| `--recipe-w` | RÉFUTÉ, cause STRUCTURELLE (punit les invocations) | 9.24 (d) |
+| `--goal-bias` | RÉFUTÉ (Liger à zéro, et les autres Fusions tombent) | 9.23 (h) |
+| `--canonical-digest` | RÉFUTÉ sur A (poses ÷2 et ÷12), 3 Liens au deck | 9.24 (j) |
+| `--no-phase-change` | DÉPARTAGÉ NÉGATIF | 9.24 (o) |
+| `--novelty-rollout-cut` | RÉFUTÉ | 9.22 |
+| `--archive-spread` | DÉPARTAGÉ : critère interne ×10, juges neutres à négatifs | 9.23 (e) |
+| `--phs-canonical` | départagé, jamais retenu | 9.19 |
+| `--subsets-ascending` | A/B d'attribution TERMINÉ (C9) | — |
+
+**Chaque suppression garde sa LEÇON en commentaire à l'endroit du code qu'elle occupait** — c'est
+le point, et il est délibéré. Retirer `--recipe-w` sans écrire « une heuristique h^add n'est
+correcte que si la CONSOMMATION est modélisée » ferait ré-inventer le même mécanisme à la
+session 22.
+
+`Choice::card_lossy` est supprimé au même titre : jamais assigné `true`, donc un garde inerte dont
+le commentaire décrivait un comportement inexistant (§9.25 (a)).
+
+**122 → 115 drapeaux** (dix retirés, trois ajoutés — `--max-rollouts`, `--max-nodes`,
+`--adapt-to-peak` —, et `--elide-forced`, `--card-on-select`, `--assign-bias`, `--dive-full`,
+`--merged-pop`, `--max-decisions` enfin documentés dans `--help`, où ils manquaient).
+
+*Ce qui n'est PAS retiré, et pourquoi* : `--options-len`, `--options-pool`, `--options-window` et
+`--options-ctx` sont des **cadrans d'un mécanisme retenu**, pas des mécanismes. Leur réfutation
+(9.23 (g)) dit « ne pas tourner ce bouton », pas « supprimer le mécanisme qu'il règle ».
+`--assign-bias` et `--card-on-select` restent, requalifiés **NON JUGÉS** par §9.25 (b).
+`--backward` reste aussi, faute de temps : 50 références, la décomposition à rebours est imbriquée
+dans le graphe de recettes.
+
+#### (e) LE MUR, PREMIÈRE ATTAQUE — et un DRAPEAU QUI SE DÉCLARAIT ALLUMÉ EN ÉTANT ÉTEINT
+
+Étalon A **NU** (aucun `--hint`, aucun `--resolve`, aucune référence ; `--watch` compte et rien
+d'autre), 90 s, graine 888, `tools/s18_mur.ps1`. Juge : la colonne « invoquée » de Liger Dancer
+passe-t-elle de zéro à non nul ?
+
+| bras | tirages | Perfume ≥1 | Perfume ≥2 | **Sabre ≥1** (arité 3) | Leo | Liger |
+|---|---|---|---|---|---|---|
+| témoin nu | 473 560 | 8 883 | 1 576 | 829 | **0** | **0** |
+| `--elide-forced --hindsight 0.5 --assign-bias 3` | 530 868 | 54 413 | 1 260 | 1 442 | **0** | **0** |
+| **+ `--adapt-to-peak`** | 333 596 | 53 011 | **3 557** | **3 740** | **0** | **0** |
+
+**`--adapt-to-peak` monte l'axe d'ARITÉ, et il est très vivant** : **2 249 463 pas retirés** du
+gradient. Sabre Dancer (3 matériaux) passe de 829 au témoin à **3 740**, ×4,5 — et ×2,6 contre la
+pile sans lui. Perfume à deux exemplaires (`≥2`) fait ×2,8. Le prix est **−37 % de débit**
+(333 596 tirages contre 530 868), et il est attendu : le gradient ne travaille plus sur la queue
+des lignes, mais chaque tirage coûte pareil.
+
+C'est le même axe que `--hindsight` déplace, et pour une raison cohérente : les deux corrigent la
+manière dont la politique apprend des lignes qui ont réussi une invocation coûteuse.
+
+**LE DÉFAUT TROUVÉ DANS CE BANC, et il vaut plus que la mesure.** Le relevé de la pile porte
+`recettes : 233 invocation(s) observee(s), h moyen 0.00 sur ZERO evaluation(s)` — le graphe
+apprenait, et **personne ne le lisait**. Cause :
+
+```
+const bool rec_on = cfg.recipes && (cfg.assign || cfg.backward);
+```
+
+`assign_bias` n'y figurait pas. Or c'est `rec_on` qui déclenche `RecipeSnapshot()`, qui remplit
+`snap_useful` — la liste des matériaux que `--assign-bias` consulte à chaque décision. **`--assign-bias`
+SEUL était donc totalement inerte**, et le run imprimait quand même « les choix engageant un
+MATERIAU du graphe de recettes sont favorises ». Piège 42 dans sa forme la plus coûteuse : un
+mécanisme éteint qui se déclare allumé.
+
+*Ce que cela retire à §9.24 (n)* : le ×27 sur « Leo au cimetière » y était réel, mais ce bras-là
+portait `--assign` en plus — ce n'était pas « `--assign-bias` seul ». Les trois bras du tableau
+ci-dessus mesurent donc `--elide-forced --hindsight --adapt-to-peak`, **sans** biais d'assignation.
+
+Corrigé (`|| cfg.assign_bias > 0.0f`), et le run avertit désormais quand le graphe manque.
+
+#### (f) LE BANC REFAIT AVEC LE BIAIS RÉELLEMENT ACTIF — et le VERDICT DU MUR
+
+Mêmes commandes, binaire corrigé. Les deux paires ci-dessous ne diffèrent **que** par
+`--adapt-to-peak`.
+
+| bras (étalon A NU, 90 s, graine 888) | tirages | Perfume ≥1 | **Sabre ≥1** | Leo @cim. | Leo | **Liger** |
+|---|---|---|---|---|---|---|
+| témoin nu | 473 560 | 8 883 | 829 | — | 0 | **0** |
+| `--assign-bias` **inerte** | 530 868 | 54 413 | 1 442 | 93 | 0 | **0** |
+| **+ `--adapt-to-peak`** | 333 596 | 53 011 | **3 740** | — | 0 | **0** |
+| `--assign-bias` **actif** | 453 072 | 73 214 | 659 | 18 | 0 | **0** |
+| **+ `--adapt-to-peak`** | 343 683 | 62 951 | **1 690** | 24 | 0 | **0** |
+
+**`--adapt-to-peak` multiplie l'arité 3 par ~2,6 dans les DEUX paires** (1 442 → 3 740 et
+659 → 1 690), au prix de −24 % à −37 % de débit. Un seul facteur, deux fois, sur des supports
+différents : c'est le résultat le mieux établi de la session sur l'étalon A. Et il est cohérent
+avec sa nature — le gradient cesse d'apprendre la queue des lignes qui ont défait leur propre
+board.
+
+**`--assign-bias`, une fois RÉELLEMENT actif, DIVISE l'arité 3 par deux** (1 442 → 659 et
+3 740 → 1 690) et n'améliore pas Leo au cimetière (93 → 18, 24). C'est la seconde correction à
+§9.24 (n) : ce que la s17 lisait comme un ×27 venait d'un bras qui portait `--assign`, et le
+mécanisme seul ne reproduit rien de tel. **`--assign-bias` reste opt-in, éteint, et son statut
+passe de « réglage local » à NÉGATIF sur l'étalon A.**
+
+**LE VERDICT DU MUR, sans le tourner : IL N'EST PAS PERCÉ.** Leo Dancer et Liger Dancer restent à
+`>=1 = 0` dans les cinq bras, sur 2,1 millions de tirages cumulés. La sonde est formelle et
+constante : *« JAMAIS INVOCABLE — les offres sont toutes sur des prompts de SÉLECTION »*. Leo
+n'atteint le cimetière que 18 à 93 fois sur ~450 000 tirages (0,004 %), c'est-à-dire **dix fois
+moins** que ce que §9.24 (n) rapportait.
+
+*Ce que la session a réellement obtenu sur le mur* : elle a monté l'axe qui MONTE (l'arité
+cardinale, ×2,6 par un correctif de crédit) et elle a montré que l'axe qui ne monte pas ne monte
+toujours pas. La discontinuité du **matériau NOMMÉ** (§9.24, deux régimes) est intacte : tant que
+Leo Dancer n'est pas au cimetière en nombre, Liger n'est pas dans l'espace d'actions, et aucun
+gradient de politique ne peut biaiser un coup qui n'existe pas.
+
+*L'instrument qui manque, et il est nommé depuis §9.24 (n)* : une **sonde de CONJONCTION** — à
+chaque activation de la porte (Masquerade, Wolf), combien des préconditions de Liger sont
+simultanément vraies : Leo au cimetière, trois Lunalight disponibles, la porte ouverte ? Trois
+sondes successives ont chacune déplacé le diagnostic d'un cran ; la quatrième doit mesurer la
+**simultanéité**, la seule chose qu'aucune n'a regardée. C'est la mission de la session 19, et
+c'est un instrument, pas un mécanisme.

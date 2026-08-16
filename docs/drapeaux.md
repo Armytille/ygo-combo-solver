@@ -1,6 +1,20 @@
-# Les 122 drapeaux — inventaire d'audit (session 18)
+# Les drapeaux — inventaire d'audit (session 18)
 
-Inventaire exhaustif : `grep -oE '"--[a-z0-9-]+"' main.cpp | sort -u` → **122**.
+> **ÉTAT AU TERME DE LA SESSION 18 : 122 → 115.** Dix mécanismes réfutés ont été **retirés du
+> code** (§9.26 (d)) et trois drapeaux ajoutés (`--max-rollouts`, `--max-nodes`,
+> `--adapt-to-peak`). Les sections A et B ci-dessous décrivent l'état AVANT ; les lignes barrées
+> d'un ✔ sont faites.
+>
+> Retirés : `--mcps` ✔ · `--nrpa-lr` ✔ · `--recipe-w` ✔ · `--goal-bias` ✔ ·
+> `--canonical-digest` ✔ · `--no-phase-change` ✔ · `--novelty-rollout-cut` ✔ ·
+> `--archive-spread` ✔ · `--phs-canonical` ✔ · `--subsets-ascending` ✔
+>
+> Restent à trancher : `--backward` (réfuté, mais 50 références — la décomposition à rebours est
+> imbriquée dans le graphe de recettes), `--prior` / `--prior-weight` (neutres sur les deux
+> étalons), et les quatre cadrans `--options-*` réfutés, qui règlent un mécanisme RETENU et ne
+> sont donc pas des mécanismes à supprimer.
+
+Inventaire exhaustif : les drapeaux parsés (chaîne `else if` + tables `kBoolFlags` / `kU64Flags`).
 
 Trois colonnes, comme le demande l'audit : *(a)* a-t-il été **jugé** ? *(b)* quel est son **verdict
 écrit**, et où ? *(c)* le code serait-il plus simple **sans lui** ?

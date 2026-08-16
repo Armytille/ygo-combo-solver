@@ -268,6 +268,10 @@ bool Search::BudgetExhausted() const {
 	}
 	if(stats.nodes >= cfg.max_nodes)
 		return true;
+	// BUDGET EN TIRAGES (audit 18) : teste AVANT l'horloge, sinon le temps
+	// resterait la borne qui mord et le mode deterministe n'existerait pas.
+	if(cfg.max_rollouts && stats.rollout_count >= cfg.max_rollouts)
+		return true;
 	double ms = std::chrono::duration<double, std::milli>(
 					std::chrono::steady_clock::now() - start).count();
 	return ms >= cfg.time_limit_ms;
@@ -480,7 +484,7 @@ Search::Step Search::StepToPrompt() {
 
 uint64_t Search::Digest() const {
 	return StateDigest(const_cast<Duel&>(duel), prompt_type, prompt_payload,
-					   cfg.canonical_digest);
+					   false);
 }
 
 bool Search::FillChoices(ChoiceList& out) {
@@ -504,16 +508,22 @@ bool Search::FillChoices(ChoiceList& out) {
 		// (ANNOUNCE_*), de choisir un compteur ou de trier est structurellement
 		// hors d'atteinte, et rien ne le signalait (3.5). Comptee par type de
 		// prompt pour que le rapport dise LEQUEL.
-		++stats.forced_default;
-		stats.forced_default_prompts |=
-			1ull << (prompt_type & 63);
 		Choice& c = out.Emit();
 		if(!DefaultResponse(prompt_type, prompt_payload.data(),
 							static_cast<uint32_t>(prompt_payload.size()),
 							c.response)) {
+			// AUCUNE reponse par defaut : la branche MEURT ici. Ce n'est pas une
+			// reduction, et le compter comme telle surcomptait le meme evenement
+			// deux fois (il compte aussi en `dead_ends` chez l'appelant) — audit
+			// 18. C'est le cas des trois ANNOUNCE_*, et de SELECT_COUNTER quand
+			// le compte demande n'est pas atteignable.
+			++stats.forced_killed;
+			stats.forced_killed_prompts |= 1ull << (prompt_type & 63);
 			out.Clear();
 			return false;
 		}
+		++stats.forced_default;
+		stats.forced_default_prompts |= 1ull << (prompt_type & 63);
 		if(cfg.enumeration.labels)
 			c.label = "defaut";
 	}
@@ -1216,15 +1226,14 @@ uint32_t Search::RecipeEval(const BoardKey& here, uint32_t* backward_out) {
 // court. Sans ce re-etiquetage on garderait, pour « comment payer Perfume
 // Dancer », la ligne qui a le plus de materiel au total : exactement le mauvais
 // exemple.
-void Search::HindsightCommit(
-	const NrpaRun& run,
-	const std::vector<std::pair<uint32_t, uint32_t>>& hits) {
+void Search::HindsightCommit(const NrpaRun& run,
+							 const std::vector<HindsightHit>& hits) {
 	if(hits.empty() || run.steps.empty())
 		return;
-	for(const auto& [code, depth] : hits) {
-		const double s = 1e12 - static_cast<double>(depth) * 1e5 -
+	for(const auto& h : hits) {
+		const double s = 1e12 - static_cast<double>(h.depth) * 1e5 -
 						 static_cast<double>(run.steps.size());
-		auto it = hindsight.find(code);
+		auto it = hindsight.find(h.code);
 		if(it == hindsight.end()) {
 			if(hindsight.size() >= cfg.hindsight_k)
 				continue;
@@ -1234,11 +1243,17 @@ void Search::HindsightCommit(
 			// `flat` (minage en ligne) doublerait la memoire du mecanisme pour
 			// rien.
 			g.run.steps = run.steps;
-			hindsight.emplace(code, std::move(g));
+			// LE PIC DE CE BUT-LA (audit 18) : les pas qui suivent l'invocation
+			// ne font pas partie de « comment payer cette Fusion ». Le pic du
+			// TIRAGE serait celui de l'ancien but — s'en servir ici apprendrait
+			// une autre chose que ce que le re-etiquetage promet.
+			g.run.peak_steps = h.steps;
+			hindsight.emplace(h.code, std::move(g));
 			++stats.hindsight_goals;
 		} else if(s > it->second.score) {
 			it->second.score = s;
 			it->second.run.steps = run.steps;
+			it->second.run.peak_steps = h.steps;
 		}
 	}
 }
@@ -1640,35 +1655,10 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 				  (static_cast<uint64_t>((std::min)(overlap, 255u)) << 40) |
 				  (bb << 32) | tail;
 	};
-	// QUOTA PAR NIVEAU DE PROGRES (session 15, --archive-spread). Le plancher
-	// global est le mecanisme qui a rendu l'archive INUTILE en regime but seul
-	// (9.21 (f)) : quand resolutions et overlap SATURENT — tout a r4 sur
-	// l'etalon A — la cle de tri ne departage plus que par la longueur, et
-	// l'archive se remplit d'etats de FIN DE LIGNE. Les 37 racines du finisseur
-	// rendaient alors EPUISE en 0 a 13 expansions : elle rangeait ce qui est
-	// TERMINAL, pas ce qui est prometteur, et le « premier retour puis explore »
-	// de Go-Explore n'avait plus rien a explorer.
-	// Le correctif est celui de Go-Explore lui-meme : une archive est une
-	// COUVERTURE de cellules, pas un palmares. Chaque niveau de progres
-	// (resolutions, cartes posees) recoit un quota, et un nouvel etat evince le
-	// pire de SON niveau quand celui-ci est plein — jamais le meilleur d'un
-	// niveau moins avance, qui est justement celui qui a encore de la ligne
-	// devant lui.
-	const uint32_t lvl = ArchiveLevel(rp, overlap);
-	const bool spread = cfg.archive_spread;
 	// Cas courant gratuit : le score OPTIMISTE (0 brulees) sous le plancher
-	// evite les deux requetes de zone du compte reel. Sous quota, le plancher
-	// qui s'applique est celui du NIVEAU de l'etat, et il ne s'applique que si
-	// ce niveau est deja plein — sinon un etat peu avance serait refuse par le
-	// palmares avant meme d'avoir sa place reservee.
+	// evite les deux requetes de zone du compte reel.
 	auto floor_of = [&](void) -> uint64_t {
-		if(!spread)
-			return archive.size() >= cfg.archive_k ? archive_min_score
-												   : 0ull;
-		auto ic = archive_levels.find(lvl);
-		if(ic == archive_levels.end() || ic->second.count < ArchiveQuota(lvl))
-			return 0ull;
-		return ic->second.min_score;
+		return archive.size() >= cfg.archive_k ? archive_min_score : 0ull;
 	};
 	uint64_t score = pack(0);
 	if(uint64_t fl = floor_of(); fl && score <= fl)
@@ -1695,59 +1685,14 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		archive.push_back({ here.hash, score, overlap, rp, depth, burned, path });
 	} else {
 		size_t worst = 0;
-		if(spread) {
-			// La victime est le pire de CE niveau s'il est a quota ; sinon le
-			// pire du niveau le PLUS PEUPLE — c'est ainsi qu'un niveau neuf se
-			// fait de la place sans que le palmares le lui refuse.
-			auto ic = archive_levels.find(lvl);
-			const bool full_here =
-				ic != archive_levels.end() && ic->second.count >= ArchiveQuota(lvl);
-			uint32_t target_lvl = lvl;
-			if(!full_here) {
-				uint32_t best_count = 0;
-				uint64_t best_min = ~0ull;
-				for(const auto& [l, st] : archive_levels)
-					if(st.count > best_count ||
-					   (st.count == best_count && st.min_score < best_min)) {
-						best_count = st.count;
-						best_min = st.min_score;
-						target_lvl = l;
-					}
-			}
-			bool found = false;
-			for(size_t i = 0; i < archive.size(); ++i) {
-				if(ArchiveLevel(archive[i].resolves, archive[i].overlap) !=
-				   target_lvl)
-					continue;
-				if(!found || archive[i].score < archive[worst].score) {
-					worst = i;
-					found = true;
-				}
-			}
-			if(!found)
-				return;
-			// Un etat n'evince que dans SON niveau : ailleurs il prend une place
-			// libre, sans avoir a battre l'occupant.
-			if(target_lvl == lvl && score <= archive[worst].score)
-				return;
-		} else {
-			for(size_t i = 1; i < archive.size(); ++i)
-				if(archive[i].score < archive[worst].score)
-					worst = i;
-			if(score <= archive[worst].score)
-				return;
-		}
+		for(size_t i = 1; i < archive.size(); ++i)
+			if(archive[i].score < archive[worst].score)
+				worst = i;
+		if(score <= archive[worst].score)
+			return;
 		archive_cells.erase(archive[worst].cell);
 		archive_cells.emplace(here.hash, worst);
 		archive[worst] = { here.hash, score, overlap, rp, depth, burned, path };
-	}
-	if(spread) {
-		archive_levels.clear();
-		for(const ArchiveEntry& e : archive) {
-			LevelStat& st = archive_levels[ArchiveLevel(e.resolves, e.overlap)];
-			++st.count;
-			st.min_score = (std::min)(st.min_score, e.score);
-		}
 	}
 	archive_min_score = ~0ull;
 	for(const ArchiveEntry& e : archive)
@@ -1969,10 +1914,18 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	uint64_t key = Digest();
 	if(cfg.shared_tt) {
 		// Table partagee entre workers (lazy SMP) : un etat resolu par l'un
-		// elague chez tous.
-		if(cfg.shared_tt->CheckAndClaim(key, disc + 1)) {
+		// elague chez tous. `fresh` : cf. SharedTT::CheckAndClaim — sans lui
+		// `distinct_by_depth` restait a ZERO dans tout run multi-worker (audit 18).
+		bool fresh = false;
+		if(cfg.shared_tt->CheckAndClaim(key, disc + 1, &fresh)) {
 			++stats.transpositions;
 			return false;
+		}
+		if(fresh) {
+			if(depth < stats.distinct_by_depth.size())
+				++stats.distinct_by_depth[depth];
+		} else {
+			++stats.tt_reexplored;
 		}
 	} else {
 		auto it = tt.find(key);
@@ -1980,6 +1933,10 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 			++stats.transpositions;
 			return false;
 		}
+		// DEJA VU MAIS AVEC MOINS DE BUDGET : l'etat est RE-DEVELOPPE. Le dossier
+		// ne comptait que la coupure, jamais ce travail-la (audit 18).
+		if(it != tt.end())
+			++stats.tt_reexplored;
 		if(it == tt.end() && depth < stats.distinct_by_depth.size())
 			++stats.distinct_by_depth[depth];
 		tt[key] = disc + 1;
@@ -2161,10 +2118,18 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	uint64_t key = Digest();
 	if(cfg.shared_tt) {
 		// Table partagee entre workers (lazy SMP) : un etat resolu par l'un
-		// elague chez tous.
-		if(cfg.shared_tt->CheckAndClaim(key, disc + 1)) {
+		// elague chez tous. `fresh` : cf. SharedTT::CheckAndClaim — sans lui
+		// `distinct_by_depth` restait a ZERO dans tout run multi-worker (audit 18).
+		bool fresh = false;
+		if(cfg.shared_tt->CheckAndClaim(key, disc + 1, &fresh)) {
 			++stats.transpositions;
 			return false;
+		}
+		if(fresh) {
+			if(depth < stats.distinct_by_depth.size())
+				++stats.distinct_by_depth[depth];
+		} else {
+			++stats.tt_reexplored;
 		}
 	} else {
 		auto it = tt.find(key);
@@ -2172,6 +2137,10 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 			++stats.transpositions;
 			return false;
 		}
+		// DEJA VU MAIS AVEC MOINS DE BUDGET : l'etat est RE-DEVELOPPE. Le dossier
+		// ne comptait que la coupure, jamais ce travail-la (audit 18).
+		if(it != tt.end())
+			++stats.tt_reexplored;
 		if(it == tt.end() && depth < stats.distinct_by_depth.size())
 			++stats.distinct_by_depth[depth];
 		tt[key] = disc + 1;
@@ -2275,7 +2244,7 @@ bool Search::Rollout(uint64_t& rng) {
 	};
 	// Compteurs initiaux : un tirage peut demarrer au MILIEU d'une ligne
 	// (finisseur : prefixe d'approche rejoue, puis echantillonnage).
-	uint32_t actions = 0, turns = cfg.initial_turns, stale = 0,
+	uint32_t actions = 0, turns = cfg.initial_turns,
 			 summons = cfg.initial_summons;
 	uint64_t resolved = cfg.initial_resolved;
 	uint32_t rp_prev = ResolveProgress(resolved);
@@ -2334,12 +2303,11 @@ bool Search::Rollout(uint64_t& rng) {
 			return hit;
 		}
 		ArchiveObserve(here, depth, resolved);
-		// Rollout-IW sans arbre : un tirage qui cesse de produire du neuf est
-		// coupe. DESACTIVE PAR DEFAUT, sur mesure : la table etant partagee
-		// entre tirages, re-parcourir le meme debut tue le tirage avant qu'il
-		// ait pu devier (2/8 au lieu de 6/8 sur le cas de transplantation).
-		if(cfg.novelty_rollout_cut && NoveltyCut(here, depth, resolved, stale))
-			return hit;
+		// Rollout-IW sans arbre — un tirage qui cesse de produire du neuf est
+		// coupe — coupait ici sous `--novelty-rollout-cut`. SUPPRIME (audit 18) :
+		// REFUTE en 9.22, et la cause etait mesuree — la table etant partagee
+		// entre tirages, re-parcourir le meme debut tue le tirage avant qu'il ait
+		// pu devier (2/8 au lieu de 6/8 sur le cas de transplantation).
 
 		ChoiceList& choices = ro_choices;
 		if(!FillChoices(choices)) {
@@ -2452,6 +2420,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	run.score = 0;
 	run.steps.clear();
 	run.flat.clear();
+	// Tout champ de NrpaRun doit etre remis a zero ici : le meme objet est
+	// reutilise d'un tirage a l'autre, et un pic qui fuiterait tronquerait le
+	// gradient du tirage SUIVANT a un endroit arbitraire (meme famille de defaut
+	// que `ChoiceList::Emit`, 9.24 (o)).
+	run.peak_steps = 0;
 	// Ligne PLATE pour le minage EN LIGNE (session 14) : les decisions ABSORBEES
 	// par une macro n'apparaissent pas dans `steps` — re-miner dessus fabriquerait
 	// des macros de macros, qui avortent au premier pas (cf. NrpaRun::flat).
@@ -2486,9 +2459,9 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// compte que des invocations, le second aussi des activations.
 	const bool probe_watch = !cfg.probe_watch.empty();
 	double novel_states = 0;
-	// Decisions consecutives sans atome inedit, et le verdict differe de
-	// l'elagage par nouveaute (cfg.novelty_rollout_cut). A drapeau eteint,
-	// `stale` compte pour rien et rien ne change — comportement d'avant.
+	// Decisions consecutives sans atome inedit. `--novelty-rollout-cut` les
+	// consommait ; il est SUPPRIME (audit 18, REFUTE en 9.22) et `stale` ne sert
+	// plus qu'au departage de gradient.
 	uint32_t stale = 0;
 	bool novelty_cut = false;
 	std::vector<double> logit;
@@ -2513,14 +2486,15 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const bool want_ctx = cfg.ctx_shrink >= 0.0f ||
 						  (cfg.options && cfg.options->ctx_tol >= 0) ||
 						  (mine_flat && cfg.options_online->ctx_tol >= 0);
-	// CONDITIONNEMENT PAR LE CHEMIN (--mcps, REFUTE 9.21 (k)) : somme melangee
-	// des coups joues sur les `mcps_depth` premieres decisions ENREGISTREES,
-	// figee au-dela. Nul et jamais lu quand le mecanisme est eteint.
-	uint64_t path_ctx = 0;
+	// `--mcps` maintenait ici un CONDITIONNEMENT PAR LE CHEMIN (somme melangee
+	// des coups des k premieres decisions). SUPPRIME (audit 18) : REFUTE deux
+	// fois, 0 comparaison gagnee sur 4 contre `--ctx-shrink` seul et
+	// effondrement a k = 6 (9.21 (k)). Le contexte du niveau contextuel est
+	// desormais toujours le descripteur SEMANTIQUE (`step.ctx`).
 	// BANDIT DE TETE (--qhat) : cle du noeud courant, somme melangee des coups
-	// DEJA joues. Distinct de `path_ctx` — il porte le coup EFFECTIVEMENT choisi
-	// (l'id de la macro quand une macro est prise, pas sa premiere cle) et il
-	// n'est pas fige au-dela de k, il cesse simplement d'etre consulte.
+	// DEJA joues. Il porte le coup EFFECTIVEMENT choisi (l'id de la macro quand
+	// une macro est prise, pas sa premiere cle) et il cesse simplement d'etre
+	// consulte au-dela de k.
 	uint64_t qh_ctx = 0;
 	const bool qhat_on = cfg.qhat_depth != 0;
 	// GARDE RAII : PolicyRollout sort par une douzaine de `return` — impasse,
@@ -2536,19 +2510,32 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// (code, profondeur de la premiere invocation). Garde RAII pour la meme
 	// raison que Q^ — les sorties sont trop nombreuses pour un versement ecrit
 	// a la main, et ce sont justement les tirages MORTS qui portent le signal.
-	static thread_local std::vector<std::pair<uint32_t, uint32_t>> hs_hits;
+	static thread_local std::vector<HindsightHit> hs_hits;
 	const bool hs_on = cfg.hindsight > 0.0f;
 	hs_hits.clear();
 	struct HindsightGuard {
 		Search* self;
 		const NrpaRun* run;
-		const std::vector<std::pair<uint32_t, uint32_t>>* hits;
+		const std::vector<HindsightHit>* hits;
 		bool armed;
 		~HindsightGuard() { if(armed) self->HindsightCommit(*run, *hits); }
 	} hs_guard{ this, &run, &hs_hits, hs_on };
-	// Les trois mecanismes qui lisent l'instantane du graphe (chantiers 1, 3, 4).
+	// LES MECANISMES QUI LISENT L'INSTANTANE DU GRAPHE.
+	//
+	// `assign_bias` MANQUAIT ICI, et c'est un defaut mesure (session 18bis).
+	// L'instantane n'etait pris que sous `--assign` ou `--backward` ; or c'est
+	// lui qui remplit `snap_useful`, la liste des MATERIAUX que `--assign-bias`
+	// consulte a chaque decision. `--assign-bias 3` SEUL etait donc totalement
+	// INERTE — et le run l'annoncait pourtant actif (« les choix engageant un
+	// MATERIAU du graphe de recettes sont favorises »). Piege 42 dans sa forme
+	// la plus couteuse : un mecanisme eteint qui se declare allume.
+	//
+	// Trace du defaut dans le relevé : « recettes : N invocation(s) observee(s),
+	// h moyen 0.00 sur ZERO evaluation(s) » — le graphe apprenait et personne ne
+	// le lisait. C'est aussi ce qui explique que 9.24 (n) ait mesure x27 sur
+	// « Leo au cimetiere » : ce bras-la portait `--assign` en plus.
 	const bool rec_on =
-		cfg.recipes && (cfg.assign || cfg.backward || cfg.recipe_weight > 0.0f);
+		cfg.recipes && (cfg.assign || cfg.backward || cfg.assign_bias > 0.0f);
 	if(qhat_on) {
 		qh_nodes.clear();
 		qh_moves.clear();
@@ -2612,9 +2599,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					continue;
 				bool known = false;
 				for(const auto& p : hs_hits)
-					if(p.first == code) { known = true; break; }
+					if(p.code == code) { known = true; break; }
 				if(!known)
-					hs_hits.emplace_back(code, depth);
+					hs_hits.push_back(
+						{ code, depth,
+						  static_cast<uint32_t>(run.steps.size()) });
 			}
 		summons += static_cast<uint32_t>(summons_this_step.size());
 		resolved += resolved_this_step;
@@ -2757,8 +2746,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			const double gs = 1e12 - static_cast<double>(goal_burned) * 1e9 -
 							  static_cast<double>(goal_actions) * 1e5 -
 							  static_cast<double>(depth);
-			if(gs > run.score)
+			if(gs > run.score) {
 				run.score = gs;
+				run.peak_steps = run.steps.size();
+			}
 			// Recompense du bandit : le but vaut exactement 1, le maximum de
 			// l'echelle. C'est le seul point ou elle ne se derive pas du
 			// materiel — un board atteint n'est pas « beaucoup de materiel ».
@@ -2789,7 +2780,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		// Une seule evaluation pour les chantiers 3 (distance) et 4 (progres a
 		// rebours) : le cout EST le releve de presence, le refaire le doublerait.
 		uint32_t rec_rem = 0, rec_back = 0;
-		if(rec_on && (cfg.recipe_weight > 0.0f || cfg.backward)) {
+		if(rec_on && cfg.backward) {
 			rec_rem = RecipeEval(here, cfg.backward ? &rec_back : nullptr);
 			// La reference qui transforme la distance en PROGRES. Prise a la
 			// premiere decision du tirage : tous les tirages d'une meme phase
@@ -2850,12 +2841,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					// ~60-80 sondes de table) et jete apres un simple
 					// departage. Le mecanisme le plus cher du tirage ne servait
 					// qu'a briser des egalites de score.
-					// La coupure est differee a la fin du bloc : le score de CE
-					// point compte quand meme, sans quoi couper ferait perdre du
-					// materiel deja atteint.
-					if(cfg.novelty_rollout_cut &&
-					   ++stale > cfg.novelty_patience)
-						novelty_cut = true;
+					// `--novelty-rollout-cut` coupait ici apres `patience`
+					// decisions muettes. SUPPRIME (audit 18) : REFUTE en 9.22.
+					// `stale` reste compte — il sert au departage de gradient.
+					++stale;
 				}
 			}
 			// Les resolutions exigees (--resolve) pesent PLUS que des cartes
@@ -2889,28 +2878,25 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				sc += static_cast<double>(cfg.landmark_weight) * 1000.0 *
 					  static_cast<double>(total - rem);
 			}
-			// DISTANCE DE RECETTES (chantier 3) : le `h` qui DECROIT pendant
-			// qu'on construit, servi la ou il peut changer quelque chose. C'est
-			// le seul terme du score qui bouge AVANT qu'une carte cible ne soit
-			// posee : `common` compte les cartes cibles PRESENTES et vaut donc
-			// zero sur toute la montee, ce qui est la cause mecanique de la loi
-			// d'arite (9.23 (h)).
-			//
-			// EN PROGRES ET NON EN DISTANCE, et ce n'est pas cosmetique : le
-			// score d'un tirage est un MAX initialise a 0, donc un terme negatif
-			// ne remonterait jamais au-dessus et le gradient serait mort. On
-			// compte donc `d0 - d`, ce que la ligne a GAGNE depuis son depart.
-			// HORS de `material` pour la meme raison que les landmarks : cette
-			// variable sert aussi de recompense au bandit Q^, et changer son
-			// echelle rendrait les mesures de la session 15 incomparables.
-			if(cfg.recipe_weight > 0.0f && rec_on) {
-				const double gained = recipe_base > rec_rem
-										  ? double(recipe_base - rec_rem)
-										  : 0.0;
-				sc += static_cast<double>(cfg.recipe_weight) * 1000.0 * gained;
-			}
-			if(sc > run.score)
+			// `--recipe-w` versait ici la DISTANCE DE RECETTES en progres.
+			// SUPPRIME (audit 18) : REFUTE avec une cause STRUCTURELLE, et c'est
+			// la lecon qu'il faut garder. La distance vers Liger compte « 3
+			// monstres Lunalight » comme exigence CARDINALE ; or fabriquer
+			// Perfume CONSOMME deux Lunalight pour en rendre un, donc la distance
+			// MONTE. Le mecanisme recompensait l'accumulation de corps et
+			// PUNISSAIT leur consommation — c'est-a-dire punissait les
+			// invocations, l'inverse exact du but (9.24 (d)). Une heuristique
+			// h^add sur un graphe ET/OU n'est correcte que si la CONSOMMATION est
+			// modelisee ; la relaxation par suppression suppose qu'atteindre un
+			// sous-but ne detruit rien, hypothese exactement fausse ici.
+			// `recipe_base` et `rec_rem` restent RELEVES (stats.rec_roll_*) :
+			// la distance est mesuree, elle n'entre plus dans aucun cout.
+			if(sc > run.score) {
 				run.score = sc;
+				// Le pic est ICI, et c'est tout ce que le gradient doit
+				// apprendre sous --adapt-to-peak (audit 18).
+				run.peak_steps = run.steps.size();
+			}
 			// Recompense du bandit (--qhat) : le MEME materiel, rapporte a
 			// celui du board cible. Bornee, comparable entre runs, et
 			// SANS la nouveaute — qui est un departage de gradient, pas une
@@ -3005,8 +2991,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// semantique sinon. `path_ctx` est le chemin AVANT cette decision —
 			// c'est bien « la racine jusqu'a ce noeud », le coup courant n'en
 			// fait pas partie.
-			step.cctx = cfg.mcps_depth ? path_ctx
-									   : static_cast<uint64_t>(step.ctx);
+			step.cctx = static_cast<uint64_t>(step.ctx);
 			step.keys.reserve(choices.size());
 			step.known.reserve(choices.size());
 			step.hinted.reserve(choices.size());
@@ -3024,13 +3009,15 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				bool known = plan_index.count(key) != 0 && !choices[i].phase;
 				// Indice de domaine : ce coup engage une carte designee par
 				// --hint, il part avec une prime d'echantillonnage.
-				// LE BIAIS D'INDICES N'AGIT PAS SUR UNE IDENTITE APPROXIMATIVE.
-				// card_lossy marque les prompts de selection, ou card est le
-				// premier code d'un sous-ensemble et non la carte engagee. Y
-				// appliquer --hint/--resolve a fait tomber les resolutions de
-				// l'etalon B de 2 239 a ZERO (mesure, bras --card-on-select).
-				bool hinted = choices[i].card && !choices[i].card_lossy &&
-							  !cfg.hint_cards.empty() &&
+				//
+				// UN GARDE `card_lossy` A EXISTE ICI (session 17) pour exclure
+				// les prompts de selection, ou `card` n'est que le premier code
+				// d'un sous-ensemble. Il est SUPPRIME (audit 18) : le champ
+				// n'etait assigne `true` NULLE PART, donc le garde n'a jamais
+				// agi, et la mesure qui le motivait est retiree (9.25 (a) et
+				// (b)). Ce que le biais porte sur ces prompts se lit desormais
+				// dans `hint_seen_sel`, qui le COMPTE au lieu de le supposer.
+				bool hinted = choices[i].card && !cfg.hint_cards.empty() &&
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();
@@ -3261,10 +3248,17 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			if(!cfg.hint_cards.empty()) {
 				bool any = false;
 				for(uint8_t h : step.hinted)
-					any |= h != 0;
+					any |= (h & 1) != 0;
 				if(any) {
 					++stats.hint_seen;
-					if(step.hinted[pick_index])
+					// VENTILATION PAR TYPE DE PROMPT (audit 18) : sans elle, le
+					// compteur melange l'effet de `--card-on-select` (qui ne
+					// touche QUE les prompts de selection) a la qualite du run.
+					if(IsSubsetPrompt(prompt_type))
+						++stats.hint_seen_sel;
+					else
+						++stats.hint_seen_exact;
+					if(step.hinted[pick_index] & 1)
 						++stats.hint_taken;
 				}
 			}
@@ -3292,8 +3286,6 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// `mcps_depth` premieres decisions. Au-dela il est fige : toutes les
 			// decisions profondes partagent alors le contexte de leur prefixe,
 			// ce qui BORNE la table au lieu d'y creer une case par noeud.
-			if(cfg.mcps_depth && nsteps < cfg.mcps_depth)
-				path_ctx += MixMove(choices[pick].plan_key);
 			// Le coup ATOMIQUE joue entre dans le multiensemble du tirage, que
 			// la decision ait ete echantillonnee, dictee par le bandit ou
 			// ABSORBEE par une macro : « la partie contient a » ne se soucie ni
@@ -3402,9 +3394,19 @@ std::vector<BanditProbe> Search::RootBandit() const {
 
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp, size_t ctx_max, float assign_bias) {
+			  float temp, size_t ctx_max, float assign_bias, bool to_peak) {
 	const double inv_t = 1.0 / (temp > 1e-3f ? temp : 1e-3f);
 	const bool two_level = res && shrink >= 0.0f;
+	// TRONCATURE AU PIC (audit 18). Le score est un MAX sur les prefixes : les
+	// pas posterieurs au maximum n'ont contribue a AUCUNE part du score, et les
+	// renforcer apprend l'effondrement d'apres-pic. `peak_steps` vaut 0 sur les
+	// lignes du CORPUS (elles ne passent pas par PolicyRollout) — on ne tronque
+	// donc jamais une ligne qui n'a pas de pic mesure, sans quoi le rejeu
+	// d'adaptation deviendrait muet en silence.
+	const size_t n_steps =
+		(to_peak && run.peak_steps > 0 && run.peak_steps <= run.steps.size())
+			? run.peak_steps
+			: run.steps.size();
 	// Le gradient contextuel CREE une case par (coup, contexte). Sous
 	// conditionnement par le chemin, le nombre de contextes n'est plus borne par
 	// 256 mais par le nombre de prefixes visites : sans plafond, la table
@@ -3419,7 +3421,8 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 		return &(*res)[k];
 	};
 	std::vector<double> p;
-	for(const PolicyStep& s : run.steps) {
+	for(size_t si = 0; si < n_steps; ++si) {
+		const PolicyStep& s = run.steps[si];
 		// Decision prise par le BANDIT DE TETE (--qhat) : elle n'a pas ete
 		// tiree du softmax, donc le gradient NRPA n'y est pas defini. L'y
 		// appliquer pousserait +alpha le coup choisi a chaque tirage sans le
@@ -3472,7 +3475,10 @@ void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 void Search::Adapt(Policy& pol, const NrpaRun& best) {
 	AdaptRun(pol, &ctx_weights, best, cfg.nrpa_alpha, cfg.nrpa_bias_known,
 			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp, cfg.ctx_max,
-			 cfg.assign_bias);
+			 cfg.assign_bias, cfg.adapt_to_peak);
+	if(cfg.adapt_to_peak && best.peak_steps > 0 &&
+	   best.peak_steps < best.steps.size())
+		stats.peak_truncations += best.steps.size() - best.peak_steps;
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
@@ -3499,14 +3505,6 @@ double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) 
 			best = std::move(child);
 			stagnant = 0;
 			repeats = 0;
-		} else if(cfg.nrpa_lr && MatScore(child.score) == MatScore(best.score)) {
-			// Repetitions limitees (arXiv:2401.10420) : la meilleure ligne est
-			// RE-TROUVEE (meme score materiel — la part nouveaute decroit a
-			// chaque rejeu, l'egalite stricte ne se produirait jamais). C'est
-			// la convergence qui se signale elle-meme : inutile d'attendre que
-			// la stagnation l'admette, on rend la main tout de suite.
-			if(++repeats >= cfg.nrpa_lr)
-				break;
 		} else if(++stagnant >= 8) {
 			// La politique rejoue la meme ligne sans plus progresser : c'est le
 			// mode de defaillance documente de NRPA (convergence prematuree).
@@ -3691,11 +3689,6 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 			best = std::move(child);
 			stagnant = 0;
 			repeats = 0;
-		} else if(cfg.nrpa_lr && MatScore(child.score) == MatScore(best.score)) {
-			// Repetitions limitees, au niveau superieur aussi : un redemarrage
-			// qui re-trouve la meme ligne a fini d'apprendre.
-			if(++repeats >= cfg.nrpa_lr)
-				break;
 		} else if(++stagnant >= 8) {
 			break;
 		}
@@ -3733,7 +3726,7 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 				AdaptRun(pol, &ctx_weights, g.run,
 						 cfg.nrpa_alpha * cfg.hindsight, cfg.nrpa_bias_known,
 						 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp,
-						 cfg.ctx_max, cfg.assign_bias);
+						 cfg.ctx_max, cfg.assign_bias, cfg.adapt_to_peak);
 				++stats.hindsight_adapts;
 			}
 	}
@@ -4464,13 +4457,6 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				// constante : le best-first y est invariant.
 				lcost = std::log((std::max)(child.lam - 1.0, 1e-300)) +
 						static_cast<double>(cfg.levin_h) * hgoal;
-			} else if(cfg.phs_canonical) {
-				// PHS* du papier : (d + h)/pi. h s'ajoute a la profondeur —
-				// une carte manquante compte comme une decision de plus, pas
-				// comme un facteur e^h.
-				lcost = std::log(static_cast<double>(child.depth) + 1.0 +
-								 static_cast<double>(cfg.levin_h) * hgoal) -
-						child.logpi;
 			} else {
 				lcost = std::log(static_cast<double>(child.depth) + 1.0) +
 						static_cast<double>(cfg.levin_h) * hgoal - child.logpi;
