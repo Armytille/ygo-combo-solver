@@ -5292,11 +5292,61 @@ n'a **pas de sens pour une carte non-monstre** — Masquerade est une magie, ses
 `IDLECMD` sont des « poser-st » et des « activer », pas des invocations. Le verdict de la sonde doit
 tenir compte du type de la carte.
 
-**CE QUI MANQUE, et c'est nommé : une sonde de PRÉSENCE EN ZONE.** Les trois volets existants
-comptent des *événements* (invocation, activation, offre) ; le combo, lui, se joue sur des *états*
-— « Leo Dancer au cimetière », « trois Lunalight disponibles ». Tant que l'instrument ne sait pas
-dire *à quelle fraction des tirages Leo Dancer atteint le cimetière*, on ne saura pas si le blocage
-est avant ou après cette étape, et tout mécanisme écrit sera un pari.
+#### (m) LA SONDE DE PRÉSENCE EN ZONE — le goulot est localisé, et ce n'est pas la porte
+
+Quatrième volet de `--watch`, et le seul qui parle d'**états** : relevé sur `MSG_MOVE` (zone de
+destination à l'offset 15), donc **à coût nul** — aucune requête ajoutée. Un tirage compte une fois
+par zone atteinte.
+
+*Correctif d'instrument appliqué avant de mesurer* : les volets présence et activation sont comptés
+**avant** le test d'élision. Un prompt élidé ne redescend pas dans le corps de la boucle et
+`watch_*_this_step` est remis à zéro au `StepToPrompt` suivant — compter plus bas aurait fait
+disparaître tout ce qu'une chaîne forcée déplace, c'est-à-dire l'essentiel puisque 74,6 % des prompts
+sont forcés. Une sonde qui perd ses événements sous un drapeau rendrait un « jamais » qui n'existe pas.
+
+Étalon A nu, 90 s, `--elide-forced --hindsight 0.5`, 579 000 tirages :
+
+| carte | activée | main | terrain | **cimetière** |
+|---|---|---|---|---|
+| Masquerade | **21,4 %** | 30,4 % | 22,0 % | 1,0 % |
+| Kaleido Chick | 2,2 % | 8,2 % | 2,6 % | 5,9 % |
+| **Leo Dancer** | 0 | — | — | **202 tirages, 0,035 %** |
+| Liger Dancer | 0 | — | — | 230, 0,04 % |
+
+**La porte est grande ouverte et le matériau n'arrive jamais.** Ce n'est ni un problème d'état
+(l'occasion se présente une fois sur cinq), ni un problème de porte (elle s'ouvre) : c'est **le
+CHOIX** qui n'est pas orienté. Et cela referme la conclusion de (a) : les ~123 000 `SELECT_CARD` ne
+sont pas « l'extra deck lu en entier », c'est le prompt qui demande **quel Lunalight envoyer au
+cimetière**. Leo Dancer y est offert **14 433 fois et choisi 202 fois — 1,4 % de conversion.**
+
+**`--assign-bias <f>`** oriente ce choix : les coups engageant un code que le graphe de recettes
+désigne comme **matériau** (`snap_useful`, déjà calculé par `--assign`) reçoivent ce poids, et
+`card_on_select` s'allume pour que les prompts de sélection portent une identité. Ce qui le distingue
+de `--goal-bias` (réfuté en §9.23) : la liste n'est ni écrite à la main ni la cible littérale — elle
+nomme les **matériaux**, c'est-à-dire précisément ce que l'énoncé ne dit pas. `--goal-bias` biaisait
+vers Liger, un coup qui n'existe pas encore ; celui-ci biaise vers ce qu'il faut faire **avant**.
+Le biais est rejoué dans `AdaptRun` (bit 1 de `PolicyStep::hinted`) — sans quoi le gradient NRPA
+serait calculé sous une distribution qui n'est pas celle de l'échantillonnage, la faute exacte que
+l'audit 7.5 avait trouvée sur `hint_bias`.
+
+**MESURE — ET LE JUGE EST TROP BRUITÉ POUR TRANCHER.** 90 s, graine 888 :
+
+| bras | tirages | Leo au cimetière | Liger ≥1 |
+|---|---|---|---|
+| `--assign-bias 0` | 516 147 | 33 | 0 |
+| `--assign-bias 1.5` | 551 129 | 180 | 0 |
+| `--assign-bias 3.0` | 524 885 | 43 | 0 |
+
+Le ×5,5 apparent **ne vaut rien** : un run de configuration **identique** au bras témoin, lancé
+quelques minutes plus tôt, donnait **202**. Deux runs identiques à la même graine, facteur 6. Le
+dossier l'avait déjà écrit — « fixer la graine ne rend pas le run reproductible (échanges
+asynchrones entre workers) : c'est un défaut du solveur, pas une propriété de l'instrument » — et
+c'est ici que ce défaut coûte. À 0,03 % d'événements, **le criblage ne peut même pas éliminer**.
+
+**Statut : `--assign-bias` est ÉCRIT et INSTRUMENTÉ, NON JUGÉ.** Le juger demande soit un budget
+beaucoup plus long, soit plusieurs graines, soit — mieux — un compteur moins rare que « Leo au
+cimetière » : par exemple *la conversion offre → choix* sur ce prompt précis, qui compte 14 433
+occasions au lieu de 200 événements.
 
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 

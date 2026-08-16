@@ -281,6 +281,7 @@ Search::Step Search::StepToPrompt() {
 	resolved_this_step = 0;
 	watch_this_step = 0;
 	watch_act_this_step = 0;
+	watch_zone_this_step = 0;
 	material_violation = false;
 	recent_materials.clear();
 	recipe_materials.clear();
@@ -300,6 +301,29 @@ Search::Step Search::StepToPrompt() {
 				// MATERIAU A ETE PRIS. C'est elle qui fait du noeud du graphe de
 				// recettes une EXIGENCE (« Leo Dancer au cimetiere ») et non une
 				// carte — regle 1 du chantier 16.
+				// SONDE DE PRESENCE EN ZONE (`--watch`, session 17). La zone de
+				// DESTINATION est a l'offset 15 (loc_info courant : controleur
+				// 14, location 15). Releve ici, donc a cout nul : MSG_MOVE est
+				// deja decode, aucune requete de zone n'est ajoutee.
+				//
+				// C'est le seul volet de la sonde qui parle d'ETATS et non
+				// d'evenements — et c'est celui dont l'etalon A a besoin :
+				// `Lunalight Leo Dancer` n'est ni invoque ni active, son role
+				// est d'ARRIVER AU CIMETIERE pour y etre banni comme materiau.
+				if(!cfg.probe_watch.empty() && m.size >= 16) {
+					uint32_t mc = 0;
+					std::memcpy(&mc, m.data, 4);
+					if(mc) {
+						mc = duel.Db().Canonical(mc);
+						const int slot = ZoneSlot(NormalizeZone(m.data[15]));
+						if(slot >= 0)
+							for(size_t i = 0;
+								i < cfg.probe_watch.size() && i < 4; ++i)
+								if(cfg.probe_watch[i] == mc)
+									watch_zone_this_step |=
+										1u << (8 * i + slot);
+					}
+				}
 				if((!cfg.material_req.empty() || cfg.recipes) && m.size >= 28) {
 					uint32_t code = 0, reason = 0;
 					std::memcpy(&code, m.data, 4);
@@ -2422,6 +2446,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	uint64_t rep_offered = 0;
 	// Cartes surveillees deja ACTIVEES dans ce tirage.
 	uint64_t rep_activated = 0;
+	// Zones deja comptees dans ce tirage : 8 bits par entree surveillee.
+	uint32_t rep_zone_seen = 0;
 	const bool probe_on = cfg.probe_repeat && ProbeCount() > 0;
 	// La source du delta : `--watch` (invocations pures) quand il existe,
 	// sinon l'ancien compteur de resolutions. Les deux sont empaquetes de la
@@ -2563,6 +2589,40 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		resolved += resolved_this_step;
 		++stats.nodes;
 		prof::Count(prof::kDecisions);
+		// --- SONDE : LES VOLETS QUI NE DEPENDENT PAS DU BOARD ---------------
+		// PLACES ICI, AVANT L'ELISION, et c'est un correctif et non un detail :
+		// un prompt elide ne redescend pas dans le corps de la boucle, et
+		// `watch_*_this_step` est remis a zero au StepToPrompt suivant. Compter
+		// plus bas ferait donc DISPARAITRE tout ce qu'une chaine forcee a
+		// deplace ou active — c'est-a-dire l'essentiel, puisque 74,6 % des
+		// prompts sont forces. Une sonde qui perd ses evenements sous un drapeau
+		// rendrait un « jamais » qui n'existe pas.
+		if(probe_on) {
+			// PRESENCE EN ZONE : un tirage compte UNE FOIS par zone atteinte.
+			if(watch_zone_this_step)
+				for(size_t i = 0; i < ProbeCount(); ++i)
+					for(int z = 0; z < 6; ++z) {
+						const uint32_t bit = 1u << (8 * i + z);
+						if(!(watch_zone_this_step & bit) ||
+						   (rep_zone_seen & bit))
+							continue;
+						rep_zone_seen |= bit;
+						++stats.rep[i].zone_rollouts[z];
+					}
+			// ACTIVATIONS, strictement observationnelles.
+			if(watch_act_this_step)
+				for(size_t i = 0; i < ProbeCount(); ++i) {
+					const uint32_t a = static_cast<uint32_t>(
+						(watch_act_this_step >> (16 * i)) & 0xffff);
+					if(!a)
+						continue;
+					stats.rep[i].act_total += a;
+					if(!(rep_activated & (1ull << i))) {
+						rep_activated |= 1ull << i;
+						++stats.rep[i].act_rollouts;
+					}
+				}
+		}
 		// --- ELISION : le prompt est-il FORCE ? ---------------------------
 		// Enumere ICI, avant tout travail d'evaluation. La comptabilite
 		// ci-dessus (actions, tours, invocations, resolutions) est deja faite :
@@ -2648,19 +2708,6 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					}
 				}
 			}
-			// ACTIVATIONS surveillees, strictement observationnelles.
-			if(watch_act_this_step)
-				for(size_t i = 0; i < ProbeCount(); ++i) {
-					const uint32_t a = static_cast<uint32_t>(
-						(watch_act_this_step >> (16 * i)) & 0xffff);
-					if(!a)
-						continue;
-					stats.rep[i].act_total += a;
-					if(!(rep_activated & (1ull << i))) {
-						rep_activated |= 1ull << i;
-						++stats.rep[i].act_rollouts;
-					}
-				}
 			// Decisions d'APRES : « le second n'arrive jamais » ne vaut que si le
 			// tirage avait encore des decisions devant lui.
 			if(rep_active)
@@ -2966,15 +3013,34 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();
+				// BIAIS D'ASSIGNATION (--assign-bias) : ce choix engage-t-il un
+				// MATERIAU designe par le graphe de recettes ? La liste vient de
+				// `snap_useful`, derivee des recettes et non de la cible
+				// litterale — c'est ce qui la distingue de `--goal-bias`, qui
+				// biaisait vers un coup n'existant pas encore. Le goulot mesure
+				// est ici : Leo Dancer est offert 14 433 fois dans le prompt
+				// « quel Lunalight envoyer au cimetiere » et choisi 202 fois.
+				const bool useful =
+					cfg.assign_bias > 0.0f && choices[i].card &&
+					!snap_useful.empty() &&
+					std::binary_search(snap_useful.begin(), snap_useful.end(),
+									   choices[i].card);
 				double w = EffectiveWeight(pol, &ctx_weights, key, step.cctx,
 										   cfg.ctx_shrink);
 				logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
-							(hinted ? cfg.hint_bias : 0.0f)) /
+							(hinted ? cfg.hint_bias : 0.0f) +
+							(useful ? cfg.assign_bias : 0.0f)) /
 						   (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f);
 				mx = (std::max)(mx, logit[i]);
 				step.keys.push_back(key);
 				step.known.push_back(known ? 1 : 0);
-				step.hinted.push_back(hinted ? 1 : 0);
+				// Bit 0 = --hint, bit 1 = materiau utile (--assign-bias). Les
+				// DEUX doivent etre rejoues par AdaptRun : un gradient calcule
+				// sous une distribution qui n'est pas celle de l'echantillonnage
+				// est faux, et c'est exactement la faute que l'audit 7.5 avait
+				// trouvee sur hint_bias.
+				step.hinted.push_back(static_cast<uint8_t>((hinted ? 1 : 0) |
+														   (useful ? 2 : 0)));
 			}
 			// OPTIONS (chantier 17) : une macro applicable devient un choix de
 			// plus, pesee par SON poids — l'unite d'echantillonnage qui
@@ -3308,7 +3374,7 @@ std::vector<BanditProbe> Search::RootBandit() const {
 
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp, size_t ctx_max) {
+			  float temp, size_t ctx_max, float assign_bias) {
 	const double inv_t = 1.0 / (temp > 1e-3f ? temp : 1e-3f);
 	const bool two_level = res && shrink >= 0.0f;
 	// Le gradient contextuel CREE une case par (coup, contexte). Sous
@@ -3337,7 +3403,9 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 		for(size_t i = 0; i < s.keys.size(); ++i) {
 			double w = EffectiveWeight(pol, res, s.keys[i], s.cctx, shrink);
 			p[i] = (w + (s.known[i] ? bias_known : 0.0f) +
-					(i < s.hinted.size() && s.hinted[i] ? hint_bias : 0.0f)) *
+					(i < s.hinted.size() ? ((s.hinted[i] & 1) ? hint_bias : 0.0f) +
+											   ((s.hinted[i] & 2) ? assign_bias : 0.0f)
+										 : 0.0f)) *
 				   inv_t;
 			mx = (std::max)(mx, p[i]);
 		}
@@ -3375,7 +3443,8 @@ void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 
 void Search::Adapt(Policy& pol, const NrpaRun& best) {
 	AdaptRun(pol, &ctx_weights, best, cfg.nrpa_alpha, cfg.nrpa_bias_known,
-			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp, cfg.ctx_max);
+			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp, cfg.ctx_max,
+			 cfg.assign_bias);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
@@ -3636,7 +3705,7 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 				AdaptRun(pol, &ctx_weights, g.run,
 						 cfg.nrpa_alpha * cfg.hindsight, cfg.nrpa_bias_known,
 						 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp,
-						 cfg.ctx_max);
+						 cfg.ctx_max, cfg.assign_bias);
 				++stats.hindsight_adapts;
 			}
 	}

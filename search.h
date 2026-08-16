@@ -1093,7 +1093,7 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // creee — le conditionnement par le chemin degrade proprement vers le global.
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp = 1.0f, size_t ctx_max = 0);
+			  float temp = 1.0f, size_t ctx_max = 0, float assign_bias = 0.0f);
 
 // `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
 // `hint_bias` et `temp` sont EXIGES, sans defaut : la session 8 les avait
@@ -2300,6 +2300,32 @@ struct SearchConfig {
 	// graphe apprend pendant le run, la liste doit le suivre sans reprendre son
 	// verrou a chaque decision.
 	bool assign = false;
+	// (1bis) BIAIS D'ASSIGNATION (`--assign-bias`, session 17) — le mecanisme
+	// que le diagnostic DESIGNE, et non celui qu'on avait devine.
+	//
+	// LA MESURE QUI LE COMMANDE. La sonde de PRESENCE EN ZONE montre que la
+	// porte est grande ouverte et que le materiau n'arrive jamais :
+	//     Masquerade activee ............ 21,4 % des tirages (225 942 fois)
+	//     Leo Dancer au CIMETIERE ....... 202 tirages sur 579 000, soit 0,035 %
+	// Or Leo Dancer est OFFERT 14 433 fois dans un prompt de selection — celui
+	// qui demande quel Lunalight envoyer de l'extra au cimetiere — et choisi
+	// 202 fois : **1,4 % de conversion**. Ce n'est donc ni un probleme d'etat
+	// (l'occasion se presente), ni un probleme de porte (elle s'ouvre) : c'est
+	// le CHOIX qui n'est pas oriente.
+	//
+	// CE QUE FAIT LE DRAPEAU : ajoute ce poids au logit des choix qui engagent
+	// un code que le GRAPHE DE RECETTES designe comme materiau d'une carte cible
+	// manquante (`snap_useful`, deja calcule par `--assign`). Et allume
+	// `card_on_select`, sans quoi les prompts de selection n'ont aucune identite
+	// de carte et le biais ne peut pas s'y appliquer.
+	//
+	// EN QUOI C'EST DIFFERENT DE `--hint` ET DE `--goal-bias` : la liste n'est
+	// pas ecrite a la main et n'est pas la cible litterale — elle est DERIVEE
+	// des recettes observees et amorcees, donc elle nomme les MATERIAUX, qui
+	// sont precisement ce que la cible ne dit pas. `--goal-bias` a echoue parce
+	// qu'il biaisait vers Liger, un coup qui n'existe pas encore ; celui-ci
+	// biaise vers ce qu'il faut faire AVANT.
+	float assign_bias = 0.0f;
 
 	// (2) HINDSIGHT (--hindsight w). Andrychowicz et al., NeurIPS 2017 : un
 	// echec re-etiquete par le but qu'il a EFFECTIVEMENT atteint. Notre or
@@ -2562,6 +2588,17 @@ struct RepeatProbe {
 	// sans ce compteur, « jamais invoquee » ne disait pas si le solveur avait
 	// seulement essaye la porte.
 	uint64_t act_rollouts = 0, act_total = 0;
+	// PRESENCE EN ZONE — le volet qui manquait, et le seul qui parle d'ETATS.
+	//
+	// Les trois autres volets comptent des EVENEMENTS (invocation, activation,
+	// offre). Or le combo se joue sur des etats : « Leo Dancer AU CIMETIERE »,
+	// « trois Lunalight disponibles ». `Lunalight Leo Dancer` n'est jamais
+	// invoque NI active — son role est d'ARRIVER au cimetiere pour y etre banni
+	// comme materiau. Sans ce compteur, « jamais invoque » ne disait pas si la
+	// carte avait seulement atteint la zone ou elle sert.
+	//
+	// Un tirage compte UNE FOIS par zone atteinte. Index : cf. ZoneSlot.
+	uint64_t zone_rollouts[6] = { 0, 0, 0, 0, 0, 0 };
 	// OFFRES COMPTEES PAR TYPE DE PROMPT. Le masque seul ne suffisait pas, et la
 	// premiere lecture de la session 17 s'est trompee a cause de cela : Leo et
 	// Liger etaient « proposes dans 36 500 tirages », ce qui se lisait « le jeu
@@ -2584,6 +2621,26 @@ struct RepeatProbe {
 //   3 SUM      : tributs, materiaux Synchro
 //   4 CHAIN    : fenetre de chaine
 //   5 POSITION : la carte est POSEE — la seule preuve directe d'invocation
+// Zones suivies par la sonde de PRESENCE, dans l'ordre de RepeatProbe::zone_rollouts.
+// L'entree attend une zone DEJA normalisee (cf. NormalizeZone).
+//   0 main | 1 terrain | 2 cimetiere | 3 bannie | 4 extra | 5 deck
+inline int ZoneSlot(uint8_t normalized) {
+	switch(normalized) {
+	case 0x02: return 0;
+	case 0x0c: return 1;
+	case 0x10: return 2;
+	case 0x20: return 3;
+	case 0x40: return 4;
+	case 0x01: return 5;
+	default:   return -1;
+	}
+}
+inline const char* ZoneSlotName(int slot) {
+	static const char* kNames[6] = { "main", "terrain", "cimetiere", "bannie",
+									 "extra", "deck" };
+	return (slot >= 0 && slot < 6) ? kNames[slot] : "?";
+}
+
 inline int OfferSlot(uint8_t msg) {
 	switch(msg) {
 	case MSG_SELECT_IDLECMD:       return 0;
@@ -3153,6 +3210,10 @@ private:
 	// empaquetage. Distinct des invocations : une carte dont le role est
 	// d'OUVRIR une voie (Wolf, Masquerade) ne s'invoque pas, elle s'ACTIVE.
 	uint64_t watch_act_this_step = 0;
+	// Zones ATTEINTES par les cartes `--watch` pendant le dernier StepToPrompt :
+	// 8 bits par entree surveillee, un bit par ZoneSlot. Releve sur MSG_MOVE,
+	// donc a cout nul — aucune requete de zone ajoutee.
+	uint32_t watch_zone_this_step = 0;
 	// Resolutions (activations) de cartes SURVEILLEES par le dernier
 	// StepToPrompt, empaquetees : 16 bits par entree de cfg.resolve_min.
 	uint64_t resolved_this_step = 0;

@@ -524,6 +524,28 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 								 : 0.0,
 						(unsigned long long)r.act_total,
 						r.act_rollouts ? "" : "   <-- JAMAIS ACTIVEE");
+			// PRESENCE EN ZONE — le seul volet qui parle d'ETATS. Pour une carte
+			// dont le role est d'ARRIVER quelque part (Leo Dancer au cimetiere,
+			// d'ou il sera banni comme materiau), c'est LA mesure : « jamais
+			// invoquee » ne disait pas si elle avait atteint sa zone.
+			{
+				bool any_zone = false;
+				for(int z = 0; z < 6; ++z)
+					if(r.zone_rollouts[z]) { any_zone = true; break; }
+				std::printf("      ATTEINT :");
+				if(!any_zone) {
+					std::printf("  aucune zone   <-- la carte n'a JAMAIS BOUGE\n");
+				} else {
+					for(int z = 0; z < 6; ++z)
+						if(r.zone_rollouts[z])
+							std::printf("  %s %llu (%.1f %%)", ZoneSlotName(z),
+										(unsigned long long)r.zone_rollouts[z],
+										rollouts ? double(r.zone_rollouts[z]) *
+													   100.0 / double(rollouts)
+												 : 0.0);
+					std::printf("\n");
+				}
+			}
 			std::printf("        par prompt :");
 			for(int k = 0; k < 6; ++k)
 				if(r.offer_by[k])
@@ -1231,6 +1253,11 @@ struct Options {
 	// LEXICOGRAPHIQUE de l'enumeration, qui ne rend pas le bon sous-ensemble
 	// rare mais ABSENT.
 	bool assign = false;
+	// (1bis) --assign-bias <f> : le mecanisme que le DIAGNOSTIC designe. Leo
+	// Dancer est offert 14 433 fois dans le prompt « quel Lunalight envoyer au
+	// cimetiere » et choisi 202 fois — 1,4 %. Ce poids oriente ce choix vers les
+	// codes que le GRAPHE DE RECETTES designe comme materiaux.
+	double assign_bias = 0.0;
 	// (2) --hindsight <f> : chaque monstre d'extra deck reellement invoque
 	// devient un but de substitution, et la meilleure ligne qui l'atteint subit
 	// le gradient NRPA a f x alpha (HER, NeurIPS 2017).
@@ -2153,6 +2180,13 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				return false;
 			}
 			o.hindsight_k = static_cast<size_t>(k);
+		} else if(a == "--assign-bias") {
+			const char* v = next("--assign-bias"); if(!v) return false;
+			o.assign_bias = std::atof(v);
+			if(o.assign_bias < 0) {
+				std::printf("!! --assign-bias attend un poids >= 0\n");
+				return false;
+			}
 		} else if(a == "--recipe-w") {
 			const char* v = next("--recipe-w"); if(!v) return false;
 			o.recipe_weight = std::atof(v);
@@ -6537,6 +6571,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// sont vivants et inertes. L'implication est appliquee PLUS HAUT (avec celle
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
 	cfg.assign = opt.assign;
+	cfg.assign_bias = static_cast<float>(opt.assign_bias);
+	if(opt.assign_bias > 0.0) {
+		// Sans identite de carte sur les prompts de SELECTION, le biais ne peut
+		// pas s'y appliquer — or c'est LA qu'est le goulot mesure.
+		cfg.enumeration.card_on_select = true;
+		std::printf("  --assign-bias %.2f : les choix engageant un MATERIAU du "
+					"graphe de recettes sont favorises\n"
+					"                     (prompts de selection compris — "
+					"card_on_select allume)\n", opt.assign_bias);
+	}
 	cfg.hindsight = static_cast<float>(opt.hindsight);
 	cfg.hindsight_k = opt.hindsight_k;
 	cfg.recipe_weight = static_cast<float>(opt.recipe_weight);
@@ -6898,6 +6942,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					a.offer_msgs |= r.offer_msgs;
 					a.act_rollouts += r.act_rollouts;
 					a.act_total += r.act_total;
+					for(int z = 0; z < 6; ++z)
+						a.zone_rollouts[z] += r.zone_rollouts[z];
 					for(int k = 0; k < 6; ++k)
 						a.offer_by[k] += r.offer_by[k];
 					if(r.more_n) {
