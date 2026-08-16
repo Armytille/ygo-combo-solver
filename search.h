@@ -2557,6 +2557,11 @@ struct RepeatProbe {
 	// se lirait « le jeu te l'a propose 33 000 fois et tu as refuse » alors
 	// qu'aucune de ces 33 000 fois n'etait peut-etre une invocation.
 	uint64_t offer_msgs = 0;
+	// ACTIVATIONS : tirages ayant ACTIVE la carte au moins une fois, et compte
+	// total. Une carte qui ouvre une voie (Wolf, Masquerade) ne s'invoque pas —
+	// sans ce compteur, « jamais invoquee » ne disait pas si le solveur avait
+	// seulement essaye la porte.
+	uint64_t act_rollouts = 0, act_total = 0;
 	// OFFRES COMPTEES PAR TYPE DE PROMPT. Le masque seul ne suffisait pas, et la
 	// premiere lecture de la session 17 s'est trompee a cause de cela : Leo et
 	// Liger etaient « proposes dans 36 500 tirages », ce qui se lisait « le jeu
@@ -3144,6 +3149,10 @@ private:
 	// Invocations des cartes `--watch` vues par le dernier StepToPrompt,
 	// empaquetees 16 bits par entree. Strictement observationnel.
 	uint64_t watch_this_step = 0;
+	// ACTIVATIONS des cartes `--watch` vues par le dernier StepToPrompt, meme
+	// empaquetage. Distinct des invocations : une carte dont le role est
+	// d'OUVRIR une voie (Wolf, Masquerade) ne s'invoque pas, elle s'ACTIVE.
+	uint64_t watch_act_this_step = 0;
 	// Resolutions (activations) de cartes SURVEILLEES par le dernier
 	// StepToPrompt, empaquetees : 16 bits par entree de cfg.resolve_min.
 	uint64_t resolved_this_step = 0;

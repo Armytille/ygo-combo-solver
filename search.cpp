@@ -280,6 +280,7 @@ Search::Step Search::StepToPrompt() {
 	summons_this_step.clear();
 	resolved_this_step = 0;
 	watch_this_step = 0;
+	watch_act_this_step = 0;
 	material_violation = false;
 	recent_materials.clear();
 	recipe_materials.clear();
@@ -385,6 +386,30 @@ Search::Step Search::StepToPrompt() {
 				++actions_this_step;
 				break;
 			case MSG_CHAINING:
+				// SONDE PURE, VOLET ACTIVATIONS (`--watch`, session 17).
+				//
+				// POURQUOI ELLE MANQUAIT, et ce que son absence a cache. La
+				// sonde ne comptait que les INVOCATIONS, donc elle ne pouvait
+				// rien dire des cartes dont le role est d'OUVRIR une voie. Or
+				// c'est exactement le cas de l'etalon A : `Lunalight Leo Dancer`
+				// exige un materiau nomme ABSENT DU DECK (Panther Dancer), il
+				// n'est donc JAMAIS invocable par la voie normale — il ne peut
+				// venir que de l'effet de `Lunalight Wolf` ou de
+				// `Lunalight Masquerade`, qui invoquent une Fusion en
+				// bannissant les materiaux depuis le terrain OU LE CIMETIERE.
+				// « Leo n'est jamais invoque » ne disait donc pas si le solveur
+				// avait seulement essaye la porte.
+				//
+				// Strictement observationnel, comme le volet invocations :
+				// aucune contrainte, aucun gradient, aucun biais.
+				if(!cfg.probe_watch.empty() && m.size >= 4) {
+					uint32_t wcode = 0;
+					std::memcpy(&wcode, m.data, 4);
+					wcode = duel.Db().Canonical(wcode);
+					for(size_t i = 0; i < cfg.probe_watch.size() && i < 4; ++i)
+						if(cfg.probe_watch[i] == wcode)
+							watch_act_this_step += 1ull << (16 * i);
+				}
 				// Resolutions surveillees (--resolve). Compte a l'activation :
 				// en solitaire rien ne nie une chaine. Filtre par zone
 				// d'ACTIVATION : l'Omega qui rippe s'active du terrain, son
@@ -2395,6 +2420,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// par entree, pour separer « combien de decisions offraient la carte » de
 	// « combien de tirages en ont vu au moins une ».
 	uint64_t rep_offered = 0;
+	// Cartes surveillees deja ACTIVEES dans ce tirage.
+	uint64_t rep_activated = 0;
 	const bool probe_on = cfg.probe_repeat && ProbeCount() > 0;
 	// La source du delta : `--watch` (invocations pures) quand il existe,
 	// sinon l'ancien compteur de resolutions. Les deux sont empaquetes de la
@@ -2621,6 +2648,19 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					}
 				}
 			}
+			// ACTIVATIONS surveillees, strictement observationnelles.
+			if(watch_act_this_step)
+				for(size_t i = 0; i < ProbeCount(); ++i) {
+					const uint32_t a = static_cast<uint32_t>(
+						(watch_act_this_step >> (16 * i)) & 0xffff);
+					if(!a)
+						continue;
+					stats.rep[i].act_total += a;
+					if(!(rep_activated & (1ull << i))) {
+						rep_activated |= 1ull << i;
+						++stats.rep[i].act_rollouts;
+					}
+				}
 			// Decisions d'APRES : « le second n'arrive jamais » ne vaut que si le
 			// tirage avait encore des decisions devant lui.
 			if(rep_active)

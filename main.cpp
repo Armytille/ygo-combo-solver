@@ -512,6 +512,18 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			static const char* kOfferNames[6] = { "IDLECMD", "SELECT_CARD",
 												  "UNSELECT", "SUM", "CHAIN",
 												  "POSITION" };
+			// ACTIVATIONS : le seul chiffre qui dise si le solveur a essaye la
+			// PORTE, pour une carte dont le role est d'ouvrir une voie plutot
+			// que d'etre posee (Wolf, Masquerade — et Leo Dancer, qui n'est
+			// jamais invocable par la voie normale, son materiau nomme etant
+			// absent du deck).
+			std::printf("      ACTIVEE dans %llu tirage(s) (%.2f %%), %llu fois "
+						"au total%s\n",
+						(unsigned long long)r.act_rollouts,
+						rollouts ? double(r.act_rollouts) * 100.0 / double(rollouts)
+								 : 0.0,
+						(unsigned long long)r.act_total,
+						r.act_rollouts ? "" : "   <-- JAMAIS ACTIVEE");
 			std::printf("        par prompt :");
 			for(int k = 0; k < 6; ++k)
 				if(r.offer_by[k])
@@ -6884,6 +6896,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					a.offer_steps += r.offer_steps;
 					a.offer_rollouts += r.offer_rollouts;
 					a.offer_msgs |= r.offer_msgs;
+					a.act_rollouts += r.act_rollouts;
+					a.act_total += r.act_total;
 					for(int k = 0; k < 6; ++k)
 						a.offer_by[k] += r.offer_by[k];
 					if(r.more_n) {

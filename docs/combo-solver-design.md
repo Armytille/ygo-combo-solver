@@ -5259,6 +5259,45 @@ sous élision** — il vient du comptage des prompts, et un `SELECT_POSITION` à
 donc invisible. Le classement a été refait sur le compteur d'invocations ; il est identique, mais
 c'est une vérification et non une chance.
 
+#### (l) LA SONDE NE COMPTAIT QUE DES INVOCATIONS — et le combo passe par des ACTIVATIONS
+
+Recadrage de l'opérateur : « Leo n'est pas censé être invoqué de toute façon, il sert juste de
+matériel pour Liger ». Il a raison, et cela invalide le juge que toute la session a utilisé.
+
+Le dossier avait déjà le fait sans en tirer la conséquence : **`Lunalight Leo Dancer` exige un
+matériau nommé ABSENT DU DECK** (Panther Dancer, §9.23). Il n'est donc *jamais* invocable par la voie
+normale. Il doit arriver au **cimetière** — envoyé depuis l'extra deck — puis être **banni comme
+matériau** par l'effet de `Lunalight Wolf` ou de `Lunalight Masquerade`, qui invoquent une Fusion en
+prenant les matériaux du terrain **ou du cimetière**. Ce que le graphe de recettes modélise depuis le
+chantier 16 (règle 1 : « le nœud est une EXIGENCE — *Leo Dancer AU CIMETIÈRE*, pas la carte Leo
+Dancer ») et qu'**aucune sonde ne mesurait**.
+
+`--watch` a donc reçu un **volet activations** (`MSG_CHAINING`, strictement observationnel comme le
+volet invocations). Étalon A nu, 90 s, `--elide-forced --hindsight 0.5` :
+
+| carte | invoquée (≥1) | **activée** (tirages) | activations |
+|---|---|---|---|
+| **Lunalight Masquerade** | 0 | **129 407 (21,07 %)** | **232 318** |
+| Lunalight Kaleido Chick | 17 666 | 14 440 (2,35 %) | 14 465 |
+| Lunalight Wolf | 3 023 | 5 787 (0,94 %) | 5 993 |
+| **Lunalight Leo Dancer** | **0** | **0** | **0** |
+
+**La porte principale EST empruntée, et massivement** : Masquerade s'active dans un tirage sur cinq.
+Ce n'est donc pas « le solveur n'essaie jamais ». Et pourtant Leo Dancer n'entre dans un pool que
+14 433 fois pour 232 318 activations : **dans la quasi-totalité des cas, ses matériaux ne sont pas
+réunis au moment où la porte s'ouvre.**
+
+Réserve d'instrument, à lever avant le prochain mécanisme : la ligne « INVOCABLE ET JAMAIS PRISE »
+n'a **pas de sens pour une carte non-monstre** — Masquerade est une magie, ses 573 991 offres
+`IDLECMD` sont des « poser-st » et des « activer », pas des invocations. Le verdict de la sonde doit
+tenir compte du type de la carte.
+
+**CE QUI MANQUE, et c'est nommé : une sonde de PRÉSENCE EN ZONE.** Les trois volets existants
+comptent des *événements* (invocation, activation, offre) ; le combo, lui, se joue sur des *états*
+— « Leo Dancer au cimetière », « trois Lunalight disponibles ». Tant que l'instrument ne sait pas
+dire *à quelle fraction des tirages Leo Dancer atteint le cimetière*, on ne saura pas si le blocage
+est avant ou après cette étape, et tout mécanisme écrit sera un pari.
+
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 
 | bras | tirages | Perfume | Sabre | coupures de tour |
