@@ -1238,6 +1238,11 @@ struct Options {
 	// loin, devant la charge utile du prompt (x1,38) et l'etat du processeur
 	// (x1,00). Opt-in : les fleches de LIEN sont colonne-dependantes.
 	bool canonical_digest = false;
+	// (6) --elide-forced : un prompt qui n'offre qu'UNE reponse legale est joue
+	// en ligne — ni profondeur, ni entree de table, ni instantane d'arene. Ce
+	// que l'attribution de la cle designe : la majorite des noeuds ne sont pas
+	// des points de decision. Le finisseur le fait deja ; l'exhaustif, non.
+	bool elide_forced = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -1862,6 +1867,24 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			}
 			return argv[++i];
 		};
+		// DRAPEAUX BOOLEENS SIMPLES, sortis de la chaine `else if` ci-dessous.
+		// MSVC plafonne l'imbrication a 128 blocs (C1061) et la chaine y etait :
+		// tout nouveau drapeau sans valeur passe desormais par cette table, qui
+		// ne coute rien et ne peut plus faire echouer la compilation.
+		{
+			static const struct { const char* name; bool Options::* member; }
+			kBoolFlags[] = {
+				{ "--assign",           &Options::assign },
+				{ "--backward",         &Options::backward },
+				{ "--canonical-digest", &Options::canonical_digest },
+				{ "--elide-forced",     &Options::elide_forced },
+			};
+			bool matched = false;
+			for(const auto& f : kBoolFlags)
+				if(a == f.name) { o.*(f.member) = true; matched = true; break; }
+			if(matched)
+				continue;
+		}
 		if(a == "--workdir") {
 			const char* v = next("--workdir"); if(!v) return false;
 			o.workdir = v;
@@ -2103,8 +2126,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --landmark-h attend un poids >= 0\n");
 				return false;
 			}
-		} else if(a == "--assign") {
-			o.assign = true;
 		} else if(a == "--hindsight") {
 			const char* v = next("--hindsight"); if(!v) return false;
 			o.hindsight = std::atof(v);
@@ -2127,10 +2148,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --recipe-w attend un poids >= 0\n");
 				return false;
 			}
-		} else if(a == "--backward") {
-			o.backward = true;
-		} else if(a == "--canonical-digest") {
-			o.canonical_digest = true;
 		} else if(a == "--goal-bias") {
 			o.goal_bias = true;
 		} else if(a == "--watch") {
@@ -8821,6 +8838,7 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		// la PROFONDEUR atteinte a budget egal, qui est la grandeur que la
 		// fusion doit ameliorer.
 		cfg.canonical_digest = opt.canonical_digest;
+		cfg.elide_forced = opt.elide_forced;
 
 		Search search(duel, arena, yrp, cfg);
 		search.Run(target);
@@ -8888,6 +8906,24 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 							"x%.1f\n", s.d_full, rap(s.d_full));
 				std::printf("    (le processeur SEUL vaut %zu valeurs "
 							"distinctes)\n", s.d_proc);
+			}
+			// ATTRIBUTION GLOBALE : la repartition de TOUS les noeuds. Sans
+			// elle, on corrige la cle sur la foi d'un comptage restreint aux
+			// points idle — et une attribution sur un sous-ensemble ne se
+			// transporte pas a l'ensemble (lecon de la session 17).
+			const uint64_t tot = s.nodes_forced + s.nodes_idle + s.nodes_multi;
+			if(tot) {
+				auto pc = [&](uint64_t v) { return 100.0 * double(v) / double(tot); };
+				std::printf("\n  repartition des noeuds developpes :\n"
+							"    FORCES (une seule reponse legale) %10llu   %5.1f %%\n"
+							"    idle   (point de decision stable) %10llu   %5.1f %%\n"
+							"    autres (selections, chaines)      %10llu   %5.1f %%\n",
+							(unsigned long long)s.nodes_forced, pc(s.nodes_forced),
+							(unsigned long long)s.nodes_idle, pc(s.nodes_idle),
+							(unsigned long long)s.nodes_multi, pc(s.nodes_multi));
+				if(s.elided)
+					std::printf("    dont JOUES EN LIGNE (--elide-forced) %7llu\n",
+								(unsigned long long)s.elided);
 			}
 		}
 		if(s.hit_time_limit || s.hit_node_limit) {

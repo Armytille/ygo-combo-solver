@@ -5196,6 +5196,69 @@ dans la table** — c'est-à-dire chercher sur les macro-transitions d'un idle a
 déjà le chiffre qui le chiffre : 141 des 284 décisions de la ligne sont FORCÉES, et « profondeur
 après élision : 143 au lieu de 284 ».
 
+#### (k) 74,6 % DES NŒUDS N'OFFRENT AUCUN CHOIX — l'élision des coups forcés
+
+L'attribution de (j) désignait la suite : « la majorité des nœuds ne sont pas des points stables ».
+Cette fois elle est faite sur **tous** les nœuds développés, pas sur un sous-ensemble :
+
+```
+FORCES (une seule reponse legale)     190697    74.6 %
+idle   (point de decision stable)      27277    10.7 %
+autres (selections, chaines)           37756    14.8 %
+```
+
+**Les trois quarts des nœuds n'offrent aucun choix.** Pour chacun, le solveur payait une entrée de
+table, un instantané d'arène, une unité de profondeur — et, dans les tirages, deux requêtes de zone
+(`ComputeBoardKeyInto`), quatre requêtes plus ~60-80 sondes (`CollectAtoms`), l'heuristique,
+l'archive et le score. Pour un point où **rien ne se décide** et où la politique n'apprend rien
+(un prompt à choix unique ne produit aucun `PolicyStep`).
+
+Le finisseur le savait déjà — « les coups FORCÉS sont joués en ligne et ne coûtent ni profondeur ni
+probabilité ». La recherche exhaustive et les tirages, non. **`--elide-forced`** l'y porte :
+l'énumération passe **avant** la table, et un prompt à réponse unique est joué en ligne. Ce n'est pas
+un élagage — un prompt sans alternative n'a rien à élaguer. Ce qui est conservé sur un prompt élidé,
+non négociable : la comptabilité d'actions, de tours, d'invocations et de résolutions (une chaîne
+forcée *résout* des effets et peut poser une carte). Seule l'**évaluation** est sautée.
+
+**Exhaustif, à budget de temps égal (25 s par palier)** :
+
+| | témoin | `--elide-forced` |
+|---|---|---|
+| boards exacts atteints | 92 | **170** |
+| boards aux points stables | 68 | **145** |
+| facteur de fusion de la table | ×1,2 – ×1,3 | **×21,6 à ×28,9** |
+
+**×2,1 de couverture de l'espace des boards, et la table fusionne enfin.** C'était le but : elle
+fusionnait ×1,2 parce qu'elle était remplie d'états intermédiaires qui ne se rencontrent jamais deux
+fois.
+
+**Tirages** (étalon A nu, 90 s, graine 888, même binaire ; juge = tirages invoquant la carte, compté
+sur `MSG_SUMMONING` donc indépendant des prompts) :
+
+| bras | tirages | Perfume ≥1 | Sabre ≥1 |
+|---|---|---|---|
+| témoin | 422 764 | 17 306 | 3 592 |
+| `--elide-forced` | **680 750** (+61 %) | 12 005 | 242 |
+| `--hindsight 0.5` | 566 427 | 61 684 | 2 791 |
+| **les deux** | 521 331 | **71 933** | **3 913** |
+
+**`--elide-forced` rend +61 % de débit** — c'est le « moindre coût » demandé, et il est mesuré. Mais
+**seul, il dégrade** : plus de débit sur un signal absent fait converger plus vite vers la Fusion la
+moins chère. **Combiné à `--hindsight`, il domine chaque bras simple sur les deux cartes.**
+Hypothèse pour la dégradation solitaire, non vérifiée : le score du tirage vaut
+`materiel × 1000 + novel_states`, et `novel_states` est divisé par ~4 quand trois quarts des points
+ne sont plus évalués — le départage entre lignes de même matériel s'en trouve affaibli.
+
+*Réserve* : 90 s, une graine. **Un criblage élimine, il ne promeut jamais.** La combinaison est
+**prometteuse, non démontrée**. Ce qui est acquis sans graine : +61 % de débit, ×2,1 de boards en
+exhaustif, et les 74,6 %. Santé identique à chaque étape (273 digests, 210/273, 209 candidates,
+16 replays).
+
+*Piège d'instrument évité de justesse* : le juge `POSITION` de la sonde d'offre **n'est pas valide
+sous élision** — il vient du comptage des prompts, et un `SELECT_POSITION` à choix unique est élidé
+donc invisible. Le classement a été refait sur le compteur d'invocations ; il est identique, mais
+c'est une vérification et non une chance.
+
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 
 | bras | tirages | Perfume | Sabre | coupures de tour |

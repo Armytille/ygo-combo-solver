@@ -605,9 +605,17 @@ uint64_t StateDigest(Duel& d, uint8_t prompt_type,
 	return h;
 }
 
-void Search::Descend(uint32_t depth, uint32_t actions) {
+void Search::Descend(uint32_t depth, uint32_t actions, uint32_t prompt_depth) {
 	if(BudgetExhausted()) {
 		stats.hit_time_limit = true;
+		return;
+	}
+	// GARDE-FOU DE L'ELISION : un coup force n'avance pas `depth`, donc rien
+	// n'arreterait une chaine de coups forces qui boucle. Le plafond porte sur
+	// les PROMPTS et il est large — il ne doit mordre que sur une pathologie,
+	// jamais sur une ligne normale (la reference en compte 284).
+	if(prompt_depth > cfg.max_decisions * 8u + 64u) {
+		++stats.edges_skipped;
 		return;
 	}
 	Step st = StepToPrompt();
@@ -645,13 +653,54 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 	}
 
 	// Coupures de PLAFOND : ce n'est pas l'espace qui s'arrete ici, c'est la
-	// borne. Comptees, sans quoi "EPUISE" mentirait (C2).
+	// borne. Comptees, sans quoi "EPUISE" mentirait (C2). Testees AVANT
+	// l'enumeration, comme a l'origine : enumerer un noeud qu'on va couper
+	// serait un cout ajoute AU TEMOIN, et l'A/B ne mesurerait plus le mecanisme
+	// mais le deplacement de cet appel.
 	if(depth >= cfg.max_decisions) {
 		++stats.edges_skipped;
 		return;
 	}
 	if(cfg.max_actions && total_actions >= cfg.max_actions) {
 		++stats.edges_skipped;
+		return;
+	}
+
+	// --- ENUMERATION AVANT LA TABLE (session 17) ---------------------------
+	//
+	// L'ordre est inverse par rapport a l'origine, et c'est tout le mecanisme :
+	// on ne peut pas savoir qu'un prompt est FORCE avant de l'avoir enumere, et
+	// un prompt force ne doit couter ni entree de table, ni instantane, ni
+	// profondeur. Sans `elide_forced`, le comportement est celui d'avant — la
+	// seule difference est que `FillChoices` est appele avant la consultation de
+	// la table plutot qu'apres, sur le meme etat et avec le meme resultat.
+	ChoiceList& choices = ChoicesAt(prompt_depth);
+	if(!FillChoices(choices)) {
+		++stats.dead_ends;
+		return;
+	}
+	// ATTRIBUTION GLOBALE : la repartition de TOUS les noeuds developpes. C'est
+	// la mesure qui manquait quand la colonne a ete corrigee sur la foi d'un
+	// comptage restreint aux points idle — une attribution sur un sous-ensemble
+	// ne se transporte pas a l'ensemble.
+	if(choices.size() <= 1)
+		++stats.nodes_forced;
+	else if(prompt_type == MSG_SELECT_IDLECMD)
+		++stats.nodes_idle;
+	else
+		++stats.nodes_multi;
+
+	// COUP FORCE : joue EN LIGNE. Pas de Push/Pop d'arene — il n'y a aucun frere
+	// a restaurer, et l'instantane est un cout mesure (0,084 ms contre 0,056 ms
+	// de travail utile, soit 149 % de surcout). Ni entree de table : un etat
+	// sans alternative n'a rien a transposer. Ni profondeur : `depth` compte
+	// desormais des DECISIONS, pas des prompts.
+	if(cfg.elide_forced && choices.size() == 1) {
+		++stats.elided;
+		duel.SetResponse(choices[0].response);
+		path.push_back(choices[0].response);
+		Descend(depth, total_actions, prompt_depth + 1);
+		path.pop_back();
 		return;
 	}
 
@@ -711,17 +760,11 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 	if(fresh && depth < stats.distinct_by_depth.size())
 		++stats.distinct_by_depth[depth];
 
-	ChoiceList& choices = ChoicesAt(depth);
-	if(!FillChoices(choices)) {
-		++stats.dead_ends;
-		return;
-	}
-
 	arena.Push();
 	for(const Choice& c : choices) {
 		duel.SetResponse(c.response);
 		path.push_back(c.response);
-		Descend(depth + 1, total_actions);
+		Descend(depth + 1, total_actions, prompt_depth + 1);
 		path.pop_back();
 		arena.Restore();
 		if(BudgetExhausted())
@@ -2429,7 +2472,31 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		qh_reward = 0.0;
 	}
 
-	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
+	// ELISION DES COUPS FORCES DANS LES TIRAGES (session 17) — la ou le cout est
+	// REELLEMENT paye.
+	//
+	// MESURE QUI LE JUSTIFIE : 74,6 % des noeuds developpes n'offrent QU'UNE
+	// reponse legale (attribution globale, --growth). Pour chacun d'eux, un
+	// tirage paie aujourd'hui le prix fort — `ComputeBoardKeyInto` (deux
+	// requetes de zone), `CollectAtoms` (quatre requetes et ~60-80 sondes de
+	// table), l'heuristique, l'archive, le score — pour un point ou il n'y a
+	// RIEN A DECIDER et ou la politique n'apprend rien (aucun PolicyStep n'est
+	// produit sur un prompt a choix unique).
+	//
+	// `depth` cesse donc d'etre l'indice de boucle : il compte les DECISIONS
+	// REELLES, et `pi` les prompts. Consequence a dire — `--max-decisions` change
+	// de sens sous le drapeau, donc les profondeurs ne se comparent au temoin
+	// qu'a budget de TEMPS egal.
+	//
+	// CE QUI EST CONSERVE SUR UN PROMPT ELIDE, et ce n'est pas negociable : la
+	// comptabilite d'actions, de tours, d'invocations et de resolutions. Une
+	// chaine forcee RESOUT des effets et peut poser une carte ; sauter cela
+	// fausserait les contraintes et le but. Seul le travail d'EVALUATION est
+	// saute.
+	uint32_t depth = 0;
+	const uint32_t prompt_cap =
+		cfg.elide_forced ? cfg.max_decisions * 8u + 64u : cfg.max_decisions;
+	for(uint32_t pi = 0; pi < prompt_cap && depth < cfg.max_decisions; ++pi) {
 		if(BudgetExhausted()) {
 			stats.hit_time_limit = true;
 			return;
@@ -2469,6 +2536,26 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		resolved += resolved_this_step;
 		++stats.nodes;
 		prof::Count(prof::kDecisions);
+		// --- ELISION : le prompt est-il FORCE ? ---------------------------
+		// Enumere ICI, avant tout travail d'evaluation. La comptabilite
+		// ci-dessus (actions, tours, invocations, resolutions) est deja faite :
+		// un prompt elide reste compte, seule son EVALUATION est sautee.
+		bool ro_filled = false;
+		if(cfg.elide_forced) {
+			if(!FillChoices(ro_choices)) {
+				++stats.dead_ends;
+				return;
+			}
+			ro_filled = true;
+			if(ro_choices.size() == 1) {
+				++stats.elided;
+				duel.SetResponse(ro_choices[0].response);
+				// NI `depth`, NI PolicyStep, NI score : rien ne s'est decide.
+				// Un prompt a choix unique ne produisait deja aucun PolicyStep —
+				// la politique n'y perd donc strictement rien.
+				continue;
+			}
+		}
 		// Histogramme des resolutions atteintes par les tirages : monotone le
 		// long d'un tirage, chaque seuil n'est franchi qu'une fois.
 		if(resolved_this_step) {
@@ -2721,7 +2808,9 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		}
 
 		ChoiceList& choices = ro_choices;
-		if(!FillChoices(choices)) {
+		// Deja rempli par le test d'elision : le refaire couterait une seconde
+		// enumeration par decision, c'est-a-dire exactement ce qu'on economise.
+		if(!ro_filled && !FillChoices(choices)) {
 			++stats.dead_ends;
 			return;
 		}
@@ -3088,6 +3177,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		}
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
+		// UNE DECISION REELLE de plus. `depth` n'est plus l'indice de boucle :
+		// il n'avance que sur les prompts qui offraient un choix, et c'est ce
+		// qui rend `--max-decisions` comparable a la profondeur d'une ligne
+		// « apres elision » (143 au lieu de 284 sur la reference).
+		++depth;
 	}
 	// Sortie par le HAUT : plafond de decisions (C2).
 	++stats.edges_skipped;

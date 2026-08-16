@@ -1915,6 +1915,28 @@ struct SearchConfig {
 	// solution disparait en silence. D'ou l'opt-in et l'avertissement de `main`.
 	// Filet : la verification finale rejoue chaque candidat depuis zero.
 	bool canonical_digest = false;
+	// ELISION DES COUPS FORCES DANS LA RECHERCHE EXHAUSTIVE (session 17).
+	//
+	// CE QUE L'ATTRIBUTION DESIGNE. La cle de transposition vaut ~200 fois le
+	// nombre de boards, mais affiner la cle ne rend que x1,67 : la majorite des
+	// noeuds ne sont pas des points de decision, ce sont des INSTANTS
+	// INTERMEDIAIRES (fenetres de chaine adverses, selections a candidat unique)
+	// ou il n'y a RIEN A DECIDER. Le dossier a le chiffre depuis longtemps sans
+	// l'exploiter : sur la ligne de reference, 141 des 284 prompts sont FORCES,
+	// et « profondeur apres elision : 143 au lieu de 284 ».
+	//
+	// CE QUE FAIT LE DRAPEAU. Un prompt qui n'offre qu'UNE reponse legale est
+	// joue en ligne : il ne coute ni profondeur, ni entree de table, ni
+	// instantane d'arene (aucun frere a restaurer). C'est exactement ce que le
+	// finisseur fait deja (« les coups FORCES sont joues en ligne et ne coutent
+	// ni profondeur ni probabilite ») ; la recherche exhaustive et la table, non.
+	//
+	// CE N'EST PAS UN ELAGAGE : aucune branche n'est retiree, un prompt a une
+	// seule reponse n'ayant pas d'alternative par definition. Le seul effet est
+	// que `max_decisions` compte desormais des DECISIONS REELLES et non des
+	// prompts — donc les profondeurs ne se comparent au temoin qu'a budget de
+	// TEMPS egal, et le dire est obligatoire pour que l'A/B ait un sens.
+	bool elide_forced = false;
 
 	// Partition du travail entre workers. Le sous-arbre ouvert par la PREMIERE
 	// deviation est independant de tous les autres, ce qui permet de partager
@@ -2696,6 +2718,15 @@ struct SearchStats {
 	// Le meme etat de jeu, colonnes CONFONDUES. `d_zones / d_zsort` est le prix
 	// exact de la colonne dans la cle de transposition.
 	size_t d_zsort = 0;
+	// REPARTITION DE TOUS LES NOEUDS DEVELOPPES — l'attribution GLOBALE, celle
+	// qui manquait quand la colonne a ete corrigee sur la foi d'une mesure
+	// restreinte aux points idle. `forced` : une seule reponse legale, donc rien
+	// a decider. `idle` : un point de decision stable. `multi` : le reste
+	// (selections, fenetres de chaine a plusieurs options).
+	uint64_t nodes_forced = 0, nodes_idle = 0, nodes_multi = 0;
+	// Coups forces JOUES EN LIGNE (cfg.elide_forced) : ils n'ont coute ni
+	// profondeur, ni entree de table, ni instantane d'arene.
+	uint64_t elided = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -2947,7 +2978,12 @@ private:
 
 	Step StepToPrompt();
 	uint64_t Digest() const;
-	void Descend(uint32_t depth, uint32_t actions);
+	// `prompt_depth` compte les PROMPTS traverses, `depth` les DECISIONS
+	// retenues. Les deux coincident sans `cfg.elide_forced` ; avec, le premier
+	// avance sur les coups forces et le second non. Le pool de ChoiceList est
+	// indexe par `prompt_depth` : deux nœuds successifs peuvent partager la meme
+	// `depth`, et se partager un tampon les ferait s'ecraser l'un l'autre.
+	void Descend(uint32_t depth, uint32_t actions, uint32_t prompt_depth = 0);
 	bool DescendGuided(uint32_t depth, uint32_t actions, uint32_t turns,
 					   uint32_t summons, uint64_t resolved);
 	bool DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
