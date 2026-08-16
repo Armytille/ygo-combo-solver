@@ -1768,6 +1768,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const bool want_ctx = cfg.ctx_shrink >= 0.0f ||
 						  (cfg.options && cfg.options->ctx_tol >= 0) ||
 						  (mine_flat && cfg.options_online->ctx_tol >= 0);
+	// CONDITIONNEMENT PAR LE CHEMIN (MCPS) : somme melangee des coups joues sur
+	// les `mcps_depth` premieres decisions ENREGISTREES, figee au-dela. Nul et
+	// jamais lu quand le mecanisme est eteint.
+	uint64_t path_ctx = 0;
 
 	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
 		if(BudgetExhausted()) {
@@ -1944,6 +1948,13 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					CommonCodes(here.codes, target.codes),
 					duel.Count(static_cast<uint8_t>(cfg.target_player),
 							   LOCATION_HAND));
+			// CONDITIONNEMENT EFFECTIF du niveau contextuel : le CHEMIN sous
+			// MCPS (les coups deja joues sur cette ligne), le descripteur
+			// semantique sinon. `path_ctx` est le chemin AVANT cette decision —
+			// c'est bien « la racine jusqu'a ce noeud », le coup courant n'en
+			// fait pas partie.
+			step.cctx = cfg.mcps_depth ? path_ctx
+									   : static_cast<uint64_t>(step.ctx);
 			step.keys.reserve(choices.size());
 			step.known.reserve(choices.size());
 			step.hinted.reserve(choices.size());
@@ -1965,7 +1976,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();
-				double w = EffectiveWeight(pol, &ctx_weights, key, step.ctx,
+				double w = EffectiveWeight(pol, &ctx_weights, key, step.cctx,
 										   cfg.ctx_shrink);
 				logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
 							(hinted ? cfg.hint_bias : 0.0f)) /
@@ -2008,7 +2019,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				for(const auto& [mi, ci] : applicable) {
 					const double w =
 						EffectiveWeight(pol, &ctx_weights, cfg.options->ids[mi],
-										step.ctx, cfg.ctx_shrink);
+										step.cctx, cfg.ctx_shrink);
 					logit.push_back(
 						w / (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f));
 					mx = (std::max)(mx, logit.back());
@@ -2071,8 +2082,16 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			run.steps.push_back(std::move(step));
 		}
 
-		if(choices.size() > 1)
+		if(choices.size() > 1) {
+			// Le chemin s'allonge du coup ATOMIQUE reellement joue (macro
+			// choisie comprise : c'est son premier coup) — et seulement sur les
+			// `mcps_depth` premieres decisions. Au-dela il est fige : toutes les
+			// decisions profondes partagent alors le contexte de leur prefixe,
+			// ce qui BORNE la table au lieu d'y creer une case par noeud.
+			if(cfg.mcps_depth && nsteps < cfg.mcps_depth)
+				path_ctx += MixMove(choices[pick].plan_key);
 			++nsteps;
+		}
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 	}
@@ -2082,15 +2101,28 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp) {
+			  float temp, size_t ctx_max) {
 	const double inv_t = 1.0 / (temp > 1e-3f ? temp : 1e-3f);
 	const bool two_level = res && shrink >= 0.0f;
+	// Le gradient contextuel CREE une case par (coup, contexte). Sous
+	// conditionnement par le chemin, le nombre de contextes n'est plus borne par
+	// 256 mais par le nombre de prefixes visites : sans plafond, la table
+	// enflerait sans fin, par worker (meme famille que la table de nouveaute).
+	// Au plafond, les cases existantes vivent leur vie, aucune neuve n'apparait.
+	auto touch = [&](uint64_t k) -> CtxWeight* {
+		auto it = res->find(k);
+		if(it != res->end())
+			return &it->second;
+		if(ctx_max && res->size() >= ctx_max)
+			return nullptr;
+		return &(*res)[k];
+	};
 	std::vector<double> p;
 	for(const PolicyStep& s : run.steps) {
 		p.resize(s.keys.size());
 		double mx = -1e300;
 		for(size_t i = 0; i < s.keys.size(); ++i) {
-			double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
+			double w = EffectiveWeight(pol, res, s.keys[i], s.cctx, shrink);
 			p[i] = (w + (s.known[i] ? bias_known : 0.0f) +
 					(i < s.hinted.size() && s.hinted[i] ? hint_bias : 0.0f)) *
 				   inv_t;
@@ -2106,26 +2138,31 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 		// Le niveau contextuel recoit le MEME gradient, sur la case
 		// (coup, contexte). Son compteur mesure l'evidence accumulee dans CE
 		// contexte : c'est lui qui decide, via s(n), quand il prend la main.
-		(*res)[CtxKey(s.keys[s.chosen], s.ctx)].w += alpha;
+		if(CtxWeight* c = touch(CtxKey(s.keys[s.chosen], s.cctx)))
+			c->w += alpha;
 		for(size_t i = 0; i < s.keys.size(); ++i) {
-			CtxWeight& c = (*res)[CtxKey(s.keys[i], s.ctx)];
-			c.w -= static_cast<float>(alpha * p[i] / sum);
-			++c.n;
+			CtxWeight* c = touch(CtxKey(s.keys[i], s.cctx));
+			if(!c)
+				continue;
+			c->w -= static_cast<float>(alpha * p[i] / sum);
+			++c->n;
 		}
 	}
 }
 
 void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
-				 float bias_known, float hint_bias, float shrink, float temp) {
+				 float bias_known, float hint_bias, float shrink, float temp,
+				 size_t ctx_max) {
 	for(uint32_t pass = 0; pass < passes; ++pass)
 		for(const NrpaRun& r : runs)
-			AdaptRun(pol, res, r, alpha, bias_known, hint_bias, shrink, temp);
+			AdaptRun(pol, res, r, alpha, bias_known, hint_bias, shrink, temp,
+					 ctx_max);
 }
 
 void Search::Adapt(Policy& pol, const NrpaRun& best) {
 	AdaptRun(pol, &ctx_weights, best, cfg.nrpa_alpha, cfg.nrpa_bias_known,
-			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp);
+			 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp, cfg.ctx_max);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
@@ -2447,6 +2484,11 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	stats.hit_node_limit = stats.nodes >= cfg.max_nodes;
 	stats.exhausted = false;
 	stats.novelty_atoms = novelty.Size();
+	// La vie du niveau contextuel, relevee LA OU IL TRAVAILLE (piege 52) : une
+	// table au plafond n'apprend plus rien de neuf, une table minuscule dit que
+	// le conditionnement ne distingue rien.
+	stats.ctx_entries = ctx_weights.size();
+	stats.ctx_capped = cfg.ctx_max && ctx_weights.size() >= cfg.ctx_max;
 }
 
 void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
@@ -3200,7 +3242,7 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
 					 const BoardKey& target, NrpaRun& out,
-					 RecipeGraph* recipes) {
+					 RecipeGraph* recipes, uint32_t mcps_depth) {
 	size_t unknown = 0, ri = 0;
 	uint8_t ptype = 0;
 	std::vector<uint8_t> payload;
@@ -3208,6 +3250,10 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 	BoardKey here;
 	out.score = 0;
 	out.steps.clear();
+	// Le MEME chemin qu'au tirage : somme melangee des coups joues sur les
+	// `mcps_depth` premieres decisions enregistrees de CETTE ligne.
+	uint64_t path_ctx = 0;
+	uint32_t nsteps = 0;
 
 	// CORPUS -> GRAPHE (revue session 12) : les invocations de la ligne
 	// rejouee sont des recettes OBSERVEES — la meme logique que StepToPrompt
@@ -3326,9 +3372,20 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 																			: 0);
 					}
 					step.chosen = pick;
+					step.cctx = mcps_depth ? path_ctx
+										   : static_cast<uint64_t>(step.ctx);
+					if(mcps_depth && nsteps < mcps_depth)
+						path_ctx += MixMove(choices[pick].plan_key);
+					++nsteps;
 					out.steps.push_back(std::move(step));
 				} else {
 					++unknown;
+					// Une etape non identifiee ROMPT le chemin : on ne sait pas
+					// quel coup la ligne a joue, donc on ne peut pas l'ajouter.
+					// Le contexte des etapes suivantes ne correspondra plus a
+					// celui d'un tirage qui aurait joue la meme ligne — c'est
+					// une sous-estimation assumee, comme le saut lui-meme.
+					++nsteps;
 				}
 			}
 		}
@@ -3349,7 +3406,7 @@ double CorpusAgreement(const NrpaPolicy& pol, const NrpaResidual* res,
 			p.resize(s.keys.size());
 			double mx = -1e300;
 			for(size_t i = 0; i < s.keys.size(); ++i) {
-				double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
+				double w = EffectiveWeight(pol, res, s.keys[i], s.cctx, shrink);
 				p[i] = w + (s.known[i] ? bias_known : 0.0f);
 				mx = (std::max)(mx, p[i]);
 			}
@@ -3408,7 +3465,7 @@ CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
 			p.resize(s.keys.size());
 			double mx = -1e300;
 			for(size_t i = 0; i < s.keys.size(); ++i) {
-				double w = EffectiveWeight(pol, res, s.keys[i], s.ctx, shrink);
+				double w = EffectiveWeight(pol, res, s.keys[i], s.cctx, shrink);
 				p[i] = w + (s.known[i] ? bias_known : 0.0f);
 				mx = (std::max)(mx, p[i]);
 			}
@@ -3805,7 +3862,7 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 		for(const PolicyStep& s : r.steps) {
 			sorted = s.keys;
 			std::sort(sorted.begin(), sorted.end());
-			uint64_t sig = use_ctx ? (s.ctx + 1) * 0x9e3779b97f4a7c15ull : 0;
+			uint64_t sig = use_ctx ? (s.cctx + 1) * 0x9e3779b97f4a7c15ull : 0;
 			for(uint64_t k : sorted)
 				sig = (sig ^ k) * 0x100000001b3ull;
 			++seen[sig][s.keys[s.chosen]];

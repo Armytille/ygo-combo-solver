@@ -3805,3 +3805,301 @@ tirages ENRACINÉS du finisseur, invisibles dans cette ligne. Lire le bootstrap 
 compté une conversion sur trois au lieu de trois sur trois. Le juge est l'approche ÉCRITE ;
 c'est d'ailleurs déjà la colonne que 9.20 (a) lisait, mais rien ne le disait dans l'outil.
 `tools/s14_lecture.ps1` la lit désormais, et imprime les deux côte à côte.
+
+**(e) LES RÉPÉTITIONS LIMITÉES (R=4) : positives sur les résolutions profondes, NEUTRES sur la
+conversion — et le verdict de la session 4 n'est pas renversé, il est CIRCONSCRIT.** Deux bras
+neufs, appariés aux bras déjà mesurés du (d) — mêmes graines, même budget, même binaire
+(`tools/s14_diversite_ab.ps1`), R=4 (strictement entre « tout de suite » et la stagnation à 8) :
+
+| graine | bras | approche | ≥2 | ≥3 | avortées/prise |
+|---|---|---|---|---|---|
+| 888 | nu | 1/4 | 2 614 | **0** | — |
+| 888 | nu + `--nrpa-lr 4` | 1/4 | 8 345 | **1 536** | — |
+| 1234 | nu | 1/4 | 8 885 | **0** | — |
+| 1234 | nu + `--nrpa-lr 4` | 1/4 | 6 257 | **701** | — |
+| 888 | en ligne + ctx | 1/4 | 113 519 | 44 840 | 0,38 |
+| 888 | en ligne + ctx + lr 4 | **2/4** | 198 647 | **100 887** | **0,14** |
+| 1234 | en ligne + ctx | **2/4** | 267 479 | 91 636 | 0,44 |
+| 1234 | en ligne + ctx + lr 4 | 1/4 | 207 217 | **118 250** | **0,20** |
+
+Trois lectures. (1) **≥3 monte sur les QUATRE paires**, et sur les deux bras nus il passe de
+ZÉRO à 701 et 1 536 : les répétitions limitées ouvrent seules l'axe des résolutions profondes
+que le run nu n'atteignait jamais. (2) **La conversion est un lavage** : le bras armé convertit
+1/2 avec comme sans (la graine qui convertit CHANGE — 888 gagne, 1234 perd). (3) La lecture
+mécaniste, la plus intéressante : **le taux d'avortement des macros CHUTE** (0,38 → 0,14 ;
+0,44 → 0,20). C'est la pompe à diversité qui fait exactement ce qu'on lui demandait — des
+lignes plus variées dans le corpus vivant donnent des macros mieux ajustées, donc qui cassent
+moins. Le mécanisme n'est pas seulement compatible avec le minage en ligne : il l'ALIMENTE.
+
+**Ce que cela fait au verdict de la session 4** — qui mesurait R=2 perdant (8/8 → 7/8, 36
+lignes → 0) : il n'est PAS renversé. R=2 reste réfuté ; ce qui est mesuré ici est R=4, dans un
+autre régime (bootstrap but seul en une traite, pas transplantation), avec un juge différent.
+Les deux tiennent ensemble : arrêter un niveau trop tôt casse la convergence, l'arrêter au bon
+moment libère de la diversité. Statut : **opt-in, positif sur ≥3, à re-juger sur la conversion
+avec plus de graines** — et le bras à apparier la prochaine fois est `--options-online` NU, pas
+`+ ctx` (l'A/B (d) a désigné la forme gagnante APRÈS que ce script ait été écrit ; l'appariement
+reste valide, il n'est simplement pas adossé à la meilleure forme connue).
+
+**(f) LE TEST REINE (1 200 s, une traite) : le budget seul suffit pour 2/4, et le finisseur ne
+travaille PAS dans ce régime.** Deux bras, graine 4242, `tools/s14_traite_longue.ps1`. Le
+témoin nu est RELANCÉ à ce budget et non supposé — précisément parce que 9.20 (d) avertit que
+« le budget convertit » :
+
+| bras (1 200 s) | approche écrite | ≥2 | ≥3 | lignes écrites | tours de minage |
+|---|---|---|---|---|---|
+| nu | 2/4 (201 déc.) | 32 259 | 6 028 | **0** | — |
+| `--options-online 90` | 2/4 (197 déc.) | **1 283 963** | **453 681** | **0** | 9 |
+
+Lecture honnête : **sur le juge « approche écrite », les deux bras sont à égalité à ce budget.**
+Le minage en ligne garde ×40 sur ≥2 et **×75 sur ≥3**, et il atteint 2/4 dès la PHASE TIRAGES
+là où le nu y reste à 1/4 (le nu ne trouve son 2/4 que dans les tirages enracinés du
+finisseur) — mais l'avantage de conversion mesuré à 300 s (3/3 contre 0/3) **ne se transporte
+pas à 1 200 s** : à budget long, le run nu y arrive aussi. Le gain du mécanisme est donc en
+BUDGET, pas en plafond : il rend en 300 s ce que le nu met 1 200 s à obtenir.
+
+**LE FAIT NOUVEAU, plus important que la mesure elle-même : les racines d'archive du finisseur
+rendent ÉPUISÉ en 0 à 13 EXPANSIONS.** Sur 37 racines, presque toutes s'épuisent en 0,0 s ;
+deux seulement (`archive 00`, `archive 13`) atteignent ~800 expansions. Toute la conversion de
+ce régime est faite par les tirages ENRACINÉS (`recul 0/20/40`, des millions d'états), jamais
+par le LTS. Diagnostic : l'archive Go-Explore est classée `résolutions<<44 | overlap<<36 |
+~décisions` ; les résolutions SATURENT ici (tout est à `r4`), donc l'archive se remplit d'états
+de FIN DE LIGNE — elle range ce qui est terminal, pas ce qui est prometteur. Le « premier
+retour, puis explore » n'a plus rien à explorer.
+
+**Conséquence de priorité, à écrire avant de coder** : les ARÊTES MACRO dans `RunLevin`
+(chantier 3, §9.21 (g)) n'ont **rien à compresser dans ce régime** — on ne compresse pas une
+recherche qui s'épuise en 3 expansions. Elles restent justifiées sur l'étalon B contraint, où
+9.20 (d) mesure 32 lignes arrivées au board PAR le finisseur ; elles ne le sont pas sur
+l'étalon A. Le mécanisme est donc écrit, compilé et opt-in, et son juge est l'étalon B — pas
+le bootstrap. C'est le genre d'inversion de priorité qu'un run long payé pour lui-même rend
+visible et qu'aucun raisonnement a priori n'aurait donné.
+
+**Troisième signal, dans la vie du minage : le catalogue RÉTRÉCIT quand le budget monte** — 4
+macros à 1 200 s contre 6 à 17 à 300 s, pour 18 492 lignes offertes et 97 retenues. Le corpus
+vivant s'homogénéise : la pompe à diversité (dédoublonnage + quota par worker) tient 300 s,
+pas 1 200. C'est la limite du mécanisme tel qu'il est réglé, et elle désigne ses propres
+cadrans (`--options-pool`, `--options-per-worker`, `--nrpa-lr`) comme le chantier suivant.
+
+**(g) LE PLAFOND DE LONGUEUR DES MACROS EST SATURÉ — le levier de masse que les logs
+désignent.** Relevé sur les NEUF catalogues auto-minés de la session (A/B, diversité, smoke) :
+`max = 8` PARTOUT, moyennes 6,8 à 7,9. `--options-len` vaut 8 par défaut : la sélection par
+perte de Levin veut des macros plus longues et n'en a pas le droit. Et le comptage du board le
+met en perspective — la cible est 3 Liger Dancer (Fusion) + 1 Bagooska (Xyz), la référence
+humaine met **17 invocations pour 273 décisions, soit ~16 décisions par invocation** : l'unité
+naturelle du domaine, le cycle d'invocation complet, fait DEUX FOIS la taille qu'une macro a le
+droit d'atteindre. Une macro actuelle ne peut couvrir qu'une demi-invocation.
+Pilote (`tools/s14_masse_ab.ps1`) : lever le plafond à 16 et 24 et ne lire QUE le catalogue
+(longueur max et moyenne) avant de juger le reste. Deux issues, toutes deux informatives — les
+macros s'allongent, et le plafond liait ; ou elles restent à 8, et c'est le SUPPORT qui lie
+(une séquence longue se répète moins), auquel cas le bras suivant est `--options-support`.
+Surveiller la durée du minage : elle croît avec `max_len` (sous-séquences de longueur
+2..max_len à chaque position) et doit rester sous la seconde.
+
+**(h) PIÈGE D'ENVIRONNEMENT — le gabarit N'ÉTAIT PAS ÉPINGLÉ NON PLUS, et il a changé EN PLEIN
+PILOTE.** Tous les scripts d'étalon A pointaient sur `D:\ProjectIgnis\replay\_LastReplay.yrpX`
+— le « dernier replay » de l'installation EDOPro, donc un fichier VIVANT, réécrit dès que
+quelqu'un joue un duel. Il l'a été le 15/08/2026 à **23:42:23**, entre le premier et le deuxième
+run du pilote des leviers de masse. Les deux runs suivants sont morts sur
+`!! aucun yrp1 embarqué … le solveur exige un replay exportable`.
+
+Trois enseignements, dans l'ordre d'importance :
+
+1. **L'outil a échoué BRUYAMMENT.** C'est le comportement voulu et il a fonctionné : pas de
+   mesure silencieusement fausse, un code de sortie et un message explicite.
+2. **L'en-tête de gabarit a permis de VÉRIFIER au lieu de supposer.** Le rapport imprime
+   `drapeaux 0x2e812, 8000 LP, main 3, pioche 1, adversaire 43+15 cartes` et la main de départ ;
+   tous les runs terminés de la session portent la MÊME ligne, donc aucune mesure rapportée
+   n'est contaminée. C'est exactement ce que le README promettait de cette impression
+   (« imprimé en tête du rapport pour que ce soit vérifiable et non promis ») — et c'est la
+   première fois qu'elle sert.
+3. **C'est la même famille que la `.cdb` vivante de 9.20** : les scripts SONT épinglés
+   (`--scriptdir`), la base et le gabarit ne l'étaient pas. Corrigé : le gabarit vit désormais
+   dans le dépôt (`gabarits/etalon_a_lunalight.yrp`) et les quatre scripts s14 y pointent.
+   N'importe quel replay du même duel fait l'affaire — sous `--no-ref` seuls les paramètres de
+   duel comptent, la ligne est écartée — donc une APPROCHE produite par le solveur lui-même
+   sert de gabarit, ce qui est vérifié : en-tête identique au champ près.
+
+Reste non épinglée : la `.cdb`. À traiter le jour où un A/B inter-jours diverge sur
+l'énumération.
+
+**(i) LES DEUX LEVIERS DE MASSE « GRATUITS » SONT RÉFUTÉS — et l'un d'eux réfute une lecture de
+cette session même.** Pilote 4 bras, graine 888, 300 s, gabarit épinglé (`tools/s14_masse_ab.ps1`) :
+
+| bras | catalogue | absorbées/prise | avortées | perte modèle | ≥2 | ≥3 |
+|---|---|---|---|---|---|---|
+| témoin (`len 8`) | **10 macros**, moy. 7,0 | 4,2 | 315 639 | 44,2 → **28,6** | **201 189** | **91 167** |
+| `--options-len 16` | **1 macro** (16) | 10,4 | 40 619 | 44,5 → 35,4 | 142 608 | 63 914 |
+| `--options-len 24` | **1 macro** (24) | 14,9 | 16 056 | 45,8 → 32,0 | 125 916 | 55 083 |
+| `--options-pool 24` (3/worker) | 4 macros, moy. 7,5 | 3,0 | 110 312 | 41,1 → 31,7 | 118 962 | 45 339 |
+
+**Le plafond de longueur : RÉFUTÉ, et le raisonnement qui l'avait désigné était faux.** Lever le
+plafond allonge bien les macros (16 et 24 exactement — elles restent collées au plafond), mais le
+catalogue s'effondre à UNE macro et la **perte de Levin, le critère du mineur lui-même, EMPIRE**
+(28,6 au témoin contre 32,0 et 35,4). Dix macros courtes battent une longue, sur ≥2 comme sur ≥3.
+L'inférence « les neuf catalogues saturent à max=8, donc le plafond bride » était une lecture de
+SYMPTÔME : la sélection gloutonne prend d'abord le candidat le plus long disponible, quel que soit
+le plafond — la saturation est une propriété de l'algorithme de sélection, pas un manque.
+Le corpus vivant élargi (`--options-pool 24`) perd également sur toutes les colonnes : plus de
+lignes, plus hétérogènes, moins de motifs à support ≥ 2, donc un catalogue plus pauvre.
+
+**LA MESURE LA PLUS UTILE DU PILOTE EST SON TÉMOIN.** Même commande, même graine, mêmes réglages
+que le bras `s14_on_on_888` de (d) — et il rend **1/4 là où l'autre rendait 2/4** (≥3 : 91 167
+contre 115 933). C'est la dispersion à graine fixée, documentée depuis la session 4 (l'ordre des
+échanges entre workers dépend de l'ordonnancement). **Conséquence rétroactive à appliquer à toute
+cette session : une conversion k/4 lue sur UNE graine ne vaut rien.** Ce qui tient dans (d) est
+l'appariement 3/3 contre 0/3 sur trois graines et les deux ordres de grandeur sur ≥3 ; ce qui ne
+tient pas est n'importe quelle lecture mono-graine — y compris le 2/4 de `len16` ci-dessus, qui
+ne doit PAS être compté comme un signe.
+
+**Où cela laisse le chantier de la masse.** Les dials du catalogue sont épuisés et perdent. Le
+diagnostic qui reste debout est structurel et il a été formulé en séance par l'opérateur : *si
+Tenki cherche autre chose que Gold Leo, la ligne est morte en ~20 décisions, et le solveur
+devrait le découvrir seul et vite.* L'information EXISTE — le tirage se termine, c'est
+observable — mais le solveur n'a **aucun endroit où la mettre** : `PolicyRollout` n'a pas de
+table de transposition (vérifié : la TT ne vit que dans les descentes DFS et `RunLevin`), et sa
+seule mémoire est UN POIDS PAR CODE DE COUP, aveugle à l'état. Le niveau contextuel ne sauve
+rien ici : son descripteur est (cartes cibles posées, taille de main), soit **(0, 3) pour toutes
+les branches à la première décision** — il ne peut, par construction, distinguer aucune des
+cibles de Tenki. Le sous-arbre mort est donc re-parcouru des centaines de milliers de fois, la
+même conclusion atteinte et oubliée à chaque fois.
+Le mécanisme manquant est un BANDIT SUR LE HAUT DE L'ARBRE : une table
+`(digest d'état, coup) → (visites, meilleur score)` sur les k premières décisions, rétropropagée
+en fin de tirage, lue comme biais d'échantillonnage — de l'UCT greffé sur les premiers plis d'un
+NRPA, posé là où le branchement est étroit (quelques centaines d'états couvrent les dix premières
+décisions) et où tout se joue. À instrumenter AVANT de coder : une sonde qui imprime, pour chaque
+cible de Tenki, visites / meilleur matériel / profondeur de mort — elle dira si le solveur
+concentre un jour sur la bonne, ou s'il compense l'ignorer par la masse.
+
+**(j) ÉTUDE arXiv EN SÉANCE, ET LE CORRECTIF QU'ELLE DÉSIGNE : nous citions MCPS sans
+l'appliquer.** Question posée par l'opérateur : *si Tenki cherche autre chose que Gold Leo la
+ligne meurt en ~20 décisions ; le solveur ne devrait pas avoir besoin d'indice, il devrait
+trouver Gold Leo seul et vite.* Diagnostic vérifié dans le code avant toute recherche
+bibliographique :
+
+- `PolicyRollout` n'a **aucune table de transposition** (elle ne vit que dans les descentes DFS
+  et dans `RunLevin`) : le sous-arbre mort est re-parcouru des centaines de milliers de fois, la
+  même conclusion atteinte et oubliée à chaque fois ;
+- la seule mémoire des tirages est **un poids par code de coup**, aveugle à l'état ;
+- le niveau contextuel censé corriger cela a pour descripteur (cartes cibles posées, taille de
+  main), soit **(0, 3) pour TOUTES les branches à la première décision** — il ne peut, par
+  construction, séparer deux ouvertures l'une de l'autre.
+
+L'étude arXiv (menée en séance) donne trois choses. (1) **NEPA (arXiv:2202.13706)** nomme notre
+situation mot pour mot — « NRPA cannot exploit knowledge acquired in one branch of the state
+tree for another one which starts differently » — mais son remède (recherche de voisinage) vise
+des solutions permutables et ne transpose pas. (2) **MCPS (arXiv:2510.06381)** — que
+`search.h` CITE DÉJÀ comme inspiration du niveau contextuel — conditionne sur « toutes les
+parties qui contiennent TOUS LES COUPS DU CHEMIN de la racine au nœud ». Nous en avions repris
+la formule de combinaison et remplacé le conditionnement par un descripteur maison. **C'est un
+écart au papier, de la même famille exacte que les options v1/v2 (9.19 (g)), dont le retour au
+critère du papier avait renversé le verdict.** (3) Compléments versés : GRAVE2/GRAVER
+(arXiv:2602.23318, GRAVE en mémoire contrainte), Batch MCTS (arXiv:2104.04278, arbre ET table de
+transposition dans le même algorithme), et arXiv:2406.03361 qui identifie « presence of dead
+ends in the environment » comme un attribut où la recherche par sous-buts paie — corroboration
+indépendante que notre domaine est du bon type pour les macros.
+*Limite de couverture, dite franchement* : la détection d'impasse en planification classique
+vit surtout à ICAPS/AAAI, très peu sur arXiv ; les deux requêtes de cet axe n'ont ramené que de
+la robotique. Cette étude couvre le versant Monte-Carlo, pas le versant symbolique.
+
+**`--mcps <k>` : le conditionnement du papier, greffé sur l'infrastructure existante.** Le
+contexte du niveau contextuel devient la **somme mélangée des coups joués** sur les k premières
+décisions de la ligne, figée au-delà. Quatre points de conception :
+
+1. **Commutatif, pas séquentiel** — MCPS parle des parties qui CONTIENNENT les coups (un
+   ensemble), et notre principe directeur est la recherche sur le GRAPHE d'états (A puis B et B
+   puis A convergent). Somme et non XOR : nos lignes rejouent le même coup plusieurs fois (trois
+   Kaleido Chick dans la référence) et un XOR les annulerait deux à deux.
+2. **La troncature à k est une contrainte de MÉMOIRE, pas de méthode.** La retenue
+   s = n/(n+shrink) gère déjà la profondeur toute seule (contexte jamais revu → n = 0 → repli
+   exact sur le poids global) ; ce qu'elle ne gère pas, c'est une table à une case par nœud
+   visité. La troncature la borne par la largeur du HAUT de l'arbre — étroite, et c'est
+   précisément là que l'information de vie ou de mort se trouve. Mesure au smoke, k = 6 :
+   **207 cases** au worker le plus chargé, sur un plafond de 262 144. Mémoriser les six
+   premières décisions coûte quelques kilo-octets — la prémisse de l'opérateur, chiffrée.
+3. **Deux champs et non un.** `PolicyStep::ctx` reste le descripteur SÉMANTIQUE (la garde des
+   options le décode en (posées, main) ; `ForecastSearchCost` lit sa composante haute pour les
+   points d'indice de sqrt-LTS) ; `PolicyStep::cctx` porte le conditionnement effectif. Écraser
+   `ctx` aurait cassé ces deux lectures en silence.
+4. **`--mcps` implique `--ctx-shrink`** (défaut 8) et le DIT : sans le niveau contextuel, le
+   conditionnement serait calculé et lu par personne — la famille du « mécanisme silencieusement
+   absent du chemin ».
+
+**Écart assumé avec le papier, à ne pas cacher** : nous prenons le CONDITIONNEMENT de MCPS, pas
+sa SOURCE de statistiques. MCPS moyenne sur toutes les parties ; NRPA n'adapte que sur la
+meilleure séquence, donc notre table ne voit que les chemins des bonnes lignes. Le gradient y
+monte le coup joué et descend ses alternatives, branche par branche — l'effet recherché — mais
+ce n'est pas la moyenne du papier. Si l'A/B est neutre, c'est la première chose à changer.
+
+**Santé stricte** : 24 lignes de diff éteint (que des durées), et 20 après le PGO re-déroulé
+(`tools/s14_pgo_b.ps1`, témoin `combosolver_lto_s14b.exe`), dont **aucune** hors durées, tailles
+et nom d'outdir. Le mécanisme est dormant à l'octet près.
+
+**Le montage d'A/B, et le bras qui empêche une conclusion trop facile.** Quatre bras
+(`tools/s14_masse_ab.ps1`) sur deux graines : `temoin` (`--options-online 60`), **`ctx8`
+(`--ctx-shrink 8` SEUL, ancien conditionnement)**, `mcps6`, `mcps12`. Le bras `ctx8` est celui
+qui compte pour l'honnêteté du résultat : le niveau contextuel est ÉTEINT par défaut
+(`ctx_shrink = -1`), donc sans lui un gain de `mcps` serait attribuable à « on a allumé le
+second niveau » aussi bien qu'à « on l'a conditionné par le chemin ». Juges : ≥2 et ≥3
+d'abord — la leçon de (i) est qu'une conversion mono-graine ne vaut rien.
+
+**(k) `--mcps` : RÉFUTÉ DEUX FOIS — et le recadrage qui compte est que MCPS n'a jamais été
+implémenté.** A/B quatre bras × deux graines, étalon A but seul, 300 s, binaire PGO du jour
+(`tools/s14_masse_ab.ps1`) :
+
+| graine | témoin | `ctx8` (ancien cond., ALLUMÉ) | `mcps6` | `mcps12` |
+|---|---|---|---|---|
+| 888 — ≥3 | 45 998 | **204 919** | 98 879 | 132 102 |
+| 1234 — ≥3 | 100 429 | **150 635** | **0** | 138 119 |
+
+*(1) Réfuté en recherche* : 0 comparaison gagnée sur 4 contre `ctx8`, et un **effondrement
+total** à k = 6 sur la graine 1234 — `best 0/4`, **99 % des tirages morts au changement de
+tour**, ≥2 = 0 alors que ≥1 = 757 720, et **27 lignes distinctes retenues sur 8 751 offertes**.
+C'est un verrouillage de bassin : le conditionnement donne à chaque branche ses propres poids,
+chaque case reçoit peu de mises à jour concurrentes, le softmax y durcit, la politique se fige.
+
+*(2) Réfuté en représentation*, par la courbe d'accord (`tools/s14_accord_mcps.ps1`,
+déterministe, quelques secondes) — palier à 256 passes, α = 1,0 :
+
+| conditionnement | niveau éteint | ACTIF | SIGNATURE (mémorisation pure) |
+|---|---|---|---|
+| ancien (posées, main) | 52 | **59** | 64 |
+| chemin k = 6 | 52 | 56 | 61 |
+| chemin k = 12 | 52 | **59** | 62 |
+
+Le chemin ne monte pas le palier. Et la lecture qui vaut au-delà de ce bras : le plafond de
+MÉMORISATION PURE du point de décision est à 64 quand l'ancien conditionnement atteint déjà 59.
+**Cinq points de marge sur tout l'axe de la représentation** — §9.14 (« ce qui manque est la
+MASSE, pas la représentation ») est re-confirmé, et aucun meilleur descripteur de contexte ne
+sauvera quoi que ce soit.
+
+**LE RECADRAGE, demandé en séance et plus important que le verdict.** Le papier a été lu :
+MCPS est un **MCTS** — arbre, compteurs de visites, et trois estimateurs qui sont des **MOYENNES
+DE RÉCOMPENSE** (`Q`, l'AMAF `Q̃`, et la **permutation `Q̂`** : les parties contenant `a` et tous
+les coups de `s` dans n'importe quel ordre), combinés à **poids proportionnels aux effectifs**
+— la combinaison convexe qui minimise la variance, et qui SUPPRIME l'hyperparamètre de biais de
+GRAVE. Machinerie : un bitset par code de coup sur une fenêtre glissante de W = 10 000 parties,
+`Q̂` par `popcount` sur l'intersection.
+Notre `EffectiveWeight` combine deux **logits** mis à jour par le **gradient NRPA de la seule
+meilleure séquence**. Ni arbre, ni compteur de visites, ni moyenne de récompense, ni bitset :
+une combinaison convexe de logits n'est pas une combinaison convexe de taux de victoire. **Le
+commentaire de `search.h` qui invoque MCPS est trompeur** ; `--mcps` n'a fait qu'ajouter un
+conditionnement au mauvais objet, et son mode d'échec est exactement celui que la moitié
+manquante prédit (le gradient pousse +α sans le contrepoids d'une moyenne sur toutes les
+parties).
+
+**Ce que la session a fait de travers, et qui est la vraie leçon.** Deux fois — sur les options
+en session 12, sur MCPS ici — un mécanisme a été implémenté avec NOTRE critère à la place de
+celui du papier, a perdu, et le réflexe a été de se rabattre sur autre chose. En session 12 le
+retour au papier avait RENVERSÉ le verdict. La règle qui en sort : **quand une implémentation
+s'écarte sciemment du papier et perd, le premier correctif est l'écart, pas le mécanisme.**
+La suite est écrite dans `docs/next-session-prompt.md` : implémenter `Q̂` pour de vrai —
+bitsets, fenêtre glissante, poids proportionnels aux effectifs — avec l'avertissement que la
+courbe d'accord ne peut PAS le juger (elle mesure la reproduction d'un corpus qui ne contient
+que des bonnes lignes ; `Q̂` tire son signal des échecs).
+
+**Le vrai résultat de cet A/B est son bras de contrôle.** `ctx8` — la politique à deux niveaux,
+avec son ancien descripteur, simplement ALLUMÉE — bat le témoin sur les deux graines (×4,5 et
+×1,5 sur ≥3). Ce niveau est **éteint par défaut depuis la session 7** et n'avait jamais été
+mesuré dans ce régime. Sans ce bras, le gain de `mcps12` sur le témoin aurait été attribué au
+conditionnement par le chemin. Réserve : ×1,5 est dans la bande de bruit (~2× à graine fixée),
+donc deux graines de même signe sont un indice fort, pas un fait.

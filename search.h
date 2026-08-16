@@ -235,6 +235,17 @@ struct PolicyStep {
 	// ne posent pas les memes questions au meme indice, piege 21) et disponible
 	// des deux cotes — au tirage comme au relevé d'une ligne de corpus.
 	uint16_t ctx = 0;
+	// CONTEXTE EFFECTIF du niveau contextuel de la politique (session 14).
+	// C'est la cle reellement passee a CtxKey ; elle vaut `ctx` quand MCPS est
+	// eteint (comportement d'avant a l'octet pres) et le CONDITIONNEMENT PAR LE
+	// CHEMIN quand il est allume (cfg.mcps_depth > 0).
+	//
+	// Pourquoi deux champs et non un. `ctx` reste le descripteur SEMANTIQUE :
+	// la garde des options le decode en (posees, main) via OptionCtxCompatible,
+	// et ForecastSearchCost lit sa composante haute pour reperer les points
+	// d'indice de sqrt-LTS. Ecraser `ctx` casserait ces deux lectures ; les
+	// separer laisse chaque consommateur sur son propre conditionnement.
+	uint64_t cctx = 0;
 };
 struct NrpaRun {
 	double score = -1;
@@ -328,8 +339,36 @@ inline uint16_t ContextKey(uint32_t placed, uint32_t hand) {
 	return static_cast<uint16_t>(placed * 16u + hand);
 }
 
-inline uint64_t CtxKey(uint64_t key, uint16_t ctx) {
-	return key ^ ((static_cast<uint64_t>(ctx) + 1) * 0x9e3779b97f4a7c15ull);
+inline uint64_t CtxKey(uint64_t key, uint64_t ctx) {
+	return key ^ ((ctx + 1) * 0x9e3779b97f4a7c15ull);
+}
+
+// --- CONDITIONNEMENT PAR LE CHEMIN (session 14, MCPS arXiv:2510.06381) -------
+//
+// LE CORRECTIF D'UN ECART AU PAPIER. Le niveau contextuel ci-dessus dit
+// s'inspirer de MCPS ; il en a repris la FORMULE DE COMBINAISON (plusieurs
+// estimateurs d'un meme coup, ponderes par leur evidence) mais PAS son
+// conditionnement. MCPS conditionne sur « toutes les parties qui contiennent
+// TOUS LES COUPS DU CHEMIN de la racine au noeud » ; nous conditionnions sur un
+// descripteur maison a deux axes (cartes posees, taille de main). Or ce
+// descripteur vaut (0, 3) POUR TOUTES LES BRANCHES a la premiere decision : il
+// ne peut, par construction, distinguer deux premiers coups l'un de l'autre —
+// exactement la ou tout se joue quand une ouverture decide de la viabilite de
+// la ligne. C'est la meme famille d'ecart que les options v1/v2 (9.19 (g)),
+// dont le retour au critere du papier avait renverse le verdict.
+//
+// COMMUTATIF ET NON SEQUENTIEL, pour deux raisons qui coincident : MCPS parle
+// des parties qui CONTIENNENT les coups (un ensemble, pas une suite), et notre
+// principe directeur est la recherche sur le GRAPHE d'etats — activer A puis B
+// et B puis A convergent. Une somme de coups melanges est donc plus fidele aux
+// deux qu'un hachage sequentiel. Somme et non XOR : nos lignes rejouent le meme
+// coup plusieurs fois (trois Kaleido Chick dans la reference) et un XOR les
+// annulerait deux a deux.
+inline uint64_t MixMove(uint64_t key) {
+	uint64_t z = key + 0x9e3779b97f4a7c15ull;
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+	return z ^ (z >> 31);
 }
 
 // Compatibilite SEMANTIQUE entre le contexte courant et celui d'une occurrence
@@ -349,7 +388,7 @@ inline bool OptionCtxCompatible(uint16_t have, uint16_t want, uint32_t hand_tol)
 // Poids effectif d'un coup sous la politique a deux niveaux. `shrink` < 0
 // eteint le niveau contextuel (la fonction rend alors pol[key] exactement).
 inline float EffectiveWeight(const NrpaPolicy& pol, const NrpaResidual* res,
-							 uint64_t key, uint16_t ctx, float shrink) {
+							 uint64_t key, uint64_t ctx, float shrink) {
 	auto it = pol.find(key);
 	const float wg = (it == pol.end()) ? 0.0f : it->second;
 	if(!res || shrink < 0.0f)
@@ -391,11 +430,15 @@ class RecipeGraph;
 // deck, invocations sans materiaux, substituts). C'est ce qui casse
 // l'oeuf-et-la-poule du graphe observationnel (« il n'apprend que de
 // lui-meme ») sans lire un seul texte d'effet : regle 3 au sens strict.
+// `mcps_depth` : le conditionnement par le chemin doit etre calcule A
+// L'IDENTIQUE des deux cotes, sans quoi le gradient du corpus tomberait dans
+// des cases que les tirages ne visitent jamais (la faute exacte que l'audit
+// 7.5 avait trouvee sur hint_bias). 0 = descripteur semantique, comme avant.
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
 					 const BoardKey& target, NrpaRun& out,
-					 RecipeGraph* recipes = nullptr);
+					 RecipeGraph* recipes = nullptr, uint32_t mcps_depth = 0);
 
 // Probabilite moyenne (log) que `pol` donne aux coups CHOISIS par les lignes
 // du corpus, sous les memes biais que l'echantillonnage. C'est l'instrument
@@ -651,9 +694,12 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // et laissant temp au defaut (audit 7.5/3.2). Le defaut de `temp` est conserve
 // ici pour les appels a un seul argument de distribution, mais AdaptCorpus,
 // lui, les EXIGE tous les deux.
+// `ctx_max` : plafond d'entrees du niveau contextuel (0 = illimite). Au-dela,
+// les cases existantes continuent d'etre mises a jour, aucune nouvelle n'est
+// creee — le conditionnement par le chemin degrade proprement vers le global.
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 			  float alpha, float bias_known, float hint_bias, float shrink,
-			  float temp = 1.0f);
+			  float temp = 1.0f, size_t ctx_max = 0);
 
 // `passes` passes d'adaptation sur chaque ligne du corpus (chantier 5bis).
 // `hint_bias` et `temp` sont EXIGES, sans defaut : la session 8 les avait
@@ -663,7 +709,8 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 // rips). Un defaut ici rendrait la meme omission a nouveau silencieuse.
 void AdaptCorpus(NrpaPolicy& pol, NrpaResidual* res,
 				 const std::vector<NrpaRun>& runs, uint32_t passes, float alpha,
-				 float bias_known, float hint_bias, float shrink, float temp);
+				 float bias_known, float hint_bias, float shrink, float temp,
+				 size_t ctx_max = 0);
 
 // --- archive d'etats (Go-Explore, arXiv:2004.12919) ------------------------
 //
@@ -1215,6 +1262,26 @@ struct SearchConfig {
 	// contextuelle n'est ni lue ni ecrite). k = 0 : le contexte prend la main
 	// des la premiere mise a jour ; k grand : il faut beaucoup d'evidence.
 	float ctx_shrink = -1.0f;
+	// CONDITIONNEMENT PAR LE CHEMIN (MCPS 2510.06381, session 14). 0 = eteint :
+	// le niveau contextuel garde le descripteur semantique (posees, main),
+	// comportement d'avant a l'octet pres. k > 0 : le contexte d'une decision
+	// devient la somme melangee des coups joues sur les k PREMIERES decisions de
+	// la ligne, figee au-dela.
+	//
+	// POURQUOI UNE TRONCATURE, alors que MCPS prend le chemin entier. La retenue
+	// s = n/(n+shrink) gere deja la profondeur toute seule — un contexte profond
+	// jamais revu a n = 0, donc s = 0, donc repli exact sur le poids global. Ce
+	// qu'elle ne gere pas, c'est la MEMOIRE : sans troncature la table compte un
+	// couple (coup, chemin) par noeud visite, soit des centaines de millions.
+	// La troncature borne la table par le nombre de prefixes de profondeur <= k,
+	// c'est-a-dire par la largeur du HAUT de l'arbre — qui est etroite, et c'est
+	// precisement la ou l'information de vie ou de mort se trouve.
+	uint32_t mcps_depth = 0;
+	// Plafond d'entrees du niveau contextuel, par worker. Au-dela, les cases
+	// EXISTANTES continuent d'etre mises a jour mais aucune nouvelle n'est
+	// creee : le mecanisme degrade vers le poids global au lieu de faire enfler
+	// la memoire de seize workers. La taille atteinte est imprimee (piege 52).
+	size_t ctx_max = 262144;
 	// TEMPERATURE de l'echantillonnage (GNRPA, arXiv:2003.10024) : les logits
 	// sont divises par tau avant le softmax. C'est le seul levier connu qui
 	// agisse sur la MASSE et non sur le CLASSEMENT — or la mesure de la session
@@ -1620,6 +1687,12 @@ struct SearchStats {
 	uint64_t macro_taken = 0;
 	uint64_t macro_absorbed = 0;
 	uint64_t macro_aborted = 0;
+	// Niveau CONTEXTUEL : taille atteinte de la table, et si le plafond a mordu.
+	// Sous conditionnement par le chemin (MCPS), c'est LA lecture qui dit si le
+	// mecanisme a de la place pour apprendre ou s'il degrade vers le global —
+	// un conditionnement dont la table sature n'est plus celui du papier.
+	size_t ctx_entries = 0;
+	bool ctx_capped = false;
 	// Visibilite des indices (--hint) : dans combien d'etats un coup indice
 	// etait LEGAL, et combien de fois il a ete pris. hint_seen = 0 signifie
 	// que le probleme n'est pas l'echantillonnage mais la LEGALITE — le core

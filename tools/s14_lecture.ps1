@@ -21,6 +21,9 @@ $rows = foreach ($f in Get-ChildItem $Motif | Sort-Object Name) {
     $mac  = ($t | Select-String -Pattern 'options : (\d+) prises, (\d+) decisions absorbees \(([\d.]+)/prise\), (\d+) avortees').Matches
     $onl  = ($t | Select-String -Pattern 'options en ligne : (\d+) tour').Matches
     $cat  = ($t | Select-String -Pattern 'dernier catalogue : (\d+) macro\(s\) \(moyenne ([\d.]+), max (\d+)\) sur (\d+) ligne\(s\), perte modele ([\d.]+) -> ([\d.]+) log10 ; minage ([\d.]+) ms en moyenne, ([\d.]+) ms').Matches
+    # Catalogue STATIQUE (mine une fois au demarrage) : meme lecture, autre ligne.
+    $sta  = ($t | Select-String -Pattern 'options : (\d+) macro\(s\) retenue\(s\).*moyenne ([\d.]+),.*perte modele ([\d.]+) -> ([\d.]+) log10').Matches
+    $ctxl = ($t | Select-String -Pattern 'niveau contextuel : (\d+) case\(s\).*conditionnement : ([^)]+\))').Matches
     [pscustomobject]@{
         run      = $f.BaseName
         best     = if ($best) { "$($best[-1].Groups[1].Value)/$($best[-1].Groups[2].Value)" } else { '-' }
@@ -33,10 +36,15 @@ $rows = foreach ($f in Get-ChildItem $Motif | Sort-Object Name) {
         'abs/pr' = if ($mac)  { [double]$mac[0].Groups[3].Value } else { $null }
         avortees = if ($mac)  { [int]$mac[0].Groups[4].Value } else { $null }
         tours    = if ($onl)  { [int]$onl[0].Groups[1].Value } else { $null }
-        macros   = if ($cat)  { [int]$cat[0].Groups[1].Value } else { $null }
-        'lg moy' = if ($cat)  { [double]$cat[0].Groups[2].Value } else { $null }
-        perte    = if ($cat)  { "$($cat[0].Groups[5].Value)->$($cat[0].Groups[6].Value)" } else { $null }
+        macros   = if ($cat)  { [int]$cat[0].Groups[1].Value }
+                   elseif ($sta) { [int]$sta[0].Groups[1].Value } else { $null }
+        'lg moy' = if ($cat)  { [double]$cat[0].Groups[2].Value }
+                   elseif ($sta) { [double]$sta[0].Groups[2].Value } else { $null }
+        perte    = if ($cat)  { "$($cat[0].Groups[5].Value)->$($cat[0].Groups[6].Value)" }
+                   elseif ($sta) { "$($sta[0].Groups[3].Value)->$($sta[0].Groups[4].Value)" } else { $null }
         'mine ms'= if ($cat)  { [double]$cat[0].Groups[8].Value } else { $null }
+        'ctx'    = if ($ctxl) { [int]$ctxl[0].Groups[1].Value } else { $null }
+        'cond'   = if ($ctxl) { $ctxl[0].Groups[2].Value } else { $null }
     }
 }
 # Deux tables : les JUGES d'abord (la seule lecture qui tranche), la vie du
@@ -44,5 +52,5 @@ $rows = foreach ($f in Get-ChildItem $Motif | Sort-Object Name) {
 # silence — et ce sont justement celles qui disent si le minage a vecu.
 Write-Output "`n=== juges ==="
 $rows | Format-Table run, best, dec, tirages, ge2, ge3, lignes -AutoSize
-Write-Output "=== vie des options ==="
-$rows | Format-Table run, prises, 'abs/pr', avortees, tours, macros, 'lg moy', perte, 'mine ms' -AutoSize
+Write-Output "=== vie du mecanisme (c'est CE tableau que le criblage lit) ==="
+$rows | Format-Table run, prises, 'abs/pr', avortees, tours, macros, 'lg moy', perte, 'mine ms', ctx, cond -AutoSize

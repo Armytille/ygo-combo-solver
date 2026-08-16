@@ -878,6 +878,18 @@ struct Options {
 	// POLITIQUE A DEUX NIVEAUX (session 7, chantier 5ter — MCPS 2510.06381) :
 	// retenue du niveau contextuel, s = n/(n+k). Negatif = eteint.
 	double ctx_shrink = -1.0;
+	// CONDITIONNEMENT PAR LE CHEMIN (session 14) : le contexte du niveau
+	// contextuel devient la somme des coups joues sur les k premieres decisions,
+	// au lieu du descripteur (cartes posees, main). 0 = eteint.
+	//
+	// C'est le retour au critere de MCPS, que ce projet CITAIT sans l'appliquer :
+	// son conditionnement est « les parties qui contiennent tous les coups du
+	// chemin », le notre etait un descripteur a deux axes qui vaut (0, 3) pour
+	// TOUTES les branches a la premiere decision — donc incapable, par
+	// construction, de distinguer deux ouvertures l'une de l'autre.
+	uint32_t mcps_depth = 0;
+	// Plafond d'entrees du niveau contextuel, par worker (0 = illimite).
+	size_t ctx_max = 262144;
 	// Temperature de l'echantillonnage NRPA (1.0 = comportement d'avant).
 	double nrpa_temp = 1.0;
 	// Niveau d'imbrication NRPA. 0 = defaut historique, choisi par un seuil de
@@ -1323,6 +1335,18 @@ void Usage() {
 		"                     du board cible deja posees. k negatif (defaut) =\n"
 		"                     eteint, comportement d'avant. La courbe d'accord\n"
 		"                     imprimee par --adapt calibre k sans depenser un run.\n"
+		"  --mcps <k>         CONDITIONNEMENT PAR LE CHEMIN (MCPS 2510.06381) :\n"
+		"                     le contexte du niveau ci-dessus devient la somme\n"
+		"                     des coups joues sur les k premieres decisions, au\n"
+		"                     lieu de (cartes posees, main) — lequel vaut (0,3)\n"
+		"                     pour TOUTES les branches a la 1re decision et ne\n"
+		"                     peut donc pas separer deux ouvertures. 0 = eteint.\n"
+		"                     Implique --ctx-shrink (defaut 8 s'il n'est pas\n"
+		"                     donne) : sans le niveau contextuel, le\n"
+		"                     conditionnement n'est lu par personne.\n"
+		"  --ctx-max <n>      plafond d'entrees du niveau contextuel par worker\n"
+		"                     (defaut 262144, 0 = illimite). Au plafond, les\n"
+		"                     cases existantes vivent, aucune neuve n'est creee.\n"
 		"  --fire <carte>     TEST ADVERSE : ajoute la carte a la main adverse\n"
 		"                     et la fait JOUER a chaque fenetre ou elle est\n"
 		"                     legale (un essai par fenetre) ; la recherche doit\n"
@@ -1658,6 +1682,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--ctx-shrink") {
 			const char* v = next("--ctx-shrink"); if(!v) return false;
 			o.ctx_shrink = std::atof(v);
+		} else if(a == "--mcps") {
+			const char* v = next("--mcps"); if(!v) return false;
+			o.mcps_depth = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--ctx-max") {
+			const char* v = next("--ctx-max"); if(!v) return false;
+			o.ctx_max = static_cast<size_t>(std::atoll(v));
 		} else if(a == "--tt-mb") {
 			const char* v = next("--tt-mb"); if(!v) return false;
 			o.tt_mb = static_cast<size_t>(std::atoi(v));
@@ -1697,6 +1727,17 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			std::printf("!! argument en trop : %s\n", a.c_str());
 			return false;
 		}
+	}
+	// `--mcps` sans niveau contextuel serait un CALCUL SANS LECTEUR : le
+	// conditionnement par le chemin ne sert qu'a indexer la table du niveau
+	// contextuel, que `ctx_shrink < 0` eteint. Plutot que d'accepter un drapeau
+	// inerte (la famille du « mecanisme silencieusement absent du chemin »), on
+	// allume le niveau et on le DIT.
+	if(o.mcps_depth && o.ctx_shrink < 0) {
+		o.ctx_shrink = 8.0;
+		std::printf("  --mcps %u implique --ctx-shrink %.0f (sans niveau "
+					"contextuel, le conditionnement par le chemin n'est lu par "
+					"personne)\n", o.mcps_depth, o.ctx_shrink);
 	}
 	return !o.replay.empty();
 }
@@ -4096,7 +4137,8 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					NrpaRun run;
 					size_t unknown =
 						LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX,
-									  eo, repertoire, target, run, recipes);
+									  eo, repertoire, target, run, recipes,
+									  opt.mcps_depth);
 					if(!run.steps.empty()) {
 						total_steps += run.steps.size();
 						total_unknown += unknown;
@@ -4205,10 +4247,16 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 			for(PolicyStep& s : r.steps) {
 				sorted = s.keys;
 				std::sort(sorted.begin(), sorted.end());
-				uint64_t sig = (s.ctx + 1) * 0x9e3779b97f4a7c15ull;
+				uint64_t sig = (s.cctx + 1) * 0x9e3779b97f4a7c15ull;
 				for(uint64_t k : sorted)
 					sig = (sig ^ k) * 0x100000001b3ull;
-				s.ctx = static_cast<uint16_t>(sig ^ (sig >> 32) ^ (sig >> 16));
+				// Ecrit dans `cctx`, le champ que le niveau contextuel LIT
+				// depuis la session 14 — l'ecrire dans `ctx` ferait mesurer a
+				// cette sonde un conditionnement que plus personne n'utilise.
+				// Et sur 64 bits : la troncature en uint16 faisait entrer en
+				// collision des points de decision distincts, ce qui SOUS-estimait
+				// le plafond de memorisation qu'elle est censee mesurer.
+				s.cctx = sig;
 			}
 		}
 		std::printf("  accord du corpus — contexte = SIGNATURE du point de "
@@ -4954,6 +5002,11 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						}
 						// Politique a deux niveaux (chantier 5ter).
 						fcfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
+						// Conditionnement par le chemin (MCPS) et plafond de la
+						// table contextuelle : les deux doivent voyager ENSEMBLE,
+						// sinon le contexte est calcule et jamais borne.
+						fcfg.mcps_depth = opt.mcps_depth;
+						fcfg.ctx_max = opt.ctx_max;
 						fcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
@@ -5803,6 +5856,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint64_t constraint_cuts = 0, guard_cuts = 0;
 			// Options (chantier 17) : prises / decisions absorbees / avortees.
 			uint64_t macro_taken = 0, macro_absorbed = 0, macro_aborted = 0;
+			size_t ctx_entries = 0;
+			bool ctx_capped = false;
 			uint32_t overlap = 0, monsters = 0, overlap_ripped = 0;
 		};
 		ModeStats greedy, nrpa;
@@ -5935,6 +5990,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 					// Politique a deux niveaux (chantier 5ter).
 					wcfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
+					// Conditionnement par le chemin (MCPS) et plafond de la
+					// table contextuelle : les deux doivent voyager ENSEMBLE,
+					// sinon le contexte est calcule et jamais borne.
+					wcfg.mcps_depth = opt.mcps_depth;
+					wcfg.ctx_max = opt.ctx_max;
 					wcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 					Search s(local, la, start_yrp, wcfg);
 					// Graine distincte par worker : sans cela les seize tirent
@@ -5961,6 +6021,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
+					m.ctx_entries = (std::max)(m.ctx_entries,
+											   s.Stats().ctx_entries);
+					m.ctx_capped |= s.Stats().ctx_capped;
 					m.macro_taken += s.Stats().macro_taken;
 					m.macro_absorbed += s.Stats().macro_absorbed;
 					m.macro_aborted += s.Stats().macro_aborted;
@@ -6036,6 +6099,17 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							: 0.0,
 						(unsigned long long)(greedy.macro_aborted +
 											 nrpa.macro_aborted));
+		// La vie du NIVEAU CONTEXTUEL. Sous --mcps c'est la lecture qui dit si
+		// le conditionnement par le chemin a eu la place d'apprendre : au
+		// plafond il degrade vers le poids global et l'A/B ne mesure plus le
+		// mecanisme du papier mais sa version tronquee.
+		if(opt.ctx_shrink >= 0 && nrpa.ctx_entries)
+			std::printf("      niveau contextuel : %zu case(s) au plus grand "
+						"worker%s  (conditionnement : %s)\n",
+						nrpa.ctx_entries,
+						nrpa.ctx_capped ? "  !! PLAFOND ATTEINT (--ctx-max)" : "",
+						opt.mcps_depth ? "CHEMIN (--mcps)"
+									   : "posees+main");
 		// La vie du MINAGE EN LIGNE. Trois lectures qui decident de son sort :
 		// le nombre de tours (a zero, le run n'a jamais eu de quoi miner), le
 		// catalogue final (taille et perte modele — la meme lecture que le

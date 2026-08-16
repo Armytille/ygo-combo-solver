@@ -22,7 +22,17 @@ param([int]$Ms = 1200000, [int]$Period = 90, [string]$Seed = '4242',
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 $repo = "D:\ProjectIgnis\repositories"
-$gabarit = "D:\ProjectIgnis\replay\_LastReplay.yrpX"
+# GABARIT EPINGLE (session 14). Il pointait sur le _LastReplay.yrpX de
+# l'installation EDOPro — un fichier VIVANT, reecrit des que quelqu'un joue un
+# duel. C'est arrive EN PLEIN PILOTE le 15/08/2026 a 23:42 : deux runs sont
+# morts avec « aucun yrp1 embarque ». Bruyamment, pas en silence — et l'en-tete
+# de gabarit imprime par le rapport a permis de VERIFIER que les runs anterieurs
+# portaient tous le meme duel, au lieu de le supposer. Meme famille que la .cdb
+# vivante non epinglee (9.20). Le gabarit vit desormais DANS le depot ; sous
+# --no-ref seuls ses parametres de duel comptent (drapeaux, LP, taille de main,
+# deck adverse), sa ligne est ecartee — c'est pourquoi n'importe quel replay du
+# meme duel fait l'affaire, y compris une approche produite par le solveur.
+$gabarit = "D:\ProjectIgnis\replay2video\combosolver\gabarits\etalon_a_lunalight.yrp"
 
 function Invoke-Luna {
     param([string]$Out, [string]$S, [int]$Budget, [string[]]$Extra)
