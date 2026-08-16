@@ -170,7 +170,7 @@ workers (`main.cpp:7074`, `7159-7162`).
 | drapeau | remarque |
 |---|---|
 | `--finisher-options` | **écrit, jamais jugé** — §9.24 le dit lui-même |
-| `--canonical-zones` | **jamais départagé**, signalé depuis la s15 |
+| `--canonical-zones` | **jamais départagé**, et il ne doit PAS l'être en l'état : les **Zones Pendule** sont des séquences particulières de `LOCATION_SZONE`, que la canonicalisation confond avec une pose de magie ordinaire — elle **supprime donc la possibilité de poser une échelle**. Sur l'étalon A, `Lunalight Wolf` n'invoque par Fusion que depuis la Zone Pendule (`e2:SetRange(LOCATION_PZONE)`) : le drapeau referme silencieusement deux des trois portes du combo. La règle correcte est « une zone par **classe d'équivalence que les règles respectent** » — Zone Pendule et zone pointée par un Lien sont leurs propres classes. |
 | `--hindsight-k` | réglage de `--hindsight`, **zéro mention** |
 | `--qhat-window`, `--qhat-rho`, `--qhat-nodes` | jamais balayés |
 | `--ctx-max` | plafond ; zéro mention |

@@ -148,6 +148,20 @@ struct EnumOptions {
 	// biais derive de la CIBLE puisse s'y appliquer. Opt-in : cela change le
 	// comportement du biais sur tous les prompts de selection.
 	bool card_on_select = false;
+	// IDENTITE DES PROMPTS OUI/NON (session 18ter, --yn-identity).
+	//
+	// A faux, `MSG_SELECT_EFFECTYN` et `MSG_SELECT_YESNO` emettent l'arete
+	// `EdgeOf(message, {1})` / `{0}` : TOUS les « oui » de la partie partagent un
+	// seul poids de politique. Or ces messages transportent le code de la carte
+	// (EFFECTYN) et la description de l'effet (les deux) — la convention
+	// `aux.Stringid(id, n) = id * 16 + n` fait que la description porte le code
+	// meme quand le message ne le transporte pas.
+	//
+	// A vrai, l'arete devient (code, description, reponse) et `Choice::card`
+	// designe la carte dont l'effet est propose. Le prompt cesse d'etre anonyme,
+	// et les sondes de `--watch` le voient. Opt-in : cela change les cles de
+	// politique de ces prompts, donc le comportement.
+	bool yn_identity = false;
 	// SONDE D'OFFRE (session 17) — l'instrument qui DECOMPOSE la loi d'arite.
 	//
 	// La session 16 a mesure que la frequence d'une invocation s'effondre avec

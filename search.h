@@ -2635,6 +2635,11 @@ struct RepeatProbe {
 	// `taken_steps / offer_steps` est la grandeur que tout mecanisme
 	// d'orientation du choix doit deplacer.
 	uint64_t taken_steps = 0;
+	// OUI/NON : combien de fois le prompt a ete OFFERT pour cette carte, et
+	// combien de fois « oui » a ete retenu. Sur l'etalon A, l'ecart entre les
+	// deux EST le goulot — la defausse de Masquerade est facultative, et la
+	// refuser referme l'acces au cimetiere pour tout le reste du tour.
+	uint64_t yn_steps = 0, yn_yes = 0;
 	// OFFRES COMPTEES PAR TYPE DE PROMPT. Le masque seul ne suffisait pas, et la
 	// premiere lecture de la session 17 s'est trompee a cause de cela : Leo et
 	// Liger etaient « proposes dans 36 500 tirages », ce qui se lisait « le jeu
@@ -2646,7 +2651,7 @@ struct RepeatProbe {
 	//
 	// Indices : cf. kOfferMsgs. Six types suffisent — au-dela on paierait 64
 	// compteurs par carte pour des prompts qui ne portent aucune invocation.
-	uint64_t offer_by[6] = { 0, 0, 0, 0, 0, 0 };
+	uint64_t offer_by[7] = { 0, 0, 0, 0, 0, 0, 0 };
 };
 
 // Types de prompt suivis nommement par la sonde d'offre. L'ordre est celui de
@@ -2696,6 +2701,11 @@ inline int OfferSlot(uint8_t msg) {
 	case MSG_SELECT_SUM:           return 3;
 	case MSG_SELECT_CHAIN:         return 4;
 	case MSG_SELECT_POSITION:      return 5;
+	// OUI/NON (session 18ter) : c'est ICI que se decide la defausse qui debloque
+	// les materiaux du cimetiere sur l'etalon A. Le prompt n'avait aucune
+	// identite jusqu'a `--yn-identity`, donc la sonde ne pouvait pas le voir.
+	case MSG_SELECT_EFFECTYN:
+	case MSG_SELECT_YESNO:         return 6;
 	default:                       return -1;
 	}
 }

@@ -404,13 +404,58 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 
 	case MSG_SELECT_EFFECTYN:
 	case MSG_SELECT_YESNO: {
+		// IDENTITE DU PROMPT OUI/NON (session 18ter, --yn-identity).
+		//
+		// LE DEFAUT. L'arete valait `EdgeOf(message, {1})` : TOUS les « oui » de
+		// la partie entiere partageaient UN SEUL poids de politique, et tous les
+		// « non » un autre. NRPA ne pouvait apprendre qu'une propension globale a
+		// dire oui. C'est mot pour mot le defaut de 9.23 (h) — « MSG_SELECT_CARD
+		// ne renseignait pas Choice::card, le prompt le plus determinant du
+		// domaine etait invisible au biais » — sur un autre message.
+		//
+		// POURQUOI CE PROMPT-LA COMPTE. Sur l'etalon A, la decision qui debloque
+		// les materiaux du CIMETIERE est un `Duel.SelectYesNo` : l'effet e2 de
+		// `Lunalight Masquerade` propose de defausser une carte, et cette
+		// defausse enregistre EFFECT_EXTRA_FUSION_MATERIAL jusqu'a la End Phase.
+		// Sans elle, les Fusions suivantes n'ont pas acces au cimetiere, ou vit
+		// le materiau nomme. Le plan resolu ne compte que 6 EFFECTYN et 2 YESNO
+		// sur 284 decisions : deux poids pour huit decisions, dont le pivot.
+		//
+		// CE QUI DONNE L'IDENTITE. `MSG_SELECT_EFFECTYN` transporte le code et la
+		// description ; `MSG_SELECT_YESNO` ne transporte QUE la description. Mais
+		// la convention `aux.Stringid(id, n) = id * 16 + n` est universelle dans
+		// les scripts : la description PORTE le code de la carte. C'est la seule
+		// facon d'attribuer un YESNO, et elle ne nomme aucune carte.
+		uint32_t code = 0;
+		uint64_t desc = 0;
+		if(opt.yn_identity) {
+			Reader r2(data, len);
+			r2.Get<uint8_t>();   // playerid
+			if(message == MSG_SELECT_EFFECTYN) {
+				code = canon(r2.Get<uint32_t>());
+				r2.Skip(kLocInfo);
+			}
+			desc = r2.Get<uint64_t>();
+			if(!r2.Ok()) {
+				code = 0;
+				desc = 0;
+			} else if(!code && desc) {
+				const uint32_t from_desc = static_cast<uint32_t>(desc >> 4);
+				if(opt.db && opt.db->Find(from_desc))
+					code = canon(from_desc);
+			}
+		}
 		Choice& y = out.Emit();
 		PutInt32(y.response, 1);
-		y.edge = EdgeOf(message, { 1 });
+		y.edge = opt.yn_identity ? EdgeOf(message, { code, desc, 1 })
+								 : EdgeOf(message, { 1 });
+		y.card = code;
 		SetLabel(y, opt, "oui", 0, false);
 		Choice& n = out.Emit();
 		PutInt32(n.response, 0);
-		n.edge = EdgeOf(message, { 0 });
+		n.edge = opt.yn_identity ? EdgeOf(message, { code, desc, 0 })
+								 : EdgeOf(message, { 0 });
+		n.card = code;
 		SetLabel(n, opt, "non", 0, false);
 		return;
 	}
@@ -612,6 +657,19 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		}
 		if(opt.canonical_zones) {
 			// Une seule zone representative par (proprietaire, type de zone).
+			//
+			// DANGER MESURE, ET IL SUFFIT A CONDAMNER CE DRAPEAU EN L'ETAT
+			// (session 18ter) : les ZONES PENDULE sont des sequences PARTICULIERES
+			// de LOCATION_SZONE, et la canonicalisation les confond avec une pose
+			// de magie ordinaire — elle SUPPRIME donc la possibilite de poser une
+			// echelle. Sur l'etalon A, `Lunalight Wolf` n'invoque par Fusion que
+			// depuis la Zone Pendule (`e2:SetRange(LOCATION_PZONE)`) : ce drapeau
+			// referme silencieusement DEUX des trois portes du combo.
+			// La regle correcte n'est pas « une zone par type » mais « une zone
+			// par CLASSE D'EQUIVALENCE QUE LES REGLES RESPECTENT » — la Zone
+			// Pendule et une zone pointee par un Lien sont leurs propres classes.
+			// C'est pourquoi il reste eteint, et pourquoi le departer sans ce
+			// correctif rendrait un verdict faussement negatif.
 			uint32_t kept = 0;
 			for(uint32_t i = 0; i < n_free; ++i) {
 				bool dup = false;

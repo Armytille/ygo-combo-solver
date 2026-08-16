@@ -3299,8 +3299,21 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		// rarete de « Leo au cimetiere » rendait inutilisable.
 		if(probe_on && choices[pick].card)
 			for(size_t i = 0; i < ProbeCount(); ++i)
-				if(ProbeCode(i) == choices[pick].card)
+				if(ProbeCode(i) == choices[pick].card) {
 					++stats.rep[i].taken_steps;
+					// LE VOLET OUI/NON. `response` vaut 1 pour oui, 0 pour non
+					// (playerop.cpp) — on lit la reponse et non le label, qui
+					// n'existe pas sur les chemins chauds.
+					if(prompt_type == MSG_SELECT_EFFECTYN ||
+					   prompt_type == MSG_SELECT_YESNO) {
+						++stats.rep[i].yn_steps;
+						int32_t v = 0;
+						if(choices[pick].response.size() == 4)
+							std::memcpy(&v, choices[pick].response.data(), 4);
+						if(v == 1)
+							++stats.rep[i].yn_yes;
+					}
+				}
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 		// UNE DECISION REELLE de plus. `depth` n'est plus l'indice de boucle :

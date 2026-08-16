@@ -485,8 +485,15 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 // juge ne couvrait que la phase tirages alors que la conversion se faisait dans
 // les tirages ENRACINES. Un « jamais » de la premiere table ne vaut donc que
 // pour elle.
+// `card_id` : `Choice::card` est-il renseigne sur les prompts de SELECTION
+// (`--card-on-select`) et sur les prompts OUI/NON (`--yn-identity`) ? SANS EUX,
+// LES COMPTEURS DE CHOIX SONT STRUCTURELLEMENT NULS — et « 0 / 629, JAMAIS
+// RETENUE » se lit comme un fait alors que c'est l'absence d'instrument. Le
+// defaut a failli produire une conclusion fausse en session 18ter ; il est
+// desormais dit a l'endroit ou il se lit.
 void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
-					  const CardDB& db, const char* phase) {
+					  const CardDB& db, bool card_id, bool yn_id,
+					  const char* phase) {
 	std::printf("\n  --- sonde de repetition (--probe-repeat), %s : %llu "
 				"tirage(s) ---\n", phase, (unsigned long long)rollouts);
 	bool any = false;
@@ -517,9 +524,9 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 						"%llu decision(s)\n",
 						(unsigned long long)r.offer_rollouts, per,
 						(unsigned long long)r.offer_steps);
-			static const char* kOfferNames[6] = { "IDLECMD", "SELECT_CARD",
+			static const char* kOfferNames[7] = { "IDLECMD", "SELECT_CARD",
 												  "UNSELECT", "SUM", "CHAIN",
-												  "POSITION" };
+												  "POSITION", "OUI/NON" };
 			// ACTIVATIONS : le seul chiffre qui dise si le solveur a essaye la
 			// PORTE, pour une carte dont le role est d'ouvrir une voie plutot
 			// que d'etre posee (Wolf, Masquerade — et Leo Dancer, qui n'est
@@ -558,7 +565,15 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// OCCASIONS (des milliers) la ou « la carte a atteint sa zone »
 			// compte des EVENEMENTS (des centaines), et c'est ce qui le rend
 			// lisible malgre le bruit inter-run.
-			if(r.offer_steps)
+			if(r.offer_steps && !card_id)
+				std::printf("      CHOISIE quand offerte : INDISPONIBLE — ce "
+							"compteur exige --card-on-select.\n"
+							"                              Sans lui "
+							"`Choice::card` est NUL sur les prompts de "
+							"SELECTION,\n                              donc le "
+							"compte vaut structurellement ZERO et ne dit "
+							"RIEN.\n");
+			else if(r.offer_steps)
 				std::printf("      CHOISIE quand offerte : %llu / %llu   "
 							"conversion %.2f %%%s\n",
 							(unsigned long long)r.taken_steps,
@@ -566,11 +581,29 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 							100.0 * double(r.taken_steps) / double(r.offer_steps),
 							r.taken_steps ? "" : "   <-- JAMAIS RETENUE");
 			std::printf("        par prompt :");
-			for(int k = 0; k < 6; ++k)
+			for(int k = 0; k < 7; ++k)
 				if(r.offer_by[k])
 					std::printf("  %s %llu", kOfferNames[k],
 								(unsigned long long)r.offer_by[k]);
 			std::printf("\n");
+			// LE VOLET OUI/NON (session 18ter). Une defausse FACULTATIVE qui
+			// DEBLOQUE une voie ne se lit dans AUCUN autre compteur : le prompt
+			// est offert, le solveur repond, et refuser ne coute rien de
+			// visible — ni au board, ni au score, ou une defausse vaut +1 de
+			// `fodder` contre +100 pour une carte cible posee. Sur l'etalon A
+			// c'est pourtant la decision qui ouvre l'acces au CIMETIERE pour
+			// toutes les Fusions suivantes. Exige --yn-identity, sans quoi le
+			// prompt est anonyme et la sonde ne peut l'attribuer a personne.
+			if(!yn_id && r.offer_by[6])
+				std::printf("        OUI/NON : INDISPONIBLE — exige "
+							"--yn-identity (le prompt est anonyme sans lui)\n");
+			if(r.yn_steps)
+				std::printf("        OUI/NON : %llu offre(s), OUI retenu %llu "
+							"fois (%.1f %%)%s\n",
+							(unsigned long long)r.yn_steps,
+							(unsigned long long)r.yn_yes,
+							100.0 * double(r.yn_yes) / double(r.yn_steps),
+							r.yn_yes ? "" : "   <-- JAMAIS OUI");
 			// LE VERDICT NE SE LIT PAS SUR LE TOTAL, et c'est la correction la
 			// plus importante de la sonde. `SELECT_CARD` est AMBIGU : il porte
 			// « choisis ta Fusion parmi celles payables » aussi bien que
@@ -1212,6 +1245,8 @@ struct Options {
 	uint64_t max_nodes = 0;
 	// TRONCATURE DU GRADIENT AU PIC DU SCORE. Cf. NrpaRun::peak_steps.
 	bool adapt_to_peak = false;
+	// IDENTITE DES PROMPTS OUI/NON. Cf. EnumOptions::yn_identity.
+	bool yn_identity = false;
 	// Nombre maximal de sous-ensembles emis par prompt de selection. C'est ce
 	// qui plafonne le facteur de branchement de TOUS les prompts de selection ;
 	// il etait ecrit en dur (24) a douze endroits, sans drapeau ni mesure, et
@@ -1573,6 +1608,16 @@ void Usage() {
 		"                     choix ; +61 %% de debit et x2,1 de boards en\n"
 		"                     exhaustif (9.24 (k)). La comptabilite d'actions, de\n"
 		"                     tours, d'invocations et de resolutions est conservee.\n"
+		"  --yn-identity      les prompts OUI/NON portent (carte, effet) au lieu\n"
+		"                     d'une arete unique. Sans lui, TOUS les « oui » de\n"
+		"                     la partie partagent UN SEUL poids de politique, et\n"
+		"                     NRPA ne peut apprendre qu'une propension globale a\n"
+		"                     dire oui. Or la decision qui debloque les materiaux\n"
+		"                     du CIMETIERE sur l'etalon A est un SelectYesNo (la\n"
+		"                     defausse facultative de Lunalight Masquerade). Le\n"
+		"                     code vient du message pour EFFECTYN et de la\n"
+		"                     description pour YESNO (convention universelle\n"
+		"                     aux.Stringid(id,n) = id*16+n) : aucune carte nommee.\n"
 		"  --card-on-select   renseigne Choice::card sur les prompts de SELECTION\n"
 		"                     (premier code du sous-ensemble — identite\n"
 		"                     APPROXIMATIVE). Etend donc le biais d'indices a ces\n"
@@ -1946,6 +1991,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--elide-forced",     &Options::elide_forced },
 				{ "--card-on-select",   &Options::card_on_select },
 				{ "--adapt-to-peak",    &Options::adapt_to_peak },
+				{ "--yn-identity",      &Options::yn_identity },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -6569,6 +6615,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
 	if(opt.card_on_select)
 		cfg.enumeration.card_on_select = true;
+	cfg.enumeration.yn_identity = opt.yn_identity;
+	if(opt.yn_identity)
+		std::printf("  --yn-identity : les prompts oui/non portent (carte, effet)"
+					" au lieu\n                  d'un poids unique partage par "
+					"TOUS les oui de la partie\n");
 	cfg.assign = opt.assign;
 	cfg.assign_bias = static_cast<float>(opt.assign_bias);
 	if(opt.assign_bias > 0.0) {
@@ -6928,6 +6979,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					for(int z = 0; z < 6; ++z)
 						a.zone_rollouts[z] += r.zone_rollouts[z];
 					a.taken_steps += r.taken_steps;
+					a.yn_steps += r.yn_steps;
+					a.yn_yes += r.yn_yes;
 					for(int k = 0; k < 6; ++k)
 						a.offer_by[k] += r.offer_by[k];
 					if(r.more_n) {
@@ -7575,6 +7628,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				}
 			}
 			PrintRepeatProbe(both, nrpa.rollouts + greedy.rollouts, db,
+							 cfg.enumeration.card_on_select,
+							 cfg.enumeration.yn_identity,
 							 "phase TIRAGES");
 		}
 		// Session 6 : la borne B&B ne tourne plus en aveugle — atteintes du
@@ -8507,6 +8562,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// seconde table, un « jamais » se lirait comme un jamais du RUN.
 		if(opt.probe_repeat && fin_rollouts)
 			PrintRepeatProbe(fin_rep, fin_rollouts, db,
+							 cfg.enumeration.card_on_select,
+							 cfg.enumeration.yn_identity,
 							 "tirages ENRACINES du finisseur");
 		// Session 6 : le bilan de la borne B&B du finisseur.
 		if(opt.optimize)
