@@ -5026,6 +5026,60 @@ copie de `steps` par amélioration, et 126 lignes ré-adaptées à chaque itéra
 du dossier (qui demande plus de deux tirages et le passage sur l'étalon B — le seul cas où une
 solution existe). `tools/s17_ab_B.ps1` est écrit et n'a pas été lancé.
 
+#### (g) LE PREMIER PLAN RÉSOLU DE L'ÉTALON A — et ce qu'il révèle : TROIS TROUS DE COUVERTURE
+
+L'opérateur a fourni `2026-08-16 13-19-12.yrpX`. Jugé avant d'en faire un étalon, comme la règle
+l'exige : **rejeu fidèle, 283/283 réponses, 0 `MSG_RETRY`, 1 tour**. Board final : **deux Lunalight
+Liger Dancer** en MZONE, plus Tiger / Tenki / Masquerade / Wolf en S/T ; 17 cartes brûlées.
+Invocations : 1 normale, 17 spéciales, dont **2× Leo Dancer**, **2× Liger Dancer**, 1× Perfume
+Dancer, 1× Kaleido Chick, 1× Tiger, 1× Wolf, 1× Masquerade, 1× Gold Leo.
+
+C'est ce qui manquait à tout le dossier : l'étalon A n'avait **aucun** plan résolu, d'où trois
+conséquences en cascade — pas de corpus d'adaptation, pas de landmarks apprenables, et un graphe de
+recettes qui ne connaissait de Liger et de Leo que **l'amorce par le texte** (c'est la « matière
+absente » de (e)).
+
+*Réserve dite d'avance* : la ligne joue l'**ancienne** main (3 Tenki) et fait **2 Liger sur les 3
+exigés, sans Bagooska**. Ce n'est donc pas une solution de la cible : c'est un **corpus**.
+
+**LE FAIT QUI CHANGE LA PRIORITÉ DE TOUT LE PROJET.** Le contrôle de couverture de l'énumérateur,
+sur cette ligne :
+
+| prompt | décisions | couvertes | taux |
+|---|---|---|---|
+| SELECT_IDLECMD | 31 | 30 | **97 %** |
+| SELECT_CARD | 33 | 31 | **94 %** |
+| SELECT_CHAIN / PLACE / POSITION / UNSELECT / EFFECTYN / YESNO / OPTION | 219 | 219 | 100 % |
+
+```
+SELECT_IDLECMD #0  joueur 0 : aucune des 4 propositions n'atteint l'etat enregistre
+SELECT_CARD    #21 joueur 0 : aucune des 9 propositions n'atteint l'etat enregistre
+SELECT_CARD    #75 joueur 0 : aucune des 2 propositions n'atteint l'etat enregistre
+```
+
+**Trois décisions sur 284 sont hors de l'espace d'actions du solveur — dont la TOUTE PREMIÈRE.**
+Une ligne qui traverse un point non couvert est inatteignable *à zéro écart*, donc inatteignable
+tout court : ni le budget, ni la politique, ni l'heuristique n'y peuvent quoi que ce soit. Cela
+domine tous les résultats de la session : on optimisait la recherche dans un espace **qui ne
+contient pas la solution**.
+
+*Deux attributions déjà écartées par la mesure* :
+
+- **ce n'est pas le plafond de sous-ensembles** — `--max-subsets 24` et `256` donnent exactement les
+  mêmes trois trous ;
+- **ce n'est pas la main transplantée** — le contrôle rend le même résultat sur le duel **natif** du
+  replay (`--start <plan>`), donc le coup manquant n'est pas un coup qui jouerait une carte absente.
+
+*Réserve d'instrument, à lever en premier* : « aucune proposition n'atteint l'état enregistré »
+confond deux causes — **(a)** le coup n'est pas énuméré, **(b)** il l'est mais l'état atteint diffère
+du digest enregistré. Le message ne les sépare pas, et le même run signale par ailleurs que le
+digest **sous-hache** (« décision #181 confondue avec #179 »). **Séparer (a) de (b), et nommer le
+coup manqué, est le premier chantier de la session 18** — avant toute nouvelle heuristique.
+
+*Transplantation mesurée malgré tout* (le plan comme référence, la **nouvelle** main comme départ,
+90 s) : **4 des 6 cartes** du board réunies, 5 monstres posés, et Leo/Liger toujours à
+`IDLECMD = POSITION = 0`. Cohérent avec ce qui précède : la ligne exacte n'est pas atteignable.
+
 **Leo et Liger restent à ZÉRO.** C'est le résultat le plus important de la session après le
 diagnostic, et il faut le dire tel quel : **`--hindsight` monte l'arité mais ne franchit pas la
 discontinuité du matériau NOMMÉ.** La loi de §9.23 se lit désormais en deux régimes distincts, et

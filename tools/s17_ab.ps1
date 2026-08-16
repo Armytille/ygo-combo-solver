@@ -28,6 +28,9 @@ param([int]$Ms = 90000,
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 $repo = "D:\ProjectIgnis\repositories"
 $gabarit = "D:\ProjectIgnis\replay2video\combosolver\gabarits\etalon_a_lunalight.yrp"
+# Le premier plan RESOLU de l'etalon A (operateur, session 17). Voir le bloc
+# `rec` / `adapt` plus bas pour ce qu'il est et ce qu'il n'est pas.
+$planA = "D:\ProjectIgnis\replay\2026-08-16 13-19-12.yrpX"
 
 # Drapeaux propres a chaque bras. Le temoin en a ZERO.
 $flags = @{
@@ -48,6 +51,24 @@ $flags = @{
     # COMBINAISON, declaree comme telle : deux facteurs a la fois, donc elle ne
     # s'interprete QUE contre les deux bras simples, jamais contre le temoin.
     hind_recw = @('--hindsight', '0.5', '--recipe-w', '0.1')
+    # --- LE PREMIER PLAN RESOLU DE L'ETALON A (fourni par l'operateur) --------
+    # `2026-08-16 13-19-12.yrpX` : rejeu FIDELE (283/283, 0 MSG_RETRY), pose DEUX
+    # Liger Dancer et invoque DEUX Leo Dancer. C'est la matiere qui manquait a
+    # tout le dossier : jusqu'ici le graphe de recettes n'avait de Liger et de Leo
+    # que l'AMORCE PAR LE TEXTE, et --backward etait inerte faute de pouvoir
+    # decomposer (9.24 (e)). RESERVE : la ligne joue l'ANCIENNE main (3 Tenki) et
+    # ne fait que 2 Liger sur les 3 exiges, sans Bagooska — ce n'est donc pas une
+    # solution de la cible, c'est un CORPUS.
+    #
+    # DEUX BRAS POUR UN SEUL FACTEUR CHACUN, et c'est `--adapt-passes 0` qui le
+    # permet (il coupe l'adaptation SANS toucher au releve) :
+    #   `rec`   : le graphe recoit les recettes OBSERVEES, la politique n'est pas
+    #             touchee. Isole ce que CONNAITRE la recette apporte.
+    #   `adapt` : releve + adaptation de politique, le mode normal.
+    rec       = @('--adapt', $planA, '--adapt-passes', '0')
+    adapt     = @('--adapt', $planA)
+    # Declaree comme combinaison : ne s'interprete que contre `adapt` et `hind`.
+    adapt_hind = @('--adapt', $planA, '--hindsight', '0.5')
 }
 
 foreach ($b in $Bras) {

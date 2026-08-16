@@ -82,7 +82,56 @@ puis plate. Coût assumé : −18 % de débit.
   rares. Le mécanisme ne prune rien (règle 2) mais il n'est pas neutre en
   probabilité, et c'est ce qui le condamne ici.
 
-## LA MISSION — TROIS CHANTIERS, DANS CET ORDRE
+### LE FAIT QUI DOMINE TOUT LE RESTE : TROIS TROUS DE COUVERTURE
+
+L'opérateur a fourni **le premier plan résolu de l'étalon A** :
+`D:\ProjectIgnis\replay\2026-08-16 13-19-12.yrpX`. Jugé avant usage : **rejeu
+fidèle, 283/283, 0 `MSG_RETRY`**, board = **2 Liger Dancer**, et **2× Leo Dancer
+invoqués** — les deux cartes que le solveur n'a jamais rendues invocables.
+*Réserve* : ancienne main (3 Tenki), 2 Liger sur 3, sans Bagooska. **C'est un
+corpus, pas une solution de la cible.**
+
+Le contrôle de couverture sur cette ligne :
+
+```
+SELECT_IDLECMD  31 décisions, 30 couvertes (97 %)
+SELECT_CARD     33 décisions, 31 couvertes (94 %)
+  SELECT_IDLECMD #0  : aucune des 4 propositions n'atteint l'etat enregistre
+  SELECT_CARD    #21 : aucune des 9 propositions n'atteint l'etat enregistre
+  SELECT_CARD    #75 : aucune des 2 propositions n'atteint l'etat enregistre
+```
+
+**Trois décisions sur 284 sont hors de l'espace d'actions du solveur, dont la
+TOUTE PREMIÈRE.** Une ligne qui traverse un point non couvert est inatteignable
+à zéro écart, donc inatteignable tout court : ni le budget, ni la politique, ni
+l'heuristique n'y peuvent rien. **Toute la session 17 optimisait la recherche
+dans un espace qui ne contient pas la solution.**
+
+Deux attributions **déjà écartées par la mesure** — ne pas les refaire :
+- ce n'est pas `--max-subsets` (24 et 256 : trous identiques) ;
+- ce n'est pas la main transplantée (même résultat sur le duel **natif**,
+  `--start <plan>`), donc le coup manquant ne joue pas une carte absente.
+
+## LA MISSION — QUATRE CHANTIERS, DANS CET ORDRE
+
+### 0. RÉPARER LA COUVERTURE DE L'ÉNUMÉRATEUR (avant tout le reste)
+
+**L'instrument d'abord**, et il manque : « aucune proposition n'atteint l'état
+enregistré » confond **(a)** le coup n'est pas énuméré et **(b)** il l'est mais
+l'état atteint diffère du digest — et le même run signale que le digest
+**sous-hache** (« décision #181 confondue avec #179 »). Séparer (a) de (b) **et
+nommer le coup manqué** (décoder la réponse enregistrée en label lisible :
+groupe idle, carte engagée, indices du sous-ensemble) est le préalable.
+
+Puis réparer. Pistes par ordre de vraisemblance, aucune vérifiée :
+`dedup_by_code` sur `MSG_SELECT_IDLECMD` (deux exemplaires de même code dans des
+états différents confondus) ; le décodage des `strides[5]` du prompt idle ; un
+sous-ensemble de `SELECT_CARD` que `ForEachSubset` n'émet pas pour une raison
+autre que le plafond.
+
+*Juge* : les trois trous se referment, `SELECT_IDLECMD` et `SELECT_CARD` à 100 %.
+Puis **relancer la transplantation** (`tools/s17_transplant.ps1`) : elle donne
+4 des 6 cartes aujourd'hui.
 
 ### 1. FINIR LA MESURE DE `--hindsight` (obligatoire, court)
 
@@ -246,8 +295,11 @@ Antérieurs : `s16_sonde.ps1`, `s16_ab.ps1`, `s16_lecture.ps1`, `s15_ab.ps1`,
 
 ## Définition de « terminé »
 
-(a) `--hindsight` **démontré ou réfuté** sur plusieurs graines ET sur l'étalon B.
-(b) Un mécanisme qui fait passer la colonne POSITION de **Leo Dancer** de 0 à non
+(a) **Les trois trous de couverture attribués** (avec l'instrument qui sépare
+« non énuméré » de « état différent ») et refermés — ou la démonstration écrite
+de ce qui les cause.
+(b) `--hindsight` **démontré ou réfuté** sur plusieurs graines ET sur l'étalon B.
+(c) Un mécanisme qui fait passer la colonne POSITION de **Leo Dancer** de 0 à non
 nul — ou la démonstration écrite qu'aucune des deux voies du chantier 2 ne le fait.
-(c) Un **troisième deck** au dossier, jugé par l'outil.
-(d) §9.25 documenté, ce prompt régénéré.
+(d) Un **troisième deck** au dossier, jugé par l'outil.
+(e) §9.25 documenté, ce prompt régénéré.
