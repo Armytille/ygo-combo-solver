@@ -5394,6 +5394,53 @@ successives ont chacune déplacé le diagnostic d'un cran ; la quatrième doit m
 *Réserve* : une graine, 90 s. Le ×27 dépasse largement le bruit connu, mais `--assign-bias` reste à
 confirmer sur plusieurs graines et sur l'étalon B.
 
+#### (o) LE SECOND DECK RÉFUTE `--assign-bias` — la généralité mesurée, et négative
+
+Recadrage de l'opérateur : « il est important de ne pas fine-tuner le solveur pour répondre au cas
+Lunalight, il doit être générique et fonctionner quel que soit le deck. »
+
+*Audit de généricité du code écrit cette session, avant toute mesure* : `--assign-bias` tire sa liste
+du **graphe de recettes** (recettes observées + amorce par le texte + exigences cardinales résolues
+en balayant le deck) — **aucun nom de carte compilé** ; `--hindsight` filtre par **type**
+(`TYPE_FUSION|SYNCHRO|XYZ|LINK`), pas par liste ; `--elide-forced` est purement structurel. Sur le
+papier, les trois sont génériques. **Le papier ne suffit pas.**
+
+Étalon B (deck **Synchron**, Synchro et handrip — rien à voir avec Fusion/Lunalight), 90 s, graine
+888 :
+
+| bras | ≥1 | ≥2 | ≥3 | crête | approche écrite |
+|---|---|---|---|---|---|
+| témoin | **2 239** | 29 | 0 | 0/8 | **7/8** |
+| `--card-on-select` seul | **0** | 0 | 0 | 0/8 | **3/8** |
+| `--assign-bias 3` seul | **0** | 0 | 0 | 0/8 | **3/8** |
+| `--elide-forced --hindsight 0.5` | 1 594 | **53** | 0 | 0/8 | 7/8 |
+| tout | 641 | 49 | **1** | **3/8** | 7/8 |
+| tout, après découplage | 964 | **59** | 0 | 0/8 | 7/8 |
+
+**`--assign-bias` est RÉFUTÉ sur le second deck** : seul, il fait tomber les résolutions de 2 239 à
+**zéro** et l'approche écrite de 7/8 à 3/8. Il gagnait ×27 sur Lunalight ; il détruit Synchron.
+**Le deuxième deck a suffi — le troisième n'était pas nécessaire pour réfuter la généralité.**
+
+*Piste suivie et ABANDONNÉE, à ne pas refaire* : l'hypothèse était que `card_on_select` étend le
+biais d'indices (`--resolve` Omega/Trishula) aux prompts de sélection, où `Choice::card` n'est que le
+premier code d'un sous-ensemble. Un drapeau `Choice::card_lossy` a été ajouté et `hinted` le rejette
+désormais — c'est **juste en soi et conservé** (appliquer un ordre de l'opérateur à une identité
+approximative est faux), mais **cela ne corrige rien** : `--card-on-select` seul rend toujours 0,
+trois runs de suite. Le couplage est ailleurs et **reste non identifié**.
+
+*Bug attrapé au passage, et il vaut d'être écrit* : `ChoiceList::Emit()` réutilise ses éléments, et
+`card_lossy` n'y était pas remis à zéro — le drapeau fuitait d'un prompt à l'autre et coupait le
+biais d'indices **partout** (641 → 0). **Tout champ ajouté à `Choice` doit être remis à zéro dans
+`Emit()`**, sous peine d'un effondrement silencieux.
+
+**Ce qui SURVIT au changement de deck** : `--elide-forced --hindsight 0.5` monte `≥2` sur les deux
+étalons (29 → 53 sur B, comme il monte l'arité sur A) et ne coûte ni l'approche écrite (7/8) ni le
+débit. C'est le seul couple de la session dont le comportement soit **cohérent sur deux decks**.
+
+**Statut, sans détour : `--assign-bias` est du réglage local, pas un mécanisme.** Il reste opt-in et
+éteint. Le rendre générique demanderait d'abord d'identifier pourquoi `card_on_select` détruit un cas
+où il ne devrait rien changer — et c'est un chantier d'attribution, pas de mécanisme.
+
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 
 | bras | tirages | Perfume | Sabre | coupures de tour |

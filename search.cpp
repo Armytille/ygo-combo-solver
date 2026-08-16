@@ -3024,7 +3024,13 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				bool known = plan_index.count(key) != 0 && !choices[i].phase;
 				// Indice de domaine : ce coup engage une carte designee par
 				// --hint, il part avec une prime d'echantillonnage.
-				bool hinted = choices[i].card && !cfg.hint_cards.empty() &&
+				// LE BIAIS D'INDICES N'AGIT PAS SUR UNE IDENTITE APPROXIMATIVE.
+				// card_lossy marque les prompts de selection, ou card est le
+				// premier code d'un sous-ensemble et non la carte engagee. Y
+				// appliquer --hint/--resolve a fait tomber les resolutions de
+				// l'etalon B de 2 239 a ZERO (mesure, bras --card-on-select).
+				bool hinted = choices[i].card && !choices[i].card_lossy &&
+							  !cfg.hint_cards.empty() &&
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();

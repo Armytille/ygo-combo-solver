@@ -37,6 +37,20 @@ struct Choice {
 	// positionner) — 0 si le choix n'en engage aucune. Support des indices de
 	// domaine (--hint) : "cette carte-la, essaie-la plus souvent".
 	uint32_t card = 0;
+	// L'IDENTITE CI-DESSUS EST APPROXIMATIVE (session 17). Vraie seulement sur
+	// les prompts de SELECTION sous `card_on_select` : un sous-ensemble de k > 1
+	// cartes n'a pas d'identite, et l'on retient arbitrairement son premier code.
+	//
+	// POURQUOI CE DRAPEAU EXISTE, et il a ete paye : le biais d'INDICES
+	// (`--hint`, `--resolve`) lit `card`. L'allumer sur les prompts de selection
+	// etendait donc un ordre de l'operateur — « cette carte-la, essaie-la plus
+	// souvent » — a une identite qui n'en est pas une. Mesure sur l'etalon B
+	// (deck Synchron, `--resolve` Omega et Trishula) : les tirages atteignant au
+	// moins une resolution passent de 2 239 a ZERO. Le biais d'ASSIGNATION, lui,
+	// s'en accommode : il ne designe pas une carte a jouer mais un ROLE
+	// (materiau), et se tromper de representant dans un sous-ensemble coute une
+	// preference, pas une ligne.
+	bool card_lossy = false;
 	// Changement de phase ("-> Battle Phase", "-> End Phase", "-> Main 2").
 	// Porte par un drapeau et non par le label : les chemins chauds n'ont pas
 	// de label, et le biais GNRPA doit continuer a exclure ces coups (finir le
@@ -60,6 +74,12 @@ public:
 		c.edge = 0;
 		c.plan_key = 0;
 		c.card = 0;
+		// SANS CETTE REMISE A ZERO, un Choice reutilise garde le drapeau d'un
+		// prompt precedent : le biais d'indices se coupe alors PARTOUT et le cas
+		// s'effondre en silence (mesure : etalon B, 641 -> 0). Le pool
+		// `ChoiceList` reutilise ses elements — tout champ ajoute a `Choice` doit
+		// etre remis a zero ici, sous peine de fuiter d'une decision a l'autre.
+		c.card_lossy = false;
 		c.phase = false;
 		return c;
 	}

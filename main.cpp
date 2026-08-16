@@ -1293,6 +1293,11 @@ struct Options {
 	// que l'attribution de la cle designe : la majorite des noeuds ne sont pas
 	// des points de decision. Le finisseur le fait deja ; l'exhaustif, non.
 	bool elide_forced = false;
+	// ISOLE UN FACTEUR : --assign-bias allume card_on_select, ce qui etend AUSSI
+	// le biais d'indices (--hint, --resolve) aux prompts de SELECTION. Sur un cas
+	// qui a des --resolve (l'etalon B), l'A/B porterait donc sur DEUX facteurs.
+	// Ce drapeau permet de mesurer le second tout seul.
+	bool card_on_select = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -1928,6 +1933,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--backward",         &Options::backward },
 				{ "--canonical-digest", &Options::canonical_digest },
 				{ "--elide-forced",     &Options::elide_forced },
+				{ "--card-on-select",   &Options::card_on_select },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -6581,6 +6587,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// Les chantiers 1, 3 et 4 lisent tous le graphe de recettes : sans lui ils
 	// sont vivants et inertes. L'implication est appliquee PLUS HAUT (avec celle
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
+	if(opt.card_on_select)
+		cfg.enumeration.card_on_select = true;
 	cfg.assign = opt.assign;
 	cfg.assign_bias = static_cast<float>(opt.assign_bias);
 	if(opt.assign_bias > 0.0) {
