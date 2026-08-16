@@ -6405,3 +6405,151 @@ et `--adapt-to-peak` sont mesurés bons sur l'étalon A et restent opt-in. Il le
 **en proportion sur N runs**, que la bimodalité du juge (§9.25 (b)) impose désormais. C'est
 mécanique, et c'est le premier travail de la session 19 — après quoi ils deviennent le défaut et le
 solveur nu en bénéficie enfin.
+
+---
+
+### 9.28 Session 19 : LE HARNAIS D'OPÉRATEURS — la table est vérifiée AVANT qu'on bâtisse dessus
+
+Mission : lire les cartes au lieu de les observer, et **ne pas écrire le planificateur avant que le
+harnais ait parlé**. Trois sessions ont bâti sur un graphe dont personne n'avait vérifié qu'il
+décrivait le jeu — recettes (§9.16), landmarks (§9.23 (g)), `--backward` (§9.24 (e)), tous nourris
+par l'**observation** au lieu de la **déclaration**. La quatrième commence par cette vérification,
+et elle coûte un run.
+
+Santé identique à chaque étape (273 digests, 210/273, 209 candidates, 16 replays, 0 `MSG_RETRY`).
+
+#### (a) CE QUE LE HARNAIS EXTRAIT, ET POURQUOI C'EST GÉNÉRIQUE
+
+`--operators` est un **instrument** : il n'entre dans aucun coût, ne change aucune recherche.
+Analyse statique du Lua, ligne à ligne, sans une seule carte nommée dans le code :
+
+| ce qui est lu | d'où | exemple rendu sur l'étalon A |
+|---|---|---|
+| constantes du jeu | `constant.lua`, `archetype_setcode_constants.lua` | **1 758** valeurs |
+| préconditions | `SetRange`, `SetCountLimit` | `LOCATION_SZONE`, `1/tour par NOM` |
+| produit | `Duel.SetOperationInfo(0, CAT, …, LOC)` | `CATEGORY_TOGRAVE @ LOCATION_DECK` |
+| **état accordé** | le `SetCode` **`EFFECT_*`** des effets créés en résolution | `EFFECT_ADD_CODE` |
+| recettes | `Fusion.AddProcMix*` — des **codes**, pas une phrase anglaise | `24550676 ×1 + 0xdf ×3` |
+| opérateurs de **procédure** | `proc_*.lua`, un niveau d'indirection | `Pendulum.AddProcedure` |
+
+Sur les 30 cartes du deck : **72 opérateurs, 22 états accordés, 54 déclarations de produit**.
+
+**Le recensement des états accordés rend, par un balayage de constantes :**
+
+```
+Lunalight Kaleido Chick  ->  EFFECT_ADD_CODE
+Lunalight Masquerade     ->  EFFECT_EXTRA_FUSION_MATERIAL
+```
+
+c'est-à-dire **exactement** les deux goulots mesurés en §9.27 (c) (0,14 % et 0 %). Le recensement
+des `CATEGORY_*` ne les aurait pas trouvés — il rend `CATEGORY_FUSION_SUMMON` ×1 (Wolf) et pas un
+mot des deux pivots. **Il faut deux vocabulaires**, et le dossier n'en lisait aucun.
+
+*Ce que la table N'EST PAS, et c'est écrit à l'endroit du code* : elle est **déclarative et
+optimiste**. Conditions et coûts sont des fermetures ; leur `chk == 0` n'est pas évalué. Elle dit ce
+qu'une carte déclare pouvoir faire, jamais ce qu'elle peut faire **à cet instant** — le core reste
+seul juge de la légalité.
+
+#### (b) LE VERDICT : LA TABLE EXPLIQUE LE PLAN RÉSOLU
+
+Confrontation au plan `2026-08-16 13-19-12.yrpX` (283 décisions, 0 `MSG_RETRY`, 2 Liger). Chaque
+réponse enregistrée est décodée ; toute activation est appariée à un opérateur déclaré, puis jugée
+sous les préconditions extraites.
+
+| | |
+|---|---|
+| activations relevées | **37** |
+| appariées par **description** (`aux.Stringid` : un opérateur et un seul) | 20 |
+| appariées par **chaîne système déclarée** (une procédure pose `SetDescription(1160)`) | 6 |
+| appariées par **carte** (description fabriquée par le core), dont 7 ambiguës | 11 |
+| **NON APPARIÉES** | **0** |
+| précondition de **zone** | **18 / 18 tenues** |
+| précondition de **ressource** | **10 / 10 tenues** |
+
+**La table explique le plan.** Le chantier suivant a le droit d'exister.
+
+*Ce que la colonne « appariées par CARTE » mesure en creux, et ce n'est pas un défaut d'extraction* :
+`processor.cpp:743` émet la description **221** et `:443` la description **0** pour « activer l'effet
+déclencheur de cette carte ? ». Le message porte alors la **carte** et pas l'**effet** — c'est le
+protocole qui ne transporte pas l'information. Onze activations sur trente-sept ne sont donc
+identifiables qu'au grain de la carte, et l'identité `(code, description)` que la s18ter a donnée
+aux prompts **ne les sépare pas**. Le harnais le compte au lieu de trancher.
+
+#### (c) LE HARNAIS A TROUVÉ DEUX DÉFAUTS, ET TOUS DEUX DANS DU CODE ÉCRIT LA VEILLE
+
+**1. `aux.Stringid(id, n)` ne fait PAS `id * 16 + n`.** `utility.lua:834` fait
+`(n & 0xfffff) | code << 20`. Le premier passage du harnais rendait **0 appariée sur 37** — un
+résultat qui se lit comme un échec d'**extraction** alors que c'est un échec d'**hypothèse**.
+
+La conséquence est dans le code livré : §9.27 (b) récupérait le code d'un `MSG_SELECT_YESNO` par
+`desc >> 4`, ne trouvait aucune carte, et laissait **`Choice::card` à ZÉRO**. Le prompt gardait une
+identité (l'arête porte `desc`) mais perdait sa **carte** — donc le biais d'indices et les sondes
+d'offre étaient aveugles au **pivot du combo**, en silence, exactement le défaut que `--yn-identity`
+prétendait corriger.
+
+Corrigé aux deux endroits, et **le décalage est LU dans `utility.lua`, jamais supposé** : les deux
+formats sont essayés, le large d'abord, et un candidat n'est retenu que si la base le connaît — un
+décalage faux fabriquerait sinon un code plausible, c'est-à-dire une identité fausse créditée à une
+autre carte.
+
+**2. Une précondition ne se juge pas sur un opérateur choisi arbitrairement.** Deuxième passage :
+« ressource 1/tour dépassée » sur `Lunalight Gold Leo`. Faux. Gold Leo a trois déclencheurs ; `e1`
+et `e2` partagent `SetCountLimit(1, id)`, `e3` porte `SetCountLimit(1, {id, 1})` — **un autre
+compteur**. La description venant du core, le harnais avait pris le premier candidat et compté ses
+emplois. Il **compte désormais ce qui reste ambigu** au lieu de trancher, et ne juge une
+précondition que sur un opérateur réellement déterminé.
+
+*Vérifié dans le core et non supposé* : `field::get_count_map` (`field.cpp:1452`) indexe par
+`code << 32 | hopt_index << 16 | flag << 8 | playerid`. `SetCountLimit(1, id)` est donc bien « une
+fois par tour et par **NOM** », et deux effets d'une même carte partagent le compteur **sauf** s'ils
+portent des index différents.
+
+*Un troisième écart, corrigé de la même façon* : les opérateurs déclarés par une **procédure**
+n'existent nulle part dans le script de la carte. `Pendulum.AddProcedure` enregistre l'activation
+« poser l'échelle depuis la MAIN » (`proc_pendulum.lua:27`) ; `Polymerization` ne déclare rien
+d'autre que `Fusion.RegisterSummonEff(c)`, dont l'effet est créé **deux niveaux plus loin**. Sans
+cette lecture, le harnais comptait en échec des activations parfaitement déclarées — ailleurs. Un
+niveau d'indirection est suivi, et pas plus : au-delà, une lecture deviendrait une interprétation.
+
+#### (d) CHANTIER 1 — LE TYPE DE NŒUD MANQUANT, ET `--backward` RE-JUGÉ
+
+Le graphe rangeait `Lunalight Leo Dancer` comme un **produit à fabriquer**. Son matériau nommé
+(`97165977`) étant absent du deck, la route était morte et la décomposition travaillait dans le
+vide. Leo est une **propriété acquérable** : `EFFECT_ADD_CODE` la donne.
+
+`--op-recipes` pose ce nœud. Une arête d'acquisition, c'est « ce **code** s'obtient si l'**hôte** est
+dans sa zone et si une **source** portant ce code est dans la zone que l'opérateur atteint » — deux
+exigences, aucune fabrication. Les codes atteignables sont bornés par `s.listed_series`, la
+déclaration que la carte fait au moteur de l'archétype qu'elle manipule.
+
+**LE JUGE EST STRUCTUREL** — sans graine, sans budget, sans tirage : la décomposition à rebours est
+désormais **imprimée**. Le dossier ne lisait que le *nombre* de sous-produits (`snap_backward`), et
+un nombre ne dit pas si l'opérateur qu'on cherche y est.
+
+| | témoin (amorce par le texte) | **`--op-recipes`** |
+|---|---|---|
+| sous-produits | 2 — Liger, Bagooska | **3 — Leo Dancer, Liger, Bagooska** |
+| exigences | Leo @toute zone jouable · archétype `0xdf` ×3 · niveau ×2 | Leo @toute zone jouable · **Leo @EXTRA** · **KALEIDO CHICK @TERRAIN** · archétype `0xdf` ×3 · Liger @extra · niveau ×2 |
+| produits connus | 14 | 18 |
+| codes utiles | 19 | 19 |
+
+**L'opérateur de Kaleido Chick est dans la décomposition.** C'était la question posée mot pour mot
+par la mission, et la réponse est oui. `--backward` cesse d'être « un mécanisme correct sur un
+graphe amputé » : les arêtes manquantes étaient les effets, et elles sont déclarées.
+
+*Ce que la mesure ne dit PAS* : `rebours : 0,00 sous-produit fabriqué sur 3` à 4 000 tirages
+mono-worker. **Le nœud existe ; la fabrication reste à démontrer.** Et « 19 codes utiles » identiques
+dans les deux bras s'explique : le balayage cardinal ratisse déjà tous les monstres Lunalight du
+deck, Kaleido Chick comprise. Ce qui change n'est pas la liste, c'est la **structure**.
+
+*Deux gardes, écrites parce que la première version les rendait fausses* :
+
+- **acquérir son propre nom** est une boucle sur elle-même dans un graphe déjà cyclique (14 → 13
+  arêtes) ;
+- `Requirement::zone` est **un seul seau** : il ne sait pas dire « DECK ou EXTRA ». Collapser le
+  masque en aveugle (`NormalizeZone(DECK|EXTRA)` rend EXTRA) exigeait **toutes** les sources dans
+  l'extra — l'exigence devenait fausse pour quatorze sur quinze, en silence. On tranche par le
+  **deck**, qu'on a sous la main : c'est un fait, pas une convention.
+
+`--op-recipes` est un **drapeau le temps de le mesurer** (règle 2 du README) : passé sur les deux
+étalons, il devient le défaut.

@@ -1,4 +1,16 @@
-# Les drapeaux — inventaire d'audit (session 18)
+# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19)
+
+> **ÉTAT AU TERME DE LA SESSION 19 : 114 → 117.** Trois ajouts, et leur statut
+> est écrit d'avance :
+>
+> | drapeau | famille | statut |
+> |---|---|---|
+> | `--operators` | **INSTRUMENT** (§F) | n'entre dans aucun coût, ne change aucune recherche. Rien à départager : il MESURE. |
+> | `--op-recipes` | mécanisme | **drapeau le temps de le mesurer** (règle 2). Jugé POSITIF sur l'étalon A par un juge STRUCTUREL (§9.28 (d)) ; l'étalon B reste dû. |
+> | `--op-bias` | mécanisme | écrit, instrumenté (compteur de vie), **non jugé**. |
+>
+> Et `--card-on-select` / `--yn-identity` ont disparu en s18ter : l'identité est
+> inconditionnelle. Le tableau §H ci-dessous ne les mentionne plus.
 
 > **ÉTAT AU TERME DE LA SESSION 18 : 122 → 115.** Dix mécanismes réfutés ont été **retirés du
 > code** (§9.26 (d)) et trois drapeaux ajoutés (`--max-rollouts`, `--max-nodes`,
@@ -169,6 +181,7 @@ workers (`main.cpp:7074`, `7159-7162`).
 
 | drapeau | remarque |
 |---|---|
+| `--op-bias` | **écrit, instrumenté, jamais jugé** (session 19, chantier 2). Il lit `snap_operators`, que seul l'instantané du graphe remplit et que seul `--op-recipes` alimente : les deux façons dont il serait INERTE sont testées et **dites avant le run**. Sa vie est imprimée (désignées / proposées / prises). |
 | `--finisher-options` | **écrit, jamais jugé** — §9.24 le dit lui-même |
 | `--canonical-zones` | **jamais départagé**, et il ne doit PAS l'être en l'état : les **Zones Pendule** sont des séquences particulières de `LOCATION_SZONE`, que la canonicalisation confond avec une pose de magie ordinaire — elle **supprime donc la possibilité de poser une échelle**. Sur l'étalon A, `Lunalight Wolf` n'invoque par Fusion que depuis la Zone Pendule (`e2:SetRange(LOCATION_PZONE)`) : le drapeau referme silencieusement deux des trois portes du combo. La règle correcte est « une zone par **classe d'équivalence que les règles respectent** » — Zone Pendule et zone pointée par un Lien sont leurs propres classes. |
 | `--hindsight-k` | réglage de `--hindsight`, **zéro mention** |

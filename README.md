@@ -175,6 +175,39 @@ combosolver.exe ... --landmarks corpus/ --landmark-w 60
 # (« gradient tronque au pic : N pas retires ») : a zero il est INERTE.
 combosolver.exe ... --adapt-to-peak
 
+# LES OPERATEURS DECLARES (session 19) : lire les cartes au lieu de les
+# observer. `--operators` extrait des SCRIPTS LUA du deck la table des
+# operateurs — preconditions (SetRange, SetCountLimit), produit
+# (SetOperationInfo : categorie ET zone), ETAT ACCORDE (EFFECT_ADD_CODE,
+# EFFECT_EXTRA_FUSION_MATERIAL...), recettes en CODES (Fusion.AddProcMix*),
+# et jusqu'aux operateurs declares par une PROCEDURE (proc_*.lua) —, l'imprime,
+# puis la CONFRONTE au plan rejoue. C'est un HARNAIS, pas un mecanisme : il ne
+# change aucune recherche.
+combosolver.exe plan_resolu.yrpX --scriptdir <scripts> --operators
+# Il faut DEUX vocabulaires, et le dossier n'en lisait aucun :
+#   CATEGORY_* : ce que l'effet fait aux CARTES  (envoyer, chercher)
+#   EFFECT_*   : quel ETAT il accorde            (renommer, autoriser un
+#                                                 materiau du cimetiere)
+# Le combo repose entierement sur le second. Un balayage de constantes rend
+#   Lunalight Kaleido Chick -> EFFECT_ADD_CODE
+#   Lunalight Masquerade    -> EFFECT_EXTRA_FUSION_MATERIAL
+# c'est-a-dire EXACTEMENT les deux goulots mesures (0,14 % et 0 %), sans qu'une
+# seule carte soit nommee dans le code. Le recensement des CATEGORY_* ne les
+# aurait pas trouves.
+# VERDICT sur le plan resolu (283 decisions, 0 MSG_RETRY) : 37 activations,
+# 0 non appariee, 18/18 preconditions de zone, 10/10 de ressource.
+# La table est DECLARATIVE et OPTIMISTE : conditions et couts sont des
+# fermetures, non evaluees. Elle dit ce qu'une carte declare pouvoir faire,
+# jamais ce qu'elle peut faire A CET INSTANT.
+
+# `--op-recipes` amorce le graphe de recettes depuis cette table, et y pose le
+# TYPE DE NŒUD QUI MANQUAIT : « ce CODE peut etre ACQUIS ». Le graphe rangeait
+# `Lunalight Leo Dancer` comme un PRODUIT A FABRIQUER, alors que son materiau
+# nomme est absent du deck — d'ou l'echec de `--backward` (« mecanisme correct,
+# MATIERE absente »). La decomposition a rebours est desormais IMPRIMEE, et
+# elle contient enfin l'operateur de Kaleido Chick.
+combosolver.exe ... --recipes 0 --backward --op-recipes
+
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--tt-mb`, `--finisher`, `--archive-k`, `--max-rollouts`,
@@ -184,8 +217,8 @@ combosolver.exe ... --adapt-to-peak
 `--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--max-subsets`,
 `--recipes`, `--no-seed-recipes`, `--no-seed-quant`, `--derive-summon-min`,
 `--options`, `--options-ctx`, `--options-online`, `--finisher-options`,
-`--qhat`, `--canonical-zones`, `--card-on-select`, `--assign`,
-`--assign-bias`, `--backward`, `--watch`,
+`--qhat`, `--canonical-zones`, `--assign`,
+`--assign-bias`, `--backward`, `--watch`, `--operators`, `--op-recipes`,
 `--probe-repeat`, `--landmarks`, `--landmark-w`,
 `--landmark-h`, `--profile`, `--verbose`).
 Dix mécanismes réfutés ont été **retirés du code** en session 18 — `--mcps`,

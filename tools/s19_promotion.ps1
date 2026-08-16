@@ -47,15 +47,23 @@ foreach ($b in @('nu', 'pile')) {
 }
 
 # --- LECTURE EN PROPORTION ---------------------------------------------------
+#
+# LE JUGE EST `>=1` ET `>=2`, PAS « une solution ecrite ». Mesure : AUCUN des
+# vingt runs n'ecrit de solution a 60 s — ce juge-la est constant, donc muet. Le
+# compteur de resolutions, lui, est bimodal exactement comme 9.25 (b) l'annonce
+# (cinq zeros et cinq valeurs a quatre chiffres dans le bras nu), et c'est la
+# PROPORTION de runs non nuls qui porte l'information.
 foreach ($b in @('nu', 'pile')) {
-    $conv = 0; $tot = 0
+    $c1 = 0; $c2 = 0; $tot = 0
     for ($i = 0; $i -lt $N; ++$i) {
         $seed = 1000 + $i
         $f = "${Prefixe}_${b}_$seed.log"
         if (-not (Test-Path $f)) { continue }
         ++$tot
-        $m = Select-String -Path $f -Pattern '(\d+) replay\(s\) ecrits'
-        if ($m -and [int]$m.Matches[0].Groups[1].Value -gt 0) { ++$conv }
+        $m = Select-String -Path $f -Pattern 'resolutions atteintes par tirage : >=1 (\d+)\s+>=2 (\d+)'
+        if (-not $m) { continue }
+        if ([int]$m.Matches[0].Groups[1].Value -gt 0) { ++$c1 }
+        if ([int]$m.Matches[0].Groups[2].Value -gt 0) { ++$c2 }
     }
-    Write-Output "BRAS $b : $conv / $tot run(s) ecrivent au moins une solution"
+    Write-Output "BRAS $b : >=1 dans $c1 / $tot run(s)  |  >=2 dans $c2 / $tot run(s)"
 }
