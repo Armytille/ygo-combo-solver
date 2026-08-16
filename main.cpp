@@ -3503,7 +3503,23 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 	// celui qu'a designe le joueur. Le seul critere qui a du sens est l'ETAT
 	// ATTEINT : une reponse enumeree couvre la reponse enregistree si elle mene
 	// exactement au meme etat. L'arene rend ce test abordable.
+	// Rend l'empreinte EXACTE de l'etat, et au passage le hachage du BOARD au
+	// sens du critere d'equivalence de la recherche. Les deux, parce qu'ils
+	// separent trois causes que le message d'ecart confondait (session 17) :
+	//   want == 0            : la reponse ENREGISTREE est rejetee ici — defaut
+	//                          du harnais, pas de l'enumerateur ;
+	//   board egal, etat non : une proposition realise la MEME INTENTION mais
+	//                          `Fingerprint` les separe (la deduplication par
+	//                          code choisit un representant que le joueur n'a
+	//                          pas designe, et deux exemplaires identiques
+	//                          n'occupent pas la meme sequence). C'est un ECART
+	//                          DE REPRESENTATION, pas un trou d'espace ;
+	//   ni l'un ni l'autre   : le coup est REELLEMENT absent de l'espace.
+	// Sans cette separation, un artefact de deduplication se lit « la solution
+	// est hors d'atteinte » — la famille de piege que ce dossier catalogue.
+	uint64_t last_board = 0;
 	auto advance_one = [&](const std::vector<uint8_t>& resp) -> uint64_t {
+		last_board = 0;
 		duel.SetResponse(resp);
 		for(;;) {
 			int st = duel.Process();
@@ -3516,10 +3532,16 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 			if(st != OCG_DUEL_STATUS_CONTINUE)
 				break;
 		}
+		last_board = ComputeBoardKey(
+						 duel, static_cast<uint8_t>(opt.target_player)).hash;
 		return Fingerprint(duel);
 	};
 
-	struct Cov { int total = 0, covered = 0, empty = 0; };
+	// `by_board` : ecarts ou une proposition realise la MEME INTENTION (meme
+	// board au sens du critere d'equivalence) sans atteindre le meme etat exact.
+	// Ceux-la ne retirent RIEN de l'espace de recherche — les compter a part est
+	// ce qui separe un artefact d'un vrai trou.
+	struct Cov { int total = 0, covered = 0, empty = 0, by_board = 0; };
 	std::map<uint8_t, Cov> cov;
 	size_t ri = 0;
 	uint8_t ptype = 0;
@@ -3554,25 +3576,47 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 
 		arena.Push();
 		uint64_t want = advance_one(recorded);
+		const uint64_t want_board = last_board;
 		arena.Restore();
-		bool found = false;
+		bool found = false, same_board = false;
 		for(const auto& ch : choices) {
-			if(advance_one(ch.response) == want && want != 0) {
+			const uint64_t got = advance_one(ch.response);
+			if(got == want && want != 0) {
 				found = true;
 				arena.Restore();
 				break;
 			}
+			// MEME BOARD, etat different : l'intention est couverte, la
+			// representation ne l'est pas.
+			if(got && want && last_board == want_board)
+				same_board = true;
 			arena.Restore();
 		}
 		arena.Pop();
 
-		if(found)
+		if(found) {
 			++c.covered;
-		else if(misses.size() < 8) {
-			misses.push_back(std::string(PromptName(ptype)) + " #" +
-							 std::to_string(ri) + " joueur " + std::to_string(player) +
-							 " : aucune des " + std::to_string(choices.size()) +
-							 " propositions n'atteint l'etat enregistre");
+		} else {
+			if(same_board)
+				++c.by_board;
+			if(misses.size() < 8) {
+				std::string why;
+				if(!want)
+					why = " — LA REPONSE ENREGISTREE EST REJETEE ICI (defaut du "
+						  "harnais, pas de l'enumerateur)";
+				else if(same_board)
+					why = " — mais une proposition atteint le MEME BOARD : ecart "
+						  "de REPRESENTATION (deduplication par code), pas un "
+						  "trou d'espace";
+				else
+					why = " — et aucune n'atteint meme le meme BOARD : le coup "
+						  "est REELLEMENT absent de l'espace";
+				misses.push_back(std::string(PromptName(ptype)) + " #" +
+								 std::to_string(ri) + " joueur " +
+								 std::to_string(player) + " : aucune des " +
+								 std::to_string(choices.size()) +
+								 " propositions n'atteint l'etat enregistre" + why);
+			}
 		}
 		// Les 290 etats de la ligne sont deux a deux distincts par construction
 		// (le board change a chaque action). Si le digest en fusionne, il
@@ -3603,17 +3647,27 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 						"solutions\n", first_at, first_with);
 	}
 
-	int total = 0, covered = 0;
-	std::printf("  %-24s %8s %8s %8s\n", "type", "n", "couvert", "taux");
+	int total = 0, covered = 0, by_board = 0;
+	std::printf("  %-24s %8s %8s %8s %10s\n", "type", "n", "couvert", "taux",
+				"m.board");
 	for(const auto& [type, c] : cov) {
-		std::printf("  %-24s %8d %8d %7.0f%%%s\n", PromptName(type), c.total,
+		std::printf("  %-24s %8d %8d %7.0f%% %10d%s\n", PromptName(type), c.total,
 					c.covered, c.total ? 100.0 * c.covered / c.total : 0.0,
-					c.empty ? "   (enumeration vide)" : "");
+					c.by_board, c.empty ? "   (enumeration vide)" : "");
 		total += c.total;
 		covered += c.covered;
+		by_board += c.by_board;
 	}
-	std::printf("  %-24s %8d %8d %7.0f%%\n", "TOTAL", total, covered,
-				total ? 100.0 * covered / total : 0.0);
+	std::printf("  %-24s %8d %8d %7.0f%% %10d\n", "TOTAL", total, covered,
+				total ? 100.0 * covered / total : 0.0, by_board);
+	// LA COUVERTURE EFFECTIVE, celle qui compte pour la recherche : un ecart ou
+	// une proposition realise la meme INTENTION ne retire rien de l'espace.
+	if(by_board)
+		std::printf("  %-24s %8d %8d %7.0f%%   <-- couverture EFFECTIVE "
+					"(intentions), les %d ecart(s) « m.board » sont de "
+					"REPRESENTATION\n", "TOTAL (au board)", total,
+					covered + by_board,
+					total ? 100.0 * (covered + by_board) / total : 0.0, by_board);
 	if(!misses.empty()) {
 		std::printf("\n  premiers ecarts :\n");
 		for(const auto& s : misses)

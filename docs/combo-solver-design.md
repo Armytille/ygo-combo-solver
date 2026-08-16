@@ -5042,43 +5042,75 @@ absente » de (e)).
 *Réserve dite d'avance* : la ligne joue l'**ancienne** main (3 Tenki) et fait **2 Liger sur les 3
 exigés, sans Bagooska**. Ce n'est donc pas une solution de la cible : c'est un **corpus**.
 
-**LE FAIT QUI CHANGE LA PRIORITÉ DE TOUT LE PROJET.** Le contrôle de couverture de l'énumérateur,
-sur cette ligne :
-
-| prompt | décisions | couvertes | taux |
-|---|---|---|---|
-| SELECT_IDLECMD | 31 | 30 | **97 %** |
-| SELECT_CARD | 33 | 31 | **94 %** |
-| SELECT_CHAIN / PLACE / POSITION / UNSELECT / EFFECTYN / YESNO / OPTION | 219 | 219 | 100 % |
+**LE CONTRÔLE DE COUVERTURE, ET LA CORRECTION DE SON PROPRE INSTRUMENT.** Premier relevé :
 
 ```
-SELECT_IDLECMD #0  joueur 0 : aucune des 4 propositions n'atteint l'etat enregistre
-SELECT_CARD    #21 joueur 0 : aucune des 9 propositions n'atteint l'etat enregistre
-SELECT_CARD    #75 joueur 0 : aucune des 2 propositions n'atteint l'etat enregistre
+SELECT_IDLECMD  30/31 (97 %)   #0  : aucune des 4 propositions n'atteint l'etat
+SELECT_CARD     31/33 (94 %)   #21 : aucune des 9 propositions
+                               #75 : aucune des 2 propositions
 ```
 
-**Trois décisions sur 284 sont hors de l'espace d'actions du solveur — dont la TOUTE PREMIÈRE.**
-Une ligne qui traverse un point non couvert est inatteignable *à zéro écart*, donc inatteignable
-tout court : ni le budget, ni la politique, ni l'heuristique n'y peuvent quoi que ce soit. Cela
-domine tous les résultats de la session : on optimisait la recherche dans un espace **qui ne
-contient pas la solution**.
+Lu tel quel : « trois décisions sur 284 sont hors de l'espace d'actions du solveur, dont la toute
+première ». **C'était faux, et c'est l'instrument qui l'était.** Le contrôle comparait
+`Fingerprint(duel)` — l'état EXACT, séquences comprises — alors que la recherche travaille au
+**board**. Or son propre commentaire admettait déjà que « la déduplication par code choisit un
+représentant qui n'est pas forcément celui qu'a désigné le joueur » : deux exemplaires identiques
+n'occupent pas la même séquence, donc l'état exact diffère quand l'intention est la même.
 
-*Deux attributions déjà écartées par la mesure* :
+Le contrôle sépare désormais trois causes (réponse enregistrée rejetée / **même board, état
+différent** / coup réellement absent), et rend :
 
-- **ce n'est pas le plafond de sous-ensembles** — `--max-subsets 24` et `256` donnent exactement les
-  mêmes trois trous ;
-- **ce n'est pas la main transplantée** — le contrôle rend le même résultat sur le duel **natif** du
-  replay (`--start <plan>`), donc le coup manquant n'est pas un coup qui jouerait une carte absente.
+| | n | couvert | taux | m.board |
+|---|---|---|---|---|
+| TOTAL | 283 | 280 | 99 % | 3 |
+| **TOTAL (au board)** | 283 | **283** | **100 %** | — |
 
-*Réserve d'instrument, à lever en premier* : « aucune proposition n'atteint l'état enregistré »
-confond deux causes — **(a)** le coup n'est pas énuméré, **(b)** il l'est mais l'état atteint diffère
-du digest enregistré. Le message ne les sépare pas, et le même run signale par ailleurs que le
-digest **sous-hache** (« décision #181 confondue avec #179 »). **Séparer (a) de (b), et nommer le
-coup manqué, est le premier chantier de la session 18** — avant toute nouvelle heuristique.
+**L'énumérateur couvre 100 % des INTENTIONS de la ligne.** Les trois écarts sont de
+**représentation**, pas d'espace. Deux attributions ont été écartées en route et n'ont pas à être
+refaites : ce n'est pas `--max-subsets` (24 et 256 : trous identiques), ni la main transplantée (même
+résultat sur le duel **natif**, `--start <plan>`).
 
-*Transplantation mesurée malgré tout* (le plan comme référence, la **nouvelle** main comme départ,
-90 s) : **4 des 6 cartes** du board réunies, 5 monstres posés, et Leo/Liger toujours à
-`IDLECMD = POSITION = 0`. Cohérent avec ce qui précède : la ligne exacte n'est pas atteignable.
+#### (h) LE VRAI DÉFAUT, LUI, ÉTAIT AILLEURS : `MSG_SELECT_BATTLECMD` MAL DÉCODÉ
+
+Le même run signalait, à un écart de la transplantation :
+
+```
+!! 90 prompt(s) reduits a LA reponse par defaut (types : 10)
+   Ces branches n'ont jamais existe : un combo qui les traverse est hors d'atteinte.
+   sante : impasses 90
+```
+
+Type 10 = `MSG_SELECT_BATTLECMD`. Vérification contre le source du core
+(`deps/ocgcore/playerop.cpp:37`) : dans la liste **attaquable**, l'entrée est
+
+```
+code uint32 | controler uint8 | location uint8 | sequence uint8 | direct uint8   = 8 octets
+```
+
+`sequence` y est un **uint8**, alors qu'il est un `uint32` dans la liste *activable* du même message
+— et notre décodeur sautait 11 octets au lieu de 8. **Trois octets de décalage par monstre
+attaquable**, donc `r.Ok()` tombe dès qu'il y en a un, ce qui est le cas de tout board construit.
+L'énumération sort vide, `DefaultResponse` ne couvre pas ce message, et **la branche meurt**.
+
+**Conséquence, silencieuse depuis l'origine : toute ligne qui entre en Battle Phase était condamnée**
+— donc tout combo passant par la Main 2 était hors d'atteinte, et la mort se lisait comme une impasse
+ordinaire. C'est la différence entre les deux listes du *même* message qui a fait passer le défaut
+inaperçu (le comptage était juste dans l'autre).
+
+Corrigé. Effet mesuré, mêmes commandes et même graine : **90 prompts forcés → 0, 90 impasses → 0**,
+la Battle Phase redevient explorable. Santé identique avant et après (273 digests, 210/273, 209
+candidates, 16 replays).
+
+**Ce que le correctif ne fait PAS, et il faut le dire aussi** : Leo et Liger restent à
+`IDLECMD = POSITION = 0`, et la transplantation reste à **4 des 6 cartes** — identique à 0, 1 et
+2 écarts (602, 11 248 puis 33 078 états). Le bug était réel et il n'était pas le mur.
+
+*Ce que la transplantation apprend en creux* : **à ZÉRO écart, en ne jouant que des coups du
+répertoire de la ligne résolue, le solveur atteint déjà 4/6 en 602 états** — puis n'avance plus en
+en dépensant cinquante fois plus. Le répertoire est traité comme un ENSEMBLE de coups, pas comme une
+séquence ; avec la nouvelle main (Gold Leo directement, au lieu de Tenki → Gold Leo) les premiers
+carrefours diffèrent, et ce qui manque n'est pas dans le répertoire. **Augmenter le budget d'écarts
+au-delà de 2 est la mesure suivante, et elle n'a pas été faite.**
 
 **Leo et Liger restent à ZÉRO.** C'est le résultat le plus important de la session après le
 diagnostic, et il faut le dire tel quel : **`--hindsight` monte l'arité mais ne franchit pas la

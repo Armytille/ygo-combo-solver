@@ -91,47 +91,51 @@ invoqués** — les deux cartes que le solveur n'a jamais rendues invocables.
 *Réserve* : ancienne main (3 Tenki), 2 Liger sur 3, sans Bagooska. **C'est un
 corpus, pas une solution de la cible.**
 
-Le contrôle de couverture sur cette ligne :
+Le contrôle de couverture rend **100 % au board** (283/283) : l'énumérateur
+couvre toutes les INTENTIONS de la ligne. Les trois écarts bruts que le premier
+relevé signalait (`SELECT_IDLECMD #0`, `SELECT_CARD #21`, `#75`) sont de
+**représentation** — le contrôle comparait l'état EXACT (`Fingerprint`,
+séquences comprises) alors que la recherche travaille au board, et la
+déduplication par code choisit un autre exemplaire de la même carte. Le contrôle
+sépare désormais les trois causes et affiche une ligne « TOTAL (au board) ».
+Attributions écartées, ne pas les refaire : ni `--max-subsets` (24 et 256 :
+identiques), ni la main transplantée (même résultat sur le duel natif).
 
-```
-SELECT_IDLECMD  31 décisions, 30 couvertes (97 %)
-SELECT_CARD     33 décisions, 31 couvertes (94 %)
-  SELECT_IDLECMD #0  : aucune des 4 propositions n'atteint l'etat enregistre
-  SELECT_CARD    #21 : aucune des 9 propositions n'atteint l'etat enregistre
-  SELECT_CARD    #75 : aucune des 2 propositions n'atteint l'etat enregistre
-```
+### UN VRAI BUG TROUVÉ ET CORRIGÉ : `MSG_SELECT_BATTLECMD`
 
-**Trois décisions sur 284 sont hors de l'espace d'actions du solveur, dont la
-TOUTE PREMIÈRE.** Une ligne qui traverse un point non couvert est inatteignable
-à zéro écart, donc inatteignable tout court : ni le budget, ni la politique, ni
-l'heuristique n'y peuvent rien. **Toute la session 17 optimisait la recherche
-dans un espace qui ne contient pas la solution.**
+Dans la liste **attaquable**, `sequence` est un **uint8** (`playerop.cpp:37`),
+pas un uint32 comme dans la liste *activable* du même message. Le décodeur
+sautait 11 octets au lieu de 8 : **trois octets de décalage par monstre
+attaquable**, donc `r.Ok()` tombait dès qu'il y en avait un — c'est-à-dire sur
+tout board construit. L'énumération sortait vide, `DefaultResponse` ne couvre pas
+ce message, **la branche mourait**. Silencieusement depuis l'origine : **toute
+ligne entrant en Battle Phase était condamnée**, donc tout combo passant par la
+Main 2 était hors d'atteinte, et la mort se lisait comme une impasse ordinaire.
 
-Deux attributions **déjà écartées par la mesure** — ne pas les refaire :
-- ce n'est pas `--max-subsets` (24 et 256 : trous identiques) ;
-- ce n'est pas la main transplantée (même résultat sur le duel **natif**,
-  `--start <plan>`), donc le coup manquant ne joue pas une carte absente.
+Corrigé. Mesuré : **90 prompts forcés → 0, 90 impasses → 0**. Santé identique.
+**Mais ce n'était pas le mur** : Leo/Liger restent à `IDLECMD = POSITION = 0` et
+la transplantation reste à 4/6.
 
 ## LA MISSION — QUATRE CHANTIERS, DANS CET ORDRE
 
-### 0. RÉPARER LA COUVERTURE DE L'ÉNUMÉRATEUR (avant tout le reste)
+### 0. LE RÉPERTOIRE S'ÉPUISE À 4/6 — MONTER LE BUDGET D'ÉCARTS
 
-**L'instrument d'abord**, et il manque : « aucune proposition n'atteint l'état
-enregistré » confond **(a)** le coup n'est pas énuméré et **(b)** il l'est mais
-l'état atteint diffère du digest — et le même run signale que le digest
-**sous-hache** (« décision #181 confondue avec #179 »). Séparer (a) de (b) **et
-nommer le coup manqué** (décoder la réponse enregistrée en label lisible :
-groupe idle, carte engagée, indices du sous-ensemble) est le préalable.
+Fait mesuré et non exploité, le plus prometteur du dossier : **à ZÉRO écart, en
+ne jouant que des coups du répertoire de la ligne résolue, le solveur atteint
+déjà 4 des 6 cartes en 602 états.** Puis il n'avance plus — 4/6 encore à 1 écart
+(11 248 états) et à 2 écarts (33 078). La recherche s'arrête à 2 écarts.
 
-Puis réparer. Pistes par ordre de vraisemblance, aucune vérifiée :
-`dedup_by_code` sur `MSG_SELECT_IDLECMD` (deux exemplaires de même code dans des
-états différents confondus) ; le décodage des `strides[5]` du prompt idle ; un
-sous-ensemble de `SELECT_CARD` que `ForEachSubset` n'émet pas pour une raison
-autre que le plafond.
+Le répertoire est traité comme un ENSEMBLE de coups, pas comme une séquence.
+Avec la nouvelle main (Gold Leo directement au lieu de Tenki → Gold Leo), les
+premiers carrefours diffèrent et ce qui manque n'est pas dans le répertoire.
+**Remarque de l'opérateur, et elle est juste : la nouvelle main EST le résultat
+de la première étape de l'ancienne ligne, en plus fort — la suite du combo est
+la même, elle devrait donc être atteignable.**
 
-*Juge* : les trois trous se referment, `SELECT_IDLECMD` et `SELECT_CARD` à 100 %.
-Puis **relancer la transplantation** (`tools/s17_transplant.ps1`) : elle donne
-4 des 6 cartes aujourd'hui.
+*À faire* : monter `--discrepancies` (3, 4, 6…) sur `tools/s17_transplant.ps1`,
+avec un budget de temps qui suive, et lire à quel nombre d'écarts la 5e puis la
+6e carte tombent. Si elles ne tombent jamais, identifier **quel coup** manque au
+répertoire — c'est-à-dire ce que la nouvelle main oblige à inventer.
 
 ### 1. FINIR LA MESURE DE `--hindsight` (obligatoire, court)
 

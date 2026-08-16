@@ -345,7 +345,27 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t n_atk = r.Get<uint32_t>();
 		for(uint32_t i = 0; i < n_atk && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
-			r.Skip(1 + 1 + 4 + 1);
+			// DEFAUT DE DECODAGE CORRIGE (session 17), verifie contre
+			// `playerop.cpp:37` : dans la liste ATTAQUABLE, `sequence` est un
+			// uint8 et non un uint32 — l'entiere fait
+			//   code u32 | controler u8 | location u8 | sequence u8 | direct u8
+			// soit HUIT octets, la ou ce code en sautait ONZE.
+			//
+			// CE QUE LE DEFAUT COUTAIT, mesure : trois octets de decalage par
+			// monstre attaquable, donc `r.Ok()` tombe des qu'il y en a UN — ce
+			// qui est le cas de tout board construit. `out.Clear()` s'ensuit,
+			// l'enumeration sort VIDE, et comme `DefaultResponse` ne couvre pas
+			// MSG_SELECT_BATTLECMD, la branche MEURT. Autrement dit : TOUTE
+			// LIGNE QUI ENTRE EN BATTLE PHASE ETAIT CONDAMNEE, donc tout combo
+			// passant par la Main 2 etait hors d'atteinte — en silence, puisque
+			// la mort se lisait comme une impasse ordinaire. Trace : 90 prompts
+			// reduits au defaut et 90 impasses dans le meme run (transplantation
+			// de la ligne Lunalight, 1 ecart).
+			//
+			// Le comptage etait BON dans la liste ACTIVABLE juste au-dessus
+			// (sequence y est un uint32) : c'est la difference entre les deux
+			// listes du meme message qui a fait passer le defaut inapercu.
+			r.Skip(1 + 1 + 1 + 1);
 			Choice& c = out.Emit();
 			PutInt32(c.response, static_cast<int32_t>(1u | (i << 16)));
 			c.edge = EdgeOf(message, { 1, code });
