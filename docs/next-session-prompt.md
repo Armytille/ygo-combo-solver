@@ -1,209 +1,213 @@
-# Session 17 — LE PREMIER EXEMPLAIRE, ET LE TROISIÈME DECK
+# Session 18 — LA DISCONTINUITÉ DU MATÉRIAU NOMMÉ
 
 Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`).
-Lis `README.md` puis `docs/combo-solver-design.md` **§9.23** (session 16) en
-entier, puis §9.22. **Ne redécouvre rien de ce qui y est chiffré, et ne
-re-cherche pas la littérature : elle est en §9.22 (h) et §9.23 (c).**
+Lis `README.md` puis `docs/combo-solver-design.md` **§9.24** (session 17) en
+entier, puis §9.23. **Ne redécouvre rien de ce qui y est chiffré, et ne
+re-cherche pas la littérature : elle est en §9.22 (h), §9.23 (c) et §9.24 (b).**
 
-## CE QUE LA SESSION 16 A RETOURNÉ
+## CE QUE LA SESSION 17 A ÉTABLI
 
-La session 15 avait nommé le mur — « atteindre un sous-but consomme ce dont le
-suivant a besoin » — et posé la question : *le deuxième exemplaire est-il **jamais
-tenté** ou **toujours perdu** ?* La sonde a été construite (`--probe-repeat`) et
-elle répond : **ni l'un ni l'autre. La question présupposait un premier
-exemplaire, et il n'y en a pas.**
+### La loi d'arité a DEUX RÉGIMES, et un seul est franchissable
 
-Étalon A, deck et main NEUFS (`Gold Leo` + 3 `Fake Trap`), 300 s, graine 888 :
+La sonde d'OFFRE (`--probe-repeat` + `--watch`, `RepeatProbe::offer_by`) ventile
+les occasions **par type de prompt**. Étalon A nu, 90 s, graine 888 :
 
-| carte surveillée | tirages : ≥1 / ≥2 / ≥3 | finisseur enraciné : ≥1 / ≥2 |
-|---|---|---|
-| Lunalight Masquerade | 362 008 / 359 506 / **290 463** | 59 036 / 137 |
-| Lunalight Wolf | 350 015 / 145 780 / 8 819 | 7 913 / 4 117 |
-| **Lunalight Liger Dancer** | **0 / 0 / 0** | **62 / 0** |
+| carte | matériaux | SELECT_CARD | IDLECMD | **POSITION** | invoquée |
+|---|---|---|---|---|---|
+| Perfume Dancer | 2 | 134 758 | 13 643 | **9 349** | 7 138 |
+| Sabre Dancer | 3 | 125 040 | 0 | **320** | 320 |
+| Leo Dancer | 1 nommé + 2 | 123 100 | 0 | **0** | 0 |
+| Liger Dancer | 1 nommé + 3 | 123 098 | 0 | **0** | 0 |
 
-**L'échantillonnage fabrique TROIS Masquerade dans 290 463 tirages et pas UN SEUL
-Liger sur 930 676.** Le contrôle est dans la même table et le même run : ce n'est
-pas « le solveur ne sait pas répéter ». Même motif sur l'ancien départ
-(Masquerade 99,3 % de répétition, Wolf 49,2 %, Liger 0 puis 3 767 → 0).
+Les ~123 000 `SELECT_CARD` sont **le même pool pour les quatre** — l'extra deck lu
+en entier, du **bruit**. Le signal est `IDLECMD` + `POSITION`, et `POSITION` est un
+juge validé par la mesure elle-même (pour Sabre, POSITION = nombre d'invocations,
+exactement).
 
-**LA CIBLE EST FAISABLE — vérifié en séance, ne pas y revenir.** L'arithmétique
-apparente ne ferme pas (Liger exige Leo Dancer, Leo Dancer exige Panther Dancer
-qui est absent du deck, et l'extra n'a que 2 Leo Dancer pour 3 Liger). Réponse de
-l'opérateur, confirmée par le texte des cartes : Kaleido Chick se substitue à Leo
-Dancer par copie de nom, et **`Lunalight Wolf` (effet Pendule) invoque une Fusion
-en bannissant les matériaux depuis le terrain OU LE CIMETIÈRE**, tandis que
-`Lunalight Masquerade` autorise également les matériaux du cimetière. Les Leo
-Dancer envoyés au cimetière redeviennent donc des matériaux. **Tout échec de
-l'étalon A est imputable au solveur.** Corollaire : les trois `--resolve` de
-l'étalon A sont exactement les activateurs de matériaux depuis le cimetière —
-d'où le « retirer `--resolve` fait tomber les Liger à zéro » de 9.22 (i), qui
-n'avait jusqu'ici pas d'explication.
+- **Régime CARDINAL** (« 3 monstres Lunalight ») : une **pente**. Chaque corps
+  posé rapproche, et `--hindsight` l'escalade.
+- **Régime NOMMÉ** (« "Leo Dancer" + 3 Lunalight ») : une **discontinuité**. Le
+  core ne liste la Fusion que si elle est payable, donc **le coup n'est pas dans
+  l'espace d'actions** : aucun gradient de politique, aucun volume de tirages ne
+  peut l'atteindre.
 
-## LA MISSION — DEUX CHANTIERS, DANS CET ORDRE
+**PIÈGE 53, payé en séance : « proposée » n'est pas « invocable ».** Le premier
+relevé de la sonde donnait « Leo et Liger proposés dans 33 000 tirages et jamais
+pris → panne d'échantillonnage » — **l'inverse du vrai**. Ce qui trahit est le
+rapport décisions/tirages : 1,0002 pour Leo/Liger contre 2,17 pour la Fusion
+réellement invocable, c'est-à-dire *un seul prompt par tirage, toujours le même*.
+Toute sonde d'occasion doit ventiler par type de prompt **avec un compteur**,
+jamais un total ni un masque.
 
-### 1. LA DISTANCE DE RECETTES DANS LE SCORE DES TIRAGES
+### `--hindsight` marche, et c'est le seul des quatre
 
-> **§9.23 (h) : la panne n'est pas la RÉPÉTITION, c'est l'ARITÉ — et le
-> correctif est nommé, mesuré comme absent, et petit.**
+Étalon A nu, 300 s, **deux graines** (juge = poses) :
 
-Le run VRAIMENT nu (aucun `--hint`, aucun `--resolve`, aucune référence, sonde
-`--watch` qui ne biaise rien) donne une loi :
+| bras | graine | tirages | Perfume (arité 2) | Sabre (arité 3) | Leo | Liger |
+|---|---|---|---|---|---|---|
+| témoin | 888 | 1 236 499 | 29 745 | 659 | 0 | 0 |
+| témoin | 1234 | 854 444 | 504 793 | 1 770 | 0 | 0 |
+| `--hindsight 0.5` | 888 | 1 009 789 | **602 016** | **10 722** | 0 | 0 |
+| `--hindsight 0.5` | 1234 | 996 534 | **578 025** | **5 668** | 0 | 0 |
 
-| Fusion | matériaux exigés | tirages qui l'invoquent |
-|---|---|---|
-| Perfume Dancer | 2 "Lunalight" | **42 525** |
-| Sabre Dancer | 3 "Lunalight" | **2 073** |
-| Leo Dancer | 1 **NOMMÉ** + 2 | **0** |
-| Liger Dancer | 1 **NOMMÉ** + 3 | **0** |
+**`min(hindsight) > max(témoin)` sur les deux cartes** — séparation complète des
+supports, sur un juge où le témoin varie d'un facteur **17** entre graines. Le
+mécanisme **stabilise** aussi (602 016 / 578 025, écart 4 %). Courbe du cadran
+(90 s) : 0,25 → Sabre 589 ; **0,5 → 3 422** ; 1,0 → 3 218 — monotone jusqu'à 0,5
+puis plate. Coût assumé : −18 % de débit.
 
-**÷20 par matériau supplémentaire, puis zéro dès qu'un matériau est NOMMÉ.** Le
-solveur échoue à N = 1 : la cible réduite à UN Liger rend 0/1. Tout le cadrage
-« sous-buts en compétition » des sessions 15-16 portait sur une répétition qu'il
-n'atteint pas une seule fois.
+**STATUT : CONFIRMÉ, pas encore DÉMONTRÉ.** Deux graines et un seul étalon.
+`tools/s17_ab_B.ps1` (étalon B optimisé, le seul cas où une solution existe) est
+**écrit et jamais lancé** — c'est le chantier 1 ci-dessous.
 
-**Le correctif de choix a été essayé et il ÉCHOUE** — `--goal-bias` (codes de la
-cible versés au biais + identité de carte sur `MSG_SELECT_CARD`, deux vrais
-manques du moteur) laisse Liger à zéro. Raison, et c'est la conclusion : le
-prompt de Fusion ne liste que les monstres **payables à cet instant**, donc
-biaiser un choix qui n'existe pas ne fait rien. **Le problème est l'ÉTAT, et rien
-dans le score ne récompense le fait de s'en approcher** : `material = common×100
-+ exact×10 + monstres×3 + cimetière`, où `common` compte les cartes cibles
-PRÉSENTES — terme nul pour toujours tant qu'aucun Liger n'est posé.
+### Trois leviers écartés, chacun avec sa cause
 
-**Le chantier** : porter `RecipeDistance` (chantier 16 : nombre d'invocations
-restantes, matériaux intermédiaires compris — elle vaut **5** pour Liger depuis
-l'état de départ) dans le **score des TIRAGES**. §9.16 l'a mesurée et a conclu
-mot pour mot que « **les solutions viennent d'une phase que `--recipes` ne touche
-pas** » : elle n'a jamais été évaluée ailleurs que dans le finisseur, où elle
-n'est qu'un `--levin-h` déguisé. La session 16 a construit pour les landmarks le
-chemin d'évaluation BON MARCHÉ dans les tirages (`Search::LandmarkRemaining` :
-clés indexées, une zone interrogée seulement si un landmark y vit) — **c'est ce
-chemin qu'il faut réutiliser**.
+- **`--recipe-w` RÉFUTÉ, cause STRUCTURELLE et non de réglage.** Trois poids sur
+  une décade (0,1 / 0,3 / 1,0) donnent le même effondrement (poses ÷10) alors que
+  la distance décroît réellement (10,70 contre 13,06 au départ) et que le débit
+  **monte** (614 063 contre 446 281). Cause : fabriquer une Fusion **consomme deux
+  Lunalight pour en rendre un**, donc la distance MONTE — le terme **punit les
+  invocations**, l'inverse exact du but. Une heuristique h^add sur graphe ET/OU
+  n'est correcte que si l'on modélise la **consommation inter-invocations**, ce
+  que `RecipeDistance` ne fait pas (elle ne gère que l'intra-recette, via
+  `claim_depth`). **Ne pas re-tenter sans ce préalable.**
+- **`--backward` : vivant, sans matière.** La décomposition ne trouve que
+  2 sous-produits (Leo, Liger) et n'en fabrique 0,02 en moyenne. `Expand` ne
+  descend que sur les exigences NOMMÉES, et la recette amorcée de Liger est « Leo
+  nommé + 3 Lunalight (cardinale) » : il n'y a rien d'autre à décomposer. Œuf et
+  poule, et il est nommé — le graphe n'apprendra une recette profonde qu'après une
+  invocation réussie.
+- **`--assign` dégrade** (4 242 contre 74 788). Les sous-ensembles extrêmes
+  injectés diluent les prompts fréquents plus qu'ils ne comblent la troncature des
+  rares. Le mécanisme ne prune rien (règle 2) mais il n'est pas neutre en
+  probabilité, et c'est ce qui le condamne ici.
 
-*Juge* : la sonde `--watch` sur Liger/Leo/Perfume/Sabre, sur le run NU. Le
-critère est binaire et il ne dépend d'aucune graine : **Liger passe-t-il de 0 à
-non nul ?** Puis la loi d'arité doit s'aplatir.
+## LA MISSION — TROIS CHANTIERS, DANS CET ORDRE
 
-*Piège à éviter* : le coût. `RecipeDistance` fait cinq requêtes de zone, un tri
-et ~80 recherches de base — impayable par décision. Le porter veut dire le
-RÉÉCRIRE sur le modèle de `LandmarkRemaining`, pas l'appeler tel quel.
+### 1. FINIR LA MESURE DE `--hindsight` (obligatoire, court)
 
-### 2. LE TROISIÈME DECK — la seule mesure de généralité qui existe
+**L'étalon B optimisé d'abord** — le seul cas où une solution existe, donc le seul
+qui dise si `--hindsight` PAIE ou seulement AGITE (`tools/s17_ab_B.ps1`, écrit et
+**jamais lancé** faute de temps). Juges inchangés depuis la s16 : ≥1/≥2/≥3, crête
+aux résolutions complètes, **approche ÉCRITE** (`best_approach_kof8.yrp`), jamais
+la ligne « NRPA best ». Puis une ou deux graines de plus sur l'étalon A
+(`tools/s17_ab.ps1 -Ms 300000 -Seed 4242`, puis 9999).
 
-> **Question posée par l'opérateur en fin de session 16 : « est-ce un solveur
-> générique pour n'importe quel deck, ou du réglage fin sur nos deux decks de
-> test ? »** §9.23 (g) y répond en deux moitiés : le MOTEUR est générique (aucune
-> connaissance de carte compilée, tout le spécifique est une entrée de ligne de
-> commande) ; les PREUVES ne le sont pas (constantes calibrées sur deux decks,
-> liste `--hint` injectée à la main, et **aucune mesure sur un troisième deck**).
+Verdict attendu, à écrire quel qu'il soit : `--hindsight` passe-t-il de
+**CONFIRMÉ** à **DÉMONTRÉ**, ou l'étalon B le renvoie-t-il au rayon « écrit,
+instrumenté, non démontré » ?
 
-Le chantier : **un troisième deck, sans rapport avec les deux autres, avec sa
-propre ligne de référence.** Il rend possible le seul juge de généralité qui
-vaille — apprendre les landmarks sur A et B, les **servir sur C**. Demander le
-replay à l'opérateur ; le solveur le juge d'abord (`--guard`, `--resolve`,
-`MSG_RETRY`) avant d'en faire un étalon.
+### 2. FRANCHIR LA DISCONTINUITÉ : CONSTRUIRE LA CARTE NOMMÉE
 
-## L'ÉTAT DES MÉCANISMES DE LA SESSION 16
+Le seul chantier qui porte encore sur le mur. Fait mesuré : Leo Dancer n'est
+**jamais invocable** (IDLECMD = 0, POSITION = 0), donc plus de tirages n'y
+changeront rien — il faut **produire l'état** où elle le devient.
 
-- **`--probe-repeat` : l'instrument, il MARCHE et il a rendu son verdict.** Deux
-  tables (phase tirages, tirages enracinés), histogramme brut par entrée
-  surveillée. Trois défauts d'instrument corrigés en séance, dont un introduit
-  par le correctif d'un autre — lire §9.23 (a) avant de le modifier.
-  **RÉSERVE : son axe « distance de recettes » ne rend AUCUN verdict** et le dit
-  lui-même. Cause : les recettes amorcées portent la zone JOKER, qui accepte le
-  cimetière — le matériau qu'on vient de consommer y est justement arrivé, donc
-  « un exemplaire de plus » paraît toujours à une invocation près. Une distance
-  uniformément égale à 1 est la signature de ce biais. **Le réparer demande de
-  n'utiliser que les recettes OBSERVÉES** (qui portent des zones concrètes) pour
-  cette question précise.
+Deux voies, à départager par la mesure et non par goût :
+
+**(a) Le sous-but explicite.** La décomposition (`RecipeGraph::Expand`, déjà
+écrite, déjà imprimée) dit que Leo Dancer précède Liger. En faire une **cible
+intermédiaire** — pas un `--hint`, une vraie entrée dans `Heuristic` avec son
+propre terme `common` — donne au score le terme non nul qui manque *avant*
+qu'aucun Liger n'existe. C'est ce que `--recipe-w` tentait, mais par une distance
+globale qui punissait la consommation ; **un sous-but discret ne punit rien**, et
+c'est toute la différence.
+*Juge* : la colonne POSITION de Leo Dancer passe-t-elle de 0 à non nul ?
+
+**(b) Le curriculum par hindsight.** `--hindsight` retient déjà 121-126 buts de
+substitution par run. Les **ordonner** par la décomposition (fabriquer d'abord ce
+qui sert) donne un curriculum appris sans corpus. Vérifier d'abord, par un simple
+relevé, **quels** buts sont retenus — le mécanisme les compte mais ne les nomme
+pas encore, et c'est un trou d'instrument à combler avant d'écrire quoi que ce
+soit.
+
+### 3. LE TROISIÈME DECK — dette de la s16, jamais payée
+
+`combosolver-generalite-non-mesuree` : le moteur est générique (aucune carte
+compilée, tout le spécifique est une entrée de ligne de commande) mais toutes les
+preuves sont calibrées sur deux decks. **Un troisième deck est le seul juge de
+généralité qui existe.** Reporté deux fois — le dire en tête de session plutôt
+qu'en fin. Demander le replay à l'opérateur ; le solveur le juge d'abord
+(`--guard`, `--resolve`, `MSG_RETRY`) avant d'en faire un étalon.
+
+## L'ÉTAT DES MÉCANISMES ANTÉRIEURS
+
+- **`--probe-repeat` : l'instrument, il MARCHE**, désormais avec la sonde d'offre
+  (`offer_by`, six types via `OfferSlot`). Lire §9.24 (a) avant de le modifier.
+  **RÉSERVE conservée de la s16 : son axe « distance de recettes » ne rend AUCUN
+  verdict** et le dit lui-même — les recettes amorcées portent la zone JOKER, qui
+  accepte le cimetière, donc le matériau qu'on vient de consommer y compte encore.
+  Le réparer demande de n'utiliser que les recettes **OBSERVÉES**.
 - **`--landmarks` / `--landmark-w` / `--landmark-h` : ÉCRITS, INSTRUMENTÉS, NON
-  DÉMONTRÉS.** Le graphe apprend la bonne chose — sur l'étalon B, depuis deux
-  lignes résolues, il sort `Fake Trap @ADV banni x3` à l'ordre 0,54, c'est-à-dire
-  **le handrip lui-même en landmark compté**, sans qu'aucune carte soit nommée
-  dans le code. Mais l'A/B ne conclut pas : `>=3` est un événement rare, nul dans
-  quatre runs sur six, non nul dans **deux bras différents à deux budgets
-  différents** (`lmw60` à 90 s, `lmx60` à 300 s), sur une seule graine.
-  **À refaire : plusieurs graines, et le bras qui compte est `lmx60`** (landmarks
-  appris sur une LIGNE TENUE À L'ÉCART de celle qu'on juge).
-- **UN TROU D'INSTRUMENT CORRIGÉ APRÈS L'A/B** : la ligne « landmarks : h moyen »
-  n'était imprimée que par `PrintCuts`, qui ne couvre pas la phase tirages —
-  donc pas la phase où `--landmark-w` travaille. Elle l'est maintenant, mais
-  **l'A/B de la s16 a tourné sans elle** : on ne sait pas si le `h` appris a
-  réellement décru. **Première chose à relever au prochain A/B.**
-- **`--archive-spread` : DÉPARTAGÉ.** Son critère interne se confirme largement
-  sur un juge valide (médiane d'expansions par racine **16 → 164**, ×10) ; sur
-  les juges de recherche il est **neutre à légèrement négatif** (0 ligne, ≥3
-  inchangé à 0). Il fait ce qu'il annonce, et ce qu'il annonce ne convertit pas.
-  Reste opt-in. **`--no-phase-change` et `--canonical-zones` restent non
-  départagés.**
-- **LIMITE DE FOND DU GRAPHE DE LANDMARKS, à traiter** : il exige un plan
-  RÉSOLU, donc il ne sert à rien À FROID — et l'étalon A n'a aucun plan résolu,
-  donc le mécanisme n'y est pas jugeable. La voie naturelle est de le miner **en
-  ligne** sur les meilleures approches du run lui-même, exactement comme
-  `--options-online` le fait pour les macros.
+  DÉMONTRÉS.** Le graphe apprend la bonne chose (sur l'étalon B, `Fake Trap @ADV
+  banni x3` à l'ordre 0,54 — le handrip lui-même en landmark compté, sans qu'aucune
+  carte soit nommée dans le code) mais l'A/B ne conclut pas. **À refaire sur
+  plusieurs graines, bras `lmx60`**, en lisant `landmarks : h moyen` EN PREMIER.
+  Limite de fond : le mécanisme exige un plan RÉSOLU, donc il ne sert à rien à
+  froid — l'étalon A n'en a aucun. La voie naturelle est le minage **en ligne** sur
+  les meilleures approches du run, comme `--options-online` pour les macros.
+- **`--archive-spread` : DÉPARTAGÉ** — critère interne confirmé (expansions par
+  racine 16 → 164) mais neutre à négatif sur les juges de recherche. Reste opt-in.
+  **`--no-phase-change` et `--canonical-zones` restent non départagés.**
 
 ## CE QUI EST ACQUIS — ne pas re-mesurer, ne pas re-chercher
 
-- **Bibliographie faite** (§9.22 (h), §9.23 (c)) : Bonet & Geffner
-  (arXiv:2311.05490, largeur sérialisée) ; Drexler, Seipp & Geffner
-  (arXiv:2105.04250, « SIW échoue quand un sous-problème a une largeur élevée ») ;
-  Ståhlberg & Geffner (arXiv:2512.19355, « les modèles apprennent à en livrer un
-  seul ») ; Hanou, Dumančić & de Weerdt (arXiv:2508.21564, landmarks généralisés).
-  **Trois résultats NÉGATIFS à ne pas re-chercher** : la littérature des jeux de
-  cartes porte sur l'information cachée ou le deckbuilding ; le nogood/CDCL vit
-  dans des solveurs déclaratifs, or nos actions sont des scripts Lua ;
-  « ressources consommables + heuristique » ne ramène que du réseau et du
-  matériel. Piste secondaire non explorée : **arXiv:2601.21684, *Do Not Waste
-  Your Rollouts*** — recyclage NÉGATIF des motifs d'échec, sans entraînement.
-- **RÉFUTÉS** : `--options-ctx` en ligne ; `--options-len 16/24` ;
+- **Bibliographie faite** (§9.22 (h), §9.23 (c), §9.24 (b)) : Bonet & Geffner
+  (arXiv:2311.05490) ; Drexler, Seipp & Geffner (arXiv:2105.04250) ; Ståhlberg &
+  Geffner (arXiv:2512.19355) ; Hanou, Dumančić & de Weerdt (arXiv:2508.21564) ;
+  HER (NeurIPS 2017) ; Retro\* (arXiv:2006.15820) et AOT\* (arXiv:2509.20988) ;
+  Delarue et al. (arXiv:2010.12001) ; DeepCubeA. **Résultats NÉGATIFS à ne pas
+  re-chercher** : aucune littérature académique sur l'assemblage de combo en
+  solitaire ; le nogood/CDCL vit dans des solveurs déclaratifs (mais le
+  sous-problème d'AFFECTATION des matériaux, lui, est déclaratif — c'est
+  `--assign`, mesuré et négatif) ; « ressources consommables + heuristique » ne
+  ramène que du réseau et du matériel. Piste secondaire non explorée :
+  **arXiv:2601.21684, *Do Not Waste Your Rollouts*** — recyclage NÉGATIF des
+  motifs d'échec, sans entraînement.
+- **RÉFUTÉS** : `--recipe-w` (s17, cause structurelle) ; `--assign` (s17) ;
+  `--goal-bias` (s16) ; `--options-ctx` en ligne ; `--options-len 16/24` ;
   `--options-pool 24` ; `--mcps` (deux fois) ; `--nrpa-lr 2` ;
-  `--novelty-rollout-cut` (criblage 90 s : ≥1 résolution 206 093 → **9**).
-- **LES CONTRAINTES GUIDENT** — `--resolve` / `--summon-min` / la garde ne font
-  pas qu'élaguer : le bras le plus contraint monte PLUS HAUT. **Ne jamais
-  « simplifier » en les retirant.** La session 16 a trouvé POURQUOI sur
-  l'étalon A : ces trois cartes sont les activateurs de matériaux depuis le
-  cimetière.
-- **`Q̂` (`--qhat`) est implémentée fidèlement** et trouve la bonne ouverture
-  seule (§9.22 (b)-(c)). **`--finisher-options`** : écrit, **toujours jamais
-  jugé**.
+  `--novelty-rollout-cut`.
+- **LES CONTRAINTES GUIDENT** — `--resolve` / `--summon-min` / la garde ne font pas
+  qu'élaguer : le bras le plus contraint monte PLUS HAUT. **Ne jamais
+  « simplifier » en les retirant.** Sur l'étalon A, ces trois cartes sont les
+  activateurs de matériaux depuis le cimetière.
+- **`Q̂` (`--qhat`) est implémentée fidèlement** et trouve la bonne ouverture seule.
+  **`--finisher-options`** : écrit, **toujours jamais jugé**.
 - **Plafond de représentation** : accord du corpus 52 → 59 → 64 (mémorisation
   pure). Aucun meilleur descripteur de contexte ne sauvera la masse.
 
-## MÉTHODE — ce qui a payé en session 16
+## MÉTHODE — NON NÉGOCIABLE
 
 - **L'INSTRUMENT AVANT LE MÉCANISME, et l'instrument lui-même se met en doute.**
-  Trois défauts trouvés sur la PREMIÈRE lecture de la sonde, dont un introduit
-  par le correctif d'un autre. Sans cette relecture, la session aurait publié
-  « matériau conservé à 100 % » — un verdict fabriqué à partir d'une absence de
-  mesure.
-- **LIRE LE TEXTE DES CARTES AVANT DE DÉPENSER DES RUNS.** La faisabilité de la
-  cible A a été tranchée par une requête `.cdb` et une question à l'opérateur,
-  pas par un run.
-- **UN CRIBLAGE 90 s NE PROMEUT PAS.** Il avait donné une belle réponse en dose
-  (0 → 28 sur `>=3`) que le budget long n'a pas confirmée. **Le criblage ÉLIMINE,
-  il ne promeut jamais** — la règle était écrite, elle vient d'être payée.
-- **LA GRAINE EST UN TIRAGE, PAS UN CADRAN.** Le juge est la fraction de tirages
-  qui convertissent, jamais « k/4 sur la graine 888 ». Et fixer la graine ne rend
-  pas le run reproductible (échanges asynchrones entre workers) : c'est un
-  **défaut du solveur**, pas une propriété de l'instrument.
-- **NE JAMAIS CHANGER DEUX FACTEURS.** La session 16 n'a pas re-déroulé de
-  pipeline PGO, précisément pour que l'A/B reste apparié sur un binaire unique.
-  Conséquence assumée et écrite : les DÉBITS ne sont pas comparables à la s15.
+  La s17 l'a payé une fois de plus : la sonde d'offre a produit, à sa première
+  lecture, la conclusion **inverse** de la vraie.
+- Un criblage à 90 s **élimine, il ne promeut jamais**. La graine est un tirage,
+  pas un cadran. **Ne jamais changer deux facteurs.**
+- Le juge de l'étalon A est **POSITION**, jamais le total d'offres (piège 53).
+- Le juge de l'étalon B est l'**approche ÉCRITE**, jamais la ligne `NRPA … best k/N`.
+- **Lire la vie du mécanisme AVANT le juge de recherche** (piège 52) :
+  `s17_lecture.ps1` imprime `hsButs`/`hsAdapt`, `recDist`/`recD0`,
+  `rebours`/`rebTot`. À zéro but, `--hindsight` est inerte et rien d'autre n'a de
+  sens.
+- **CODES et jamais NOMS**, y compris à `--watch` : « Lunalight Liger Dancer » est
+  ambigu (54701958 / 101301030) et l'outil SORT. Le run nu de la s16 surveillait
+  une liste tronquée sans le dire.
+  `8379983` Gold Leo · `3027001` Fake Trap · `54701958` Liger · `24550676` Leo ·
+  `88753594` Sabre · `81196066` Perfume · `90590304` Bagooska.
 
 ## PIÈGES DE BUILD ET D'ENVIRONNEMENT
 
 - Un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` : le binaire courant est
   **non-PGO**. Témoins PGO : `combosolver_preopt`, `_lto_s12`, `_lto_s13`,
   `_lto_s14`, `_lto_s14b`, `_lto_s15` (`tools/s15_pgo.ps1` comme modèle — ne
-  jamais écraser le témoin précédent).
+  jamais écraser le témoin précédent). La s17 n'a pas re-déroulé de pipeline PGO :
+  un A/B apparié n'en a pas besoin, mais les DÉBITS ne se comparent pas à la s15.
 - **Une mesure en cours VERROUILLE le binaire** (`LNK1104`). C'est voulu.
   Attendre : `while (Get-Process combosolver) { Start-Sleep 15 }`.
 - **Le gabarit est ÉPINGLÉ** (`gabarits/etalon_a_lunalight.yrp`). **Le DECK ne
-  l'est pas** : `D:\ProjectIgnis\deck\Lunalight.ydk` a changé le 16/08/2026 à
-  13:19, en pleine session. La `.cdb` non plus.
-- **Les noms de cartes sont AMBIGUS** : « Lunalight Gold Leo » existe en 8379983
-  ET 101301005 ; « Junk Meister » et « Crimson Dragon » l'étaient déjà. Toujours
-  passer les CODES pour l'étalon A.
+  l'est pas** : `D:\ProjectIgnis\deck\Lunalight.ydk` a changé le 16/08/2026 en
+  pleine session. La `.cdb` non plus.
 - Runs séquentiels, un `--outdir` par run. Logs PS en UTF-16 : `Select-String`,
   jamais `grep`.
 
@@ -217,30 +221,33 @@ replay à l'opérateur ; le solveur le juge d'abord (`--guard`, `--resolve`,
 # sante — LA porte de tout changement de moteur, avant ET apres
 .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
     --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000 `
-    --outdir s17_sante --no-chain Zalen --no-chain "Crystal Wing"
+    --outdir s18_sante --no-chain Zalen --no-chain "Crystal Wing"
 # 273 digests, 210/273, 209 candidates, 16 replays sur 209.
 
-# ETALON A, depart NEUF (deck refait + main Gold Leo/Fake Trap) :
-.\tools\s16_sonde.ps1 -Ms 300000 -Cas A -Prefixe s17
+# ETALON A : A/B des leviers, juge = POSITION
+.\tools\s17_ab.ps1 -Ms 300000 -Seed 4242 -Bras temoin,hind
+.\tools\s17_lecture.ps1 -Motif 's17ab_*'
 
-# ETALON B OPTIMISE — le seul cas ou UNE SOLUTION EXISTE :
-.\tools\s16_ab.ps1 -Ms 300000 -Bras temoin,lmx60 -Seeds 888,1234,4242
+# ETALON B OPTIMISE — le seul cas ou UNE SOLUTION EXISTE (jamais lance)
+.\tools\s17_ab_B.ps1 -Ms 300000 -Seeds 888 -Bras temoin,hind
+
+# SONDE D'OFFRE seule (etalon A nu, decomposition par type de prompt)
+.\tools\s17_sonde_offre.ps1 -Ms 90000 -Seed 888
 ```
 
-Outils : `s16_sonde.ps1` (sonde de répétition, étalons A et B),
-`s16_ab.ps1` (A/B étalon B, bras nommés dont `lmx60` à ligne tenue à l'écart),
-`s16_lecture.ps1` (juges + vie du mécanisme + expansions du finisseur),
-`s15_ab.ps1`, `s15_lecture.ps1`, `s15_curriculum.ps1`, `s15_courbe_qhat.ps1`,
-`s15_pgo.ps1`, `s14_accord_mcps.ps1`, `s14_aretes_macro.ps1`,
-`s13_exploitation_longue.ps1`, `s14_parallelisme.ps1` (jamais mesuré).
+Outils de la session 17 : `s17_sonde_offre.ps1` (sonde d'offre, étalon A nu),
+`s17_ab.ps1` (A/B étalon A ; bras `temoin`, `recw*`, `back`, `assign`, `hind*`,
+`hind_recw`), `s17_ab_B.ps1` (A/B étalon B, **écrit et jamais lancé**),
+`s17_lecture.ps1` (juge POSITION + vie des mécanismes).
+Antérieurs : `s16_sonde.ps1`, `s16_ab.ps1`, `s16_lecture.ps1`, `s15_ab.ps1`,
+`s15_lecture.ps1`, `s15_curriculum.ps1`, `s15_courbe_qhat.ps1`, `s15_pgo.ps1`,
+`s14_accord_mcps.ps1`, `s14_aretes_macro.ps1`, `s13_exploitation_longue.ps1`,
+`s14_parallelisme.ps1` (jamais mesuré).
 
 ## Définition de « terminé »
 
-(a) **Où meurt la ligne avant la première Fusion cible**, mesuré et non supposé —
-avec le compteur qui sépare « jamais proposée par un prompt » de « proposée et
-jamais prise ».
-(b) Un **troisième deck** au dossier, jugé par l'outil, et le premier transfert
-de landmarks A+B → C.
-(c) L'A/B des landmarks **refait sur plusieurs graines**, avec la ligne
-« landmarks : h moyen » lue en premier.
-(d) §9.24 documenté, ce prompt régénéré.
+(a) `--hindsight` **démontré ou réfuté** sur plusieurs graines ET sur l'étalon B.
+(b) Un mécanisme qui fait passer la colonne POSITION de **Leo Dancer** de 0 à non
+nul — ou la démonstration écrite qu'aucune des deux voies du chantier 2 ne le fait.
+(c) Un **troisième deck** au dossier, jugé par l'outil.
+(d) §9.25 documenté, ce prompt régénéré.

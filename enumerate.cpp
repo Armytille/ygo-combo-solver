@@ -143,6 +143,77 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 
 constexpr uint32_t kLocInfo = 1 + 1 + 4 + 4;
 
+// ASSIGNATION RESOLUE (session 17, chantier 1) — emet les sous-ensembles
+// EXTREMES au sens de `opt.assign_useful`, que la troncature de ForEachSubset
+// cache des que C(n,k) depasse `max_subsets`.
+//
+// DEUX TAILLES (la minimale et la maximale) x DEUX EXTREMES (le plus utile et
+// le moins utile) = au plus quatre choix de plus, dedoublonnes contre ce qui a
+// deja ete emis. On n'en ajoute donc jamais un qui existait : le mecanisme
+// comble un TROU de l'enumeration, il ne repondere pas ce qu'elle couvrait.
+//
+// `pool` indexe `codes` et porte deja la deduplication par code de l'appelant.
+void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
+						const std::vector<uint8_t>& pool,
+						const std::vector<uint32_t>& codes, uint32_t lo,
+						uint32_t hi, ChoiceList& out) {
+	if(!opt.assign_useful || opt.assign_useful->empty() || pool.empty())
+		return;
+	const auto& useful = *opt.assign_useful;
+	auto is_useful = [&useful](uint32_t code) {
+		return std::find(useful.begin(), useful.end(), code) != useful.end();
+	};
+	// Positions de `pool` triees par utilite decroissante. Tri STABLE : deux
+	// runs a la meme graine doivent emettre exactement les memes sous-ensembles,
+	// sans quoi l'A/B compare deux espaces d'actions differents.
+	static thread_local std::vector<uint8_t> rank, sel;
+	rank.resize(pool.size());
+	for(size_t i = 0; i < pool.size(); ++i)
+		rank[i] = static_cast<uint8_t>(i);
+	std::stable_sort(rank.begin(), rank.end(),
+					 [&](uint8_t a, uint8_t b) {
+						 return is_useful(codes[pool[a]]) >
+								is_useful(codes[pool[b]]);
+					 });
+	const uint32_t n = static_cast<uint32_t>(pool.size());
+	const uint32_t khi = (std::min)(hi, n);
+	const uint32_t klo = (std::max)(lo, 1u);
+	if(klo > khi)
+		return;
+	const uint32_t ks[2] = { klo, khi };
+	const uint32_t nk = (ks[0] == ks[1]) ? 1u : 2u;
+	for(uint32_t ki = 0; ki < nk; ++ki) {
+		const uint32_t k = ks[ki];
+		for(int end = 0; end < 2; ++end) {
+			sel.clear();
+			for(uint32_t j = 0; j < k; ++j)
+				sel.push_back(pool[rank[end ? n - 1 - j : j]]);
+			// TRI CROISSANT obligatoire : c'est l'ordre dans lequel
+			// ForEachSubset emet ses membres, et l'arete est un Mix ORDONNE.
+			// Sans ce tri, le meme choix porterait deux aretes differentes et la
+			// deduplication ci-dessous laisserait passer un doublon.
+			std::sort(sel.begin(), sel.end());
+			uint64_t h = 0;
+			for(uint8_t ix : sel)
+				h = Mix(h, codes[ix]);
+			const uint64_t edge = EdgeOf(message, { h, k });
+			bool dup = false;
+			for(const Choice& c : out)
+				if(c.edge == edge) { dup = true; break; }
+			if(dup)
+				continue;
+			Choice& c = out.Emit();
+			PutCardIndex(c.response, sel.data(), sel.size());
+			c.edge = edge;
+			if(opt.card_on_select)
+				c.card = codes[sel[0]];
+			if(opt.labels)
+				c.label = std::string(end ? "assign- " : "assign+ ") +
+						  std::to_string(k);
+		}
+	}
+}
+
 void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 				  const EnumOptions& opt, ChoiceList& out) {
 	Reader r(data, len);
@@ -150,8 +221,21 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 	// de la meme carte n'y portent pas le meme nombre. Toute arete se construit
 	// donc sur le code canonique, sinon elle ne designe pas une carte mais un
 	// exemplaire — inutilisable pour transposer, et faux pour dedupliquer.
+	// SONDE D'OFFRE greffee sur le point de passage OBLIGE : tout code lu dans
+	// un prompt, quel que soit le message, passe par `canon`. Un marquage par
+	// message aurait manque un prompt en silence, et « jamais proposee » est
+	// exactement la conclusion qu'une sonde incomplete fabriquerait a tort.
+	// Le marquage precede les filtres (dedup, --no-activate, --no-chain) : c'est
+	// voulu, la question est ce que LE JEU propose, pas ce que nous en gardons.
 	auto canon = [&opt](uint32_t code) {
-		return opt.db ? opt.db->Canonical(code) : code;
+		const uint32_t c = opt.db ? opt.db->Canonical(code) : code;
+		if(opt.watch_offered && opt.watch) {
+			const size_t n = (std::min)(opt.watch->size(), size_t(4));
+			for(size_t i = 0; i < n; ++i)
+				if((*opt.watch)[i] == c)
+					*opt.watch_offered |= 1ull << i;
+		}
+		return c;
 	};
 	// Deduplication sans std::set : les listes sont courtes (quelques dizaines),
 	// la recherche lineaire dans un tampon reutilise bat le nid d'allocations.
@@ -429,6 +513,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 										" carte(s)";
 					  },
 					  opt.subsets_capped, opt.subsets_ascending);
+		EmitAssignExtremes(message, opt, pool, codes, lo, hi, out);
 		if(cancelable) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
@@ -613,6 +698,17 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 							  c.label = "somme " + std::to_string(k);
 					  },
 					  opt.subsets_capped, opt.subsets_ascending);
+		// Le prompt de SOMME est celui des tributs et des materiaux Synchro :
+		// c'est la que l'etalon B paie son arite. Pas de deduplication par code
+		// ici (l'enumeration indexe `codes` directement), donc le pool est
+		// l'identite.
+		if(opt.assign_useful && !opt.assign_useful->empty()) {
+			static thread_local std::vector<uint8_t> ident;
+			ident.resize(codes.size());
+			for(size_t i = 0; i < codes.size(); ++i)
+				ident[i] = static_cast<uint8_t>(i);
+			EmitAssignExtremes(message, opt, ident, codes, 1, n, out);
+		}
 		return;
 	}
 

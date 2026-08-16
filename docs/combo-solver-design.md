@@ -4839,3 +4839,204 @@ finisseur, où elle n'est qu'un réglage de `--levin-h` déguisé. La session 16
 landmarks, le chemin d'évaluation BON MARCHÉ dans les tirages (clés indexées, zones interrogées
 seulement si un landmark y vit). **Y porter la distance de recettes est petit, et c'est le premier
 chantier de la session 17.**
+
+---
+
+### 9.24 Session 17 : la sonde d'OFFRE — et le seul des quatre leviers qui monte l'arité
+
+Mission : attaquer les quatre solutions dégagées de la littérature — assignation résolue,
+hindsight, distance de recettes dans les tirages, décomposition à rebours — **avec rigueur**,
+c'est-à-dire un drapeau par mécanisme, éteint par défaut, A/B seul.
+
+Le premier geste n'est aucun des quatre. C'est l'instrument (piège 40) : §9.23 mesure la **loi
+d'arité** mais pas son LIEU, et les quatre chantiers se répartissent exactement sur ce lieu.
+
+#### (a) La sonde d'OFFRE, et le défaut d'instrument corrigé DEUX FOIS avant de conclure
+
+`reached[0] == 0` (« jamais invoquée ») recouvre deux pannes opposées :
+
+- **jamais proposée** — le core ne liste une invocation que si elle est payable *à cet instant* :
+  la panne est dans l'**ÉTAT**, et les chantiers sont `--recipe-w` et `--backward` ;
+- **proposée et jamais prise** — la panne est dans l'**ÉCHANTILLONNAGE**, et les chantiers sont
+  `--assign` et `--hindsight`.
+
+`--goal-bias` (§9.23) a échoué faute *exactement* de cette lecture.
+
+**Implémentation, à coût et à comportement nuls.** Le marquage est greffé sur le point de passage
+obligé : la lambda `canon` d'`EnumerateRaw`, par où passe *tout* code lu dans *tout* prompt. Un
+marquage écrit message par message aurait manqué un prompt en silence — et « jamais proposée » est
+précisément la conclusion qu'une sonde incomplète fabrique à tort. Aucun choix n'est ajouté,
+retiré ni repondéré.
+
+**Premier défaut, hérité : les noms.** Le run nu de la session 16 passait les quatre Fusions à
+`--watch` **par nom**. Or « Lunalight Liger Dancer » est AMBIGU (54701958 **et** 101301030) et
+l'outil sort sur un nom ambigu : ce run surveillait donc une liste **tronquée**, ce que sa lecture
+n'avait pas relevé. Codes désormais, comme la règle du dossier l'impose depuis la session 15.
+
+**Second défaut, celui de la sonde elle-même — et il a produit une conclusion FAUSSE.** Premier
+relevé (étalon A nu, 90 s, graine 888, 599 234 tirages) :
+
+| carte | offerte dans | décisions |
+|---|---|---|
+| Perfume Dancer | 44 201 tirages (7,4 %) | 95 764 |
+| Sabre Dancer | 33 867 (5,7 %) | 34 221 |
+| Leo Dancer | 33 301 (5,6 %) | 33 307 |
+| Liger Dancer | 33 301 (5,6 %) | 33 310 |
+
+Lu tel quel : « Leo et Liger sont proposés 33 000 fois et jamais pris → la panne est dans
+l'échantillonnage ». **C'est faux, et la sonde l'imprimait.** Le rapport décisions/tirages vaut
+1,0002 pour Leo et Liger contre 2,17 pour Perfume : *un seul prompt par tirage, toujours le même*.
+« Présente dans le pool d'un prompt » n'est **pas** « invocable » — une révélation d'extra deck,
+une défausse, une recherche listent la carte aussi.
+
+Correctif en deux temps : ventilation par type de prompt (masque), puis **compteurs par type**
+(`RepeatProbe::offer_by`, six types). Relevé final (90 s, 619 000 tirages) :
+
+| carte | matériaux | SELECT_CARD | IDLECMD | **POSITION** | invoquée |
+|---|---|---|---|---|---|
+| Perfume Dancer | 2 | 134 758 | **13 643** | **9 349** | 7 138 |
+| Sabre Dancer | 3 | 125 040 | 0 | **320** | 320 |
+| Leo Dancer | 1 nommé + 2 | 123 100 | 0 | **0** | 0 |
+| Liger Dancer | 1 nommé + 3 | 123 098 | 0 | **0** | 0 |
+
+Les ~123 000 `SELECT_CARD` sont **le même pool pour les quatre** : l'extra deck lu en entier, du
+bruit. Le signal est `IDLECMD` (invoquer) et `POSITION` (poser), et **`POSITION` est validée comme
+juge par la mesure elle-même** — pour Sabre Dancer, POSITION (320) égale *exactement* le nombre
+d'invocations (320).
+
+**VERDICT : la panne est dans l'ÉTAT.** Leo et Liger ne sont **jamais invocables**, jamais posés.
+Cela met `--recipe-w` et `--backward` devant, et donne au reste de la session un juge **binaire et
+sans graine** : la colonne POSITION passe-t-elle de 0 à non nul ?
+
+#### (b) Les quatre leviers, écrits et séparables
+
+Quatre drapeaux, éteints par défaut, chacun A/B-able seul. `--probe-repeat` impliquant déjà
+`--recipes 0`, le graphe de recettes est alimenté et mesuré **dans tous les bras, témoin compris** :
+seuls les drapeaux de la session changent.
+
+1. **`--assign`** (Delarue et al., arXiv:2010.12001 — la sélection d'action posée en OPTIMISATION).
+   Les prompts de sous-ensemble émettent **en plus** les deux sous-ensembles extrêmes au sens des
+   recettes (le plus utile et le moins utile), dédoublonnés. Motif : la troncature de
+   `ForEachSubset` est **lexicographique**, donc au-delà de `--max-subsets` le bon sous-ensemble
+   n'est pas rare, il est **absent** — aucun poids de politique ne rattrape cela. Les **deux**
+   extrêmes et pas un seul : un prompt ne dit pas s'il demande des matériaux ou des cartes à
+   défausser, on ne décide donc pas du signe, la politique l'apprend par `plan_key`.
+2. **`--hindsight <f>`** (HER, NeurIPS 2017). Chaque monstre d'**extra deck** réellement invoqué
+   devient un but de substitution ; la meilleure ligne qui l'atteint subit le gradient NRPA à
+   `f × alpha`. Le score est **ré-étiqueté** — pas le matériel de la ligne (qui juge l'ancien but)
+   mais le coût de *cet* accomplissement, au plus tôt et au plus court. Le filtre est un **TYPE**
+   (`TYPE_FUSION|SYNCHRO|XYZ|LINK`), pas une liste : aucun nom de carte compilé, et l'ensemble
+   ainsi désigné est exactement celui dont l'arité est le mur.
+3. **`--recipe-w <f>`** : la distance de recettes dans le **score des tirages**, en PROGRÈS
+   (`d0 − d`, sinon le score, qui est un MAX initialisé à 0, ne remonterait jamais).
+4. **`--backward`** (Retro\*, AO\*) : `RecipeGraph::Expand` rend les sous-produits en ordre de
+   fabrication ; le nombre de ceux déjà fabriqués entre dans la **partition de la table de
+   nouveauté**, qui se rouvre donc avant qu'aucune cible ne soit posée (Serialized IW sur la
+   décomposition apprise au lieu du but littéral).
+
+**Le chemin bon marché**, sans lequel 3 et 4 seraient inévaluables dans les tirages : le graphe
+partagé porte un mutex (il apprend pendant le run), donc chaque worker en prend une **copie locale**
+tous les 2 048 tirages, à la frontière sûre de la profondeur 0 ; le relevé de présence n'interroge
+que les zones qu'une exigence **mentionne** (`RecipeGraph::ZoneMask`) là où `RecipeDistance` en
+relève cinq, DECK et EXTRA compris (~55 entités, la moitié du coût) ; le terrain sort gratuitement
+du board déjà calculé. `PresentAvailT` est remontée au niveau de l'espace de noms pour que le
+finisseur et les tirages mesurent **exactement la même grandeur**.
+
+#### (c) L'A/B : un seul levier monte l'arité
+
+Étalon A nu, 90 s, graine 888. Juge = poses (POSITION).
+
+| bras | tirages | Perfume (2 mat.) | **Sabre (3 mat.)** | Leo | Liger |
+|---|---|---|---|---|---|
+| témoin | 446 281 | 74 788 | 166 | 0 | 0 |
+| `--hindsight 0.25` | 536 303 | 58 738 | 589 | 0 | 0 |
+| **`--hindsight 0.5`** | 528 740 | **79 009** | **3 422** | 0 | 0 |
+| `--hindsight 1.0` | 582 223 | 74 309 | 3 218 | 0 | 0 |
+| `--recipe-w 0.1` | 614 063 | 7 156 | 70 | 0 | 0 |
+| `--recipe-w 0.3` | 489 928 | 8 870 | 24 | 0 | 0 |
+| `--recipe-w 1.0` | 469 134 | 8 902 | 48 | 0 | 0 |
+| `--backward` | 590 410 | 3 723 | 64 | 0 | 0 |
+| `--assign` | 580 266 | 4 242 | 36 | 0 | 0 |
+
+**`--hindsight 0.5` multiplie par 20,6 les poses de la Fusion à 3 matériaux** (166 → 3 422) **sans
+rien coûter à celle à 2** (79 009 contre 74 788). C'est le seul bras qui monte l'axe d'arité, et
+c'est l'effet que HER prédit : la politique apprend à payer une invocation coûteuse en s'entraînant
+sur celles qu'elle réussit déjà. Vie du mécanisme : 121 buts de substitution, 271 662 adaptations.
+La courbe est monotone jusqu'à 0,5 puis plate — 1,0 ne rapporte rien de plus.
+
+#### (d) `--recipe-w` est RÉFUTÉ, et la cause est structurelle
+
+Trois poids sur une décade (0,1 / 0,3 / 1,0) donnent **le même effondrement** (~8 000 contre
+74 788). Ce n'est donc pas un cadran mal réglé. Le mécanisme est pourtant vivant et fait ce qu'on
+lui demande : la distance moyenne vaut 10,70 contre 13,06 à l'état de départ, **elle décroît
+réellement**. Le débit ne l'explique pas non plus — `--recipe-w 0.1` produit *plus* de tirages que
+le témoin (614 063 contre 446 281).
+
+**La cause.** La distance vers Liger Dancer compte « 3 monstres Lunalight » comme exigence
+CARDINALE. Or fabriquer Perfume Dancer **consomme deux Lunalight pour en rendre un** : la distance
+*monte*. Le mécanisme récompense donc l'**accumulation de corps** et **punit leur consommation** —
+c'est-à-dire punit les invocations, l'inverse exact du but poursuivi. C'est le défaut jumeau du
+piège 42 (« un mécanisme vivant et sans effet ») : ici il est vivant et **à contresens**.
+
+Ce que cela dit du chantier, et qui vaut plus que le verdict : une heuristique de type h^add sur un
+graphe ET/OU n'est correcte que si l'on modélise la **consommation** — la relaxation par
+suppression suppose qu'atteindre un sous-but ne détruit rien, hypothèse exactement fausse ici.
+`RecipeDistance` gère bien la consommation *intra-recette* (`claim_depth`, revue session 12) mais
+pas *inter-invocations*, et le commentaire du source le disait déjà : « une consommation
+inter-invocations modéliserait mal les corps recyclés par le cimetière ».
+
+#### (e) `--backward` : vivant, sans matière ; `--assign` : dégrade
+
+`--backward` : la décomposition ne contient que **2 sous-produits** (Leo, Liger) et n'en fabrique
+0,02 en moyenne. L'expansion ne descend que sur les exigences NOMMÉES, et la recette amorcée de
+Liger est « Leo Dancer nommé + 3 Lunalight (cardinale) » : il n'y a rien d'autre à décomposer. La
+partition ×64 fragmente la table de nouveauté sans contrepartie, d'où la dégradation. Mécanisme
+correct, **matière absente** — il ne pourra rien tant que le graphe n'aura pas de recettes plus
+profondes, c'est-à-dire tant que Liger ne sera pas invoqué au moins une fois. Œuf et poule, et il
+est nommé.
+
+`--assign` : 4 242 poses de Perfume contre 74 788. Les sous-ensembles extrêmes injectés (15 codes
+utiles, jusqu'à 4 choix ajoutés par prompt) diluent la distribution sur les prompts fréquents plus
+qu'ils ne comblent la troncature sur les prompts rares. Le mécanisme ne prune rien (règle 2) mais
+il n'est pas neutre en probabilité, et c'est ce qui le condamne ici.
+
+#### (f) Budget long, deux graines : séparation complète des supports
+
+Étalon A nu, 300 s. **Deux graines, et elles étaient nécessaires** — la variance du témoin est
+énorme, et une seule graine aurait fait conclure trop fort dans un sens comme dans l'autre.
+
+| bras | graine | tirages | Perfume (arité 2) | Sabre (arité 3) | Leo | Liger |
+|---|---|---|---|---|---|---|
+| témoin | 888 | 1 236 499 | 29 745 | 659 | 0 | 0 |
+| témoin | 1234 | 854 444 | 504 793 | 1 770 | 0 | 0 |
+| `--hindsight 0.5` | 888 | 1 009 789 | **602 016** | **10 722** | 0 | 0 |
+| `--hindsight 0.5` | 1234 | 996 534 | **578 025** | **5 668** | 0 | 0 |
+
+**`min(hindsight) > max(témoin)` sur les deux cartes** : 578 025 > 504 793 et 5 668 > 1 770. La
+séparation des supports est complète, sur un juge où le témoin varie d'un facteur **17** d'une
+graine à l'autre (29 745 → 504 793). Le gain sur l'arité 3 va de ×3,2 à ×16,3 selon la graine.
+
+**Le mécanisme STABILISE aussi**, et c'est cohérent avec sa nature : le témoin dépend entièrement de
+la chance d'avoir trouvé tôt une bonne ouverture, alors que hindsight entraîne la politique sur des
+buts qu'elle atteint *toujours* (602 016 / 578 025, écart 4 %). Coût payé : **−18 % de débit** — une
+copie de `steps` par amélioration, et 126 lignes ré-adaptées à chaque itération de niveau supérieur
+(46 231 adaptations sur le run).
+
+**Statut honnête : CONFIRMÉ sur deux graines avec séparation complète, pas encore DÉMONTRÉ** au sens
+du dossier (qui demande plus de deux tirages et le passage sur l'étalon B — le seul cas où une
+solution existe). `tools/s17_ab_B.ps1` est écrit et n'a pas été lancé.
+
+**Leo et Liger restent à ZÉRO.** C'est le résultat le plus important de la session après le
+diagnostic, et il faut le dire tel quel : **`--hindsight` monte l'arité mais ne franchit pas la
+discontinuité du matériau NOMMÉ.** La loi de §9.23 se lit désormais en deux régimes distincts, et
+un seul est attaqué :
+
+- **le régime CARDINAL** (« 3 monstres Lunalight ») est une *pente* : chaque corps supplémentaire
+  rapproche, et hindsight l'escalade — ÷20 par matériau devient ×20 ;
+- **le régime NOMMÉ** (« "Lunalight Leo Dancer" + 3 Lunalight ») est une *discontinuité* : tant que
+  la carte nommée n'existe pas, la Fusion n'est pas listée, aucune quantité de tirages ne la
+  trouve, et aucun gradient de politique ne peut aider puisque **le coup n'est pas dans l'espace**.
+
+C'est la même chose que la sonde d'offre a mesurée en (a) : `IDLECMD = 0`, `POSITION = 0`. Le
+levier qui reste est donc bien la **construction dirigée de la carte nommée** — c'est-à-dire la
+recherche à rebours du chantier 4, mais alimentée par un graphe qui a de quoi décomposer.

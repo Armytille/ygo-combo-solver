@@ -497,6 +497,62 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					r.reached[0] == 0
 						? "  <-- JAMAIS : aucune invocation dans cette phase"
 						: "");
+		// SONDE D'OFFRE (session 17) — LA DECOMPOSITION DE LA LOI D'ARITE.
+		// Elle est imprimee AVANT tout le reste parce qu'elle decide de quel
+		// chantier releve la panne, et qu'une session entiere (la 16) a conclu
+		// « le solveur n'y va jamais » sans savoir si le jeu le lui proposait.
+		{
+			const double per = rollouts ? double(r.offer_rollouts) * 100.0 /
+											  double(rollouts)
+										: 0.0;
+			std::printf("      OFFRE : proposee dans %llu tirage(s) (%.2f %%), "
+						"%llu decision(s)\n",
+						(unsigned long long)r.offer_rollouts, per,
+						(unsigned long long)r.offer_steps);
+			static const char* kOfferNames[6] = { "IDLECMD", "SELECT_CARD",
+												  "UNSELECT", "SUM", "CHAIN",
+												  "POSITION" };
+			std::printf("        par prompt :");
+			for(int k = 0; k < 6; ++k)
+				if(r.offer_by[k])
+					std::printf("  %s %llu", kOfferNames[k],
+								(unsigned long long)r.offer_by[k]);
+			std::printf("\n");
+			// LE VERDICT NE SE LIT PAS SUR LE TOTAL, et c'est la correction la
+			// plus importante de la sonde. `SELECT_CARD` est AMBIGU : il porte
+			// « choisis ta Fusion parmi celles payables » aussi bien que
+			// « regarde ton extra deck ». Les prompts NON ambigus sont
+			// `IDLECMD` (invoquer depuis la main ou l'extra) et `POSITION` (la
+			// carte est POSEE — preuve directe). S'ils sont a zero, la carte
+			// n'a jamais ete invocable, quel que soit le total.
+			const uint64_t real = r.offer_by[0] + r.offer_by[5];
+			if(!r.offer_rollouts) {
+				std::printf("        <-- JAMAIS PROPOSEE, sur aucun prompt.\n");
+			} else if(!real && !r.reached[0]) {
+				std::printf("        <-- JAMAIS INVOCABLE. Les %llu offre(s) sont "
+							"toutes sur des prompts de SELECTION,\n"
+							"            aucune sur IDLECMD ni POSITION : le pool "
+							"la CONTIENT sans qu'elle soit payable\n"
+							"            (un pool qui liste tout l'extra deck). La "
+							"panne est dans l'ETAT — chantiers 3\n"
+							"            (--recipe-w) et 4 (--backward), pas dans "
+							"l'echantillonnage.\n",
+							(unsigned long long)r.offer_steps);
+			} else if(!r.reached[0]) {
+				std::printf("        <-- INVOCABLE ET JAMAIS PRISE (%llu offre(s) "
+							"sur IDLECMD/POSITION). La panne est\n"
+							"            dans l'ECHANTILLONNAGE : troncature des "
+							"sous-ensembles ou poids de politique.\n"
+							"            Chantiers 1 (--assign) et 2 "
+							"(--hindsight).\n",
+							(unsigned long long)real);
+			} else {
+				const double take = 100.0 * double(r.reached[0]) /
+									double(r.offer_rollouts);
+				std::printf("        conversion offre -> invocation : %.1f %% des "
+							"tirages qui l'ont vue\n", take);
+			}
+		}
 		if(!r.more_n) {
 			std::printf("      (aucune premiere invocation : rien a sonder)\n");
 			continue;
@@ -1154,6 +1210,28 @@ struct Options {
 	// Ce n'est PAS de la connaissance metier : c'est lire l'enonce. C'est la
 	// difference avec `--hint`, qui est une bequille.
 	bool goal_bias = false;
+	// --- SESSION 17 : LES QUATRE LEVIERS CONTRE LA LOI D'ARITE --------------
+	// Tous eteints par defaut, tous separables, tous A/B-ables seuls. Voir
+	// SearchConfig pour le raisonnement complet de chacun.
+	//
+	// (1) --assign : les prompts de sous-ensemble emettent EN PLUS les deux
+	// sous-ensembles extremes au sens des recettes. Attaque la troncature
+	// LEXICOGRAPHIQUE de l'enumeration, qui ne rend pas le bon sous-ensemble
+	// rare mais ABSENT.
+	bool assign = false;
+	// (2) --hindsight <f> : chaque monstre d'extra deck reellement invoque
+	// devient un but de substitution, et la meilleure ligne qui l'atteint subit
+	// le gradient NRPA a f x alpha (HER, NeurIPS 2017).
+	double hindsight = 0.0;
+	size_t hindsight_k = 16;
+	// (3) --recipe-w <f> : la distance de recettes dans le SCORE DES TIRAGES,
+	// en progres. C'est le chantier que la session 16 a ecrit sans le brancher —
+	// `RecipeDistance` n'existait que dans le finisseur.
+	double recipe_weight = 0.0;
+	// (4) --backward : le nombre de sous-produits de la decomposition ET/OU deja
+	// fabriques entre dans la PARTITION de la table de nouveaute (Serialized IW
+	// sur la decomposition apprise, au lieu du but litteral).
+	bool backward = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -1536,6 +1614,31 @@ void Usage() {
 		"  --landmark-h <f>   poids du h de landmarks dans le FINISSEUR (meme\n"
 		"                     point d'entree que --recipes). Separe de\n"
 		"                     --landmark-w pour qu'un A/B n'en bouge qu'un.\n"
+		"  --assign           (1) ASSIGNATION RESOLUE (session 17,\n"
+		"                     arXiv:2010.12001). Les prompts de sous-ensemble\n"
+		"                     emettent EN PLUS les deux sous-ensembles extremes\n"
+		"                     au sens des recettes. La troncature de\n"
+		"                     l'enumeration est LEXICOGRAPHIQUE : au-dela de\n"
+		"                     --max-subsets le bon sous-ensemble n'est pas rare,\n"
+		"                     il est ABSENT, et aucun poids ne rattrape cela.\n"
+		"  --hindsight <f>    (2) HINDSIGHT (HER, NeurIPS 2017). Chaque monstre\n"
+		"                     d'extra deck REELLEMENT invoque devient un but de\n"
+		"                     substitution, et la meilleure ligne qui l'atteint\n"
+		"                     subit le gradient NRPA a f x alpha. Le solveur pose\n"
+		"                     deja des milliers de Fusions bon marche par run et\n"
+		"                     jette tout : le signal existe, il n'est pas lu.\n"
+		"  --hindsight-k <n>  buts de substitution retenus au plus (defaut 16).\n"
+		"  --recipe-w <f>     (3) LA DISTANCE DE RECETTES DANS LES TIRAGES.\n"
+		"                     `RecipeDistance` existe depuis le chantier 16 mais\n"
+		"                     n'etait appelee que dans le finisseur — pas la ou\n"
+		"                     99 %% du travail se fait. Comptee EN PROGRES\n"
+		"                     (d0 - d) et non en distance. Implique --recipes 0.\n"
+		"  --backward         (4) SERIALISATION A REBOURS (Retro*, AO*). Une\n"
+		"                     invocation est un noeud ET : l'arite, fatale en\n"
+		"                     avant, devient une DECOMPOSITION en arriere. Le\n"
+		"                     nombre de sous-produits deja fabriques entre dans\n"
+		"                     la partition de la table de nouveaute, qui se\n"
+		"                     rouvre donc AVANT qu'aucune cible ne soit posee.\n"
 		"  --goal-bias        BIAIS DERIVE DE LA CIBLE (session 16). Verse les\n"
 		"                     codes du board cible dans le biais\n"
 		"                     d'echantillonnage, ET renseigne l'identite de\n"
@@ -1994,6 +2097,32 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --landmark-h attend un poids >= 0\n");
 				return false;
 			}
+		} else if(a == "--assign") {
+			o.assign = true;
+		} else if(a == "--hindsight") {
+			const char* v = next("--hindsight"); if(!v) return false;
+			o.hindsight = std::atof(v);
+			if(o.hindsight < 0) {
+				std::printf("!! --hindsight attend une fraction d'alpha >= 0\n");
+				return false;
+			}
+		} else if(a == "--hindsight-k") {
+			const char* v = next("--hindsight-k"); if(!v) return false;
+			const long k = std::atol(v);
+			if(k <= 0) {
+				std::printf("!! --hindsight-k attend un entier > 0\n");
+				return false;
+			}
+			o.hindsight_k = static_cast<size_t>(k);
+		} else if(a == "--recipe-w") {
+			const char* v = next("--recipe-w"); if(!v) return false;
+			o.recipe_weight = std::atof(v);
+			if(o.recipe_weight < 0) {
+				std::printf("!! --recipe-w attend un poids >= 0\n");
+				return false;
+			}
+		} else if(a == "--backward") {
+			o.backward = true;
 		} else if(a == "--goal-bias") {
 			o.goal_bias = true;
 		} else if(a == "--watch") {
@@ -6312,6 +6441,30 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.recipes = &recipe_graph;
 		cfg.recipe_h = static_cast<float>(opt.recipes);
 	}
+	// --- SESSION 17 : LES QUATRE LEVIERS ------------------------------------
+	// Les chantiers 1, 3 et 4 lisent tous le graphe de recettes : sans lui ils
+	// sont vivants et inertes. L'implication est appliquee PLUS HAUT (avec celle
+	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
+	cfg.assign = opt.assign;
+	cfg.hindsight = static_cast<float>(opt.hindsight);
+	cfg.hindsight_k = opt.hindsight_k;
+	cfg.recipe_weight = static_cast<float>(opt.recipe_weight);
+	cfg.backward = opt.backward;
+	if(opt.assign || opt.recipe_weight > 0.0 || opt.backward) {
+		if(!cfg.recipes)
+			std::printf("!! --assign / --recipe-w / --backward sans graphe de "
+						"recettes : les mecanismes sont INERTES.\n");
+		else
+			std::printf("  session 17 : assign %s, recipe-w %.2f, backward %s "
+						"(instantane du graphe tous les %llu tirages)\n",
+						opt.assign ? "OUI" : "non", opt.recipe_weight,
+						opt.backward ? "OUI" : "non",
+						(unsigned long long)cfg.recipe_snap_period);
+	}
+	if(opt.hindsight > 0.0)
+		std::printf("  session 17 : hindsight %.2f x alpha, au plus %zu but(s) de "
+					"substitution par worker\n",
+					opt.hindsight, opt.hindsight_k);
 	// BIAIS DERIVE DE LA CIBLE (--goal-bias). Les codes du board cible entrent
 	// dans le biais d'echantillonnage, et les prompts de SELECTION recoivent
 	// une identite de carte pour que ce biais puisse s'y appliquer. Les deux
@@ -6578,6 +6731,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// mecanisme, trouve en relisant un A/B ou la colonne etait vide.
 			double lm_h_sum = 0.0;
 			uint64_t lm_h_count = 0;
+			// SESSION 17 : la vie des quatre mecanismes. Meme raison que
+			// ci-dessus, et la lecon est fraiche — l'A/B des landmarks est parti
+			// sans savoir si le `h` decroissait.
+			double rec_roll_sum = 0.0, rec_roll_d0_sum = 0.0;
+			uint64_t rec_roll_count = 0;
+			double backward_sum = 0.0;
+			uint64_t backward_count = 0;
+			uint64_t hindsight_goals = 0, hindsight_adapts = 0;
+			uint64_t recipe_snaps = 0, snap_products = 0, snap_useful = 0,
+					 snap_backward = 0;
 			// SONDE DE REPETITION (--probe-repeat). Tout y est ADDITIF entre
 			// workers sauf min/max et la reference d0 — qui est la meme pour
 			// tous (meme etat de depart), donc n'importe laquelle vaut.
@@ -6599,6 +6762,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					a.first_depth_sum += r.first_depth_sum;
 					a.d0_samples += r.d0_samples;
 					a.known |= r.known;
+					a.offer_steps += r.offer_steps;
+					a.offer_rollouts += r.offer_rollouts;
+					a.offer_msgs |= r.offer_msgs;
+					for(int k = 0; k < 6; ++k)
+						a.offer_by[k] += r.offer_by[k];
 					if(r.more_n) {
 						a.more_min = (std::min)(a.more_min, r.more_min);
 						a.more_max = (std::max)(a.more_max, r.more_max);
@@ -6820,6 +6988,24 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.AddRepeat(s.Stats());
 					m.lm_h_sum += s.Stats().landmark_h_sum;
 					m.lm_h_count += s.Stats().landmark_h_count;
+					// SESSION 17 : la vie des quatre mecanismes (piege 52).
+					m.rec_roll_sum += s.Stats().rec_roll_sum;
+					m.rec_roll_d0_sum += s.Stats().rec_roll_d0_sum;
+					m.rec_roll_count += s.Stats().rec_roll_count;
+					m.backward_sum += s.Stats().backward_sum;
+					m.backward_count += s.Stats().backward_count;
+					m.hindsight_goals += s.Stats().hindsight_goals;
+					m.hindsight_adapts += s.Stats().hindsight_adapts;
+					m.recipe_snaps += s.Stats().recipe_snaps;
+					// Instantanes : la TAILLE est la meme pour tous les workers
+					// (meme graphe, meme cible), on garde donc la plus grande —
+					// un worker qui n'a pas encore rafraichi rendrait zero.
+					m.snap_products = (std::max)(m.snap_products,
+												 s.Stats().snap_products);
+					m.snap_useful = (std::max)(m.snap_useful,
+											   s.Stats().snap_useful);
+					m.snap_backward = (std::max)(m.snap_backward,
+												 s.Stats().snap_backward);
 					for(int k = 0; k < 4; ++k)
 						m.rr[k] += s.Stats().resolve_reached[k];
 					m.burn_cuts += s.Stats().burn_cuts;
@@ -7114,6 +7300,55 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						s0 / double(n0),
 						landmark_graph.Items().size(),
 						(unsigned long long)n0);
+		}
+		// SESSION 17 : LA VIE DES QUATRE MECANISMES, dans la phase ou ils
+		// travaillent. La question n'est pas « le drapeau etait-il allume » mais
+		// « la distance a-t-elle REELLEMENT decru » et « la decomposition
+		// avance-t-elle » — un mecanisme vivant et inerte est la faute que la
+		// session 16 a commise deux fois.
+		if(nrpa.recipe_snaps + greedy.recipe_snaps) {
+			std::printf("  recettes : instantane %llu fois — %llu produit(s), "
+						"%llu code(s) utile(s), %llu sous-produit(s) a rebours\n",
+						(unsigned long long)(nrpa.recipe_snaps +
+											 greedy.recipe_snaps),
+						(unsigned long long)(std::max)(nrpa.snap_products,
+													   greedy.snap_products),
+						(unsigned long long)(std::max)(nrpa.snap_useful,
+													   greedy.snap_useful),
+						(unsigned long long)(std::max)(nrpa.snap_backward,
+													   greedy.snap_backward));
+		}
+		if(nrpa.rec_roll_count + greedy.rec_roll_count) {
+			const uint64_t n1 = nrpa.rec_roll_count + greedy.rec_roll_count;
+			const double d = (nrpa.rec_roll_sum + greedy.rec_roll_sum) /
+							 double(n1);
+			const double d0 = (nrpa.rec_roll_d0_sum + greedy.rec_roll_d0_sum) /
+							  double(n1);
+			std::printf("  recettes : distance moyenne %.2f contre %.2f au "
+						"depart (%llu evaluation(s) dans les tirages)%s\n",
+						d, d0, (unsigned long long)n1,
+						d >= d0 ? "  <-- N'A PAS DECRU" : "");
+		}
+		if(nrpa.backward_count + greedy.backward_count) {
+			const uint64_t n2 = nrpa.backward_count + greedy.backward_count;
+			std::printf("  rebours : %.2f sous-produit(s) fabrique(s) en moyenne "
+						"sur %llu (%llu evaluation(s))\n",
+						(nrpa.backward_sum + greedy.backward_sum) / double(n2),
+						(unsigned long long)(std::max)(nrpa.snap_backward,
+													   greedy.snap_backward),
+						(unsigned long long)n2);
+		}
+		if(nrpa.hindsight_goals + greedy.hindsight_goals ||
+		   opt.hindsight > 0.0) {
+			std::printf("  hindsight : %llu but(s) de substitution retenu(s), "
+						"%llu adaptation(s)%s\n",
+						(unsigned long long)(nrpa.hindsight_goals +
+											 greedy.hindsight_goals),
+						(unsigned long long)(nrpa.hindsight_adapts +
+											 greedy.hindsight_adapts),
+						(nrpa.hindsight_goals + greedy.hindsight_goals) == 0
+							? "  <-- AUCUN : aucun monstre d'extra deck invoque"
+							: "");
 		}
 		// SONDE DE REPETITION (session 16) : l'instrument qui separe « le 2e
 		// exemplaire n'est JAMAIS TENTE » (le materiau etait la — panne
@@ -8544,6 +8779,18 @@ int main(int argc, char** argv) {
 		opt.recipes = 0.0;
 		std::printf("  --probe-repeat implique --recipes 0 : la sonde mesure des "
 					"distances sur le graphe de recettes\n");
+	}
+	// MEME RAISON pour les trois leviers de la session 17 qui lisent le graphe :
+	// sans lui ils s'executent, ne coutent rien et ne font RIEN — un bras d'A/B
+	// indiscernable de son temoin, et une conclusion fausse au bout.
+	// `--recipes 0` alimente et mesure le graphe SANS l'introduire dans le `h`
+	// du finisseur : les mecanismes de la session 17 restent donc les seuls
+	// facteurs modifies.
+	if((opt.assign || opt.recipe_weight > 0.0 || opt.backward) &&
+	   opt.recipes < 0) {
+		opt.recipes = 0.0;
+		std::printf("  --assign / --recipe-w / --backward impliquent --recipes 0 : "
+					"les trois lisent le graphe de recettes\n");
 	}
 	std::string error;
 	if(!opt.deck_file.empty() && !opt.start_replay.empty()) {

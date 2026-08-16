@@ -132,6 +132,48 @@ struct EnumOptions {
 	// biais derive de la CIBLE puisse s'y appliquer. Opt-in : cela change le
 	// comportement du biais sur tous les prompts de selection.
 	bool card_on_select = false;
+	// SONDE D'OFFRE (session 17) — l'instrument qui DECOMPOSE la loi d'arite.
+	//
+	// La session 16 a mesure que la frequence d'une invocation s'effondre avec
+	// son nombre de materiaux, sans pouvoir dire OU. Deux pannes opposees
+	// produisent le meme zero :
+	//   - la Fusion n'est JAMAIS PROPOSEE — le core ne la liste que si ses
+	//     materiaux sont payables A CET INSTANT : la panne est dans l'ETAT, donc
+	//     dans le `h` ou dans la decomposition ;
+	//   - elle est PROPOSEE et jamais prise — la panne est dans
+	//     l'ECHANTILLONNAGE (troncature des sous-ensembles, poids de politique).
+	// `--goal-bias` (session 16) a echoue precisement faute de cette lecture.
+	//
+	// `watch` : codes canoniques surveilles (au plus 4, meme liste que
+	// SearchConfig::probe_watch). `watch_offered` : un bit par code, POSE des que
+	// le code apparait dans le pool d'un prompt. STRICTEMENT observationnel —
+	// aucun choix ajoute, retire ni repondere. Nul = cout d'un test de pointeur.
+	const std::vector<uint32_t>* watch = nullptr;
+	uint64_t* watch_offered = nullptr;
+	// ASSIGNATION RESOLUE (session 17, chantier 1 ; Delarue et al.,
+	// arXiv:2010.12001 — la selection d'action posee en OPTIMISATION au lieu
+	// d'etre enumeree puis echantillonnee).
+	//
+	// LE DEFAUT QU'ELLE CORRIGE. `max_subsets` plafonne l'enumeration : a 64
+	// sous-ensembles pour C(n,k) possibles, le sous-ensemble qui sert le plan
+	// n'est PAS ARBITRAIREMENT rare, il est ABSENT — la troncature est
+	// lexicographique, pas aleatoire. Aucun poids de politique ne peut rattraper
+	// un choix qui n'est jamais emis.
+	//
+	// CE QUE C'EST. Codes CANONIQUES qui servent une exigence d'une recette
+	// d'une carte cible manquante, calcules par le Search depuis le graphe de
+	// recettes — l'enumerateur reste ignorant du but, il ne recoit qu'une liste.
+	// Non nul : les prompts de SOUS-ENSEMBLE emettent EN PLUS les deux
+	// sous-ensembles EXTREMES au sens de ce compte (le plus utile et le moins
+	// utile), dedoublonnes contre ce qui a deja ete emis.
+	//
+	// LES DEUX EXTREMES ET PAS UN SEUL, et c'est le point honnete : un prompt de
+	// selection ne dit pas s'il demande des materiaux (on en veut d'utiles) ou
+	// des cartes a defausser (on en veut d'inutiles). On ne DECIDE donc pas du
+	// signe : on garantit que les deux sous-ensembles informatifs sont dans le
+	// pool, et la politique apprend lequel, par plan_key. Regle 2 du chantier 16 :
+	// le mecanisme n'enleve jamais rien de l'espace.
+	const std::vector<uint32_t>* assign_useful = nullptr;
 	// Construire les labels humains. Les chemins chauds (tirages, LDS) n'en
 	// ont pas besoin : chaque label est une allocation de chaine par choix.
 	bool labels = false;

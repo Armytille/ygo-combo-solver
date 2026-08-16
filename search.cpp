@@ -216,6 +216,15 @@ Search::Search(Duel& d, Arena& a, const Replay& y, const SearchConfig& c)
 	// sous-ensemble jamais emis est une branche absente de l'espace, au meme
 	// titre qu'une coupure de plafond (C9).
 	cfg.enumeration.subsets_capped = &stats.subsets_capped;
+	// SONDE D'OFFRE (session 17) : l'enumerateur pose un bit par carte
+	// surveillee presente dans le pool du prompt. `cfg` est une COPIE par
+	// Search, donc pointer un membre est sur — chaque worker a la sienne.
+	// Armee seulement sous --probe-repeat : hors sonde, aucun cout, pas meme
+	// le test de pointeur dans la boucle de canonisation.
+	if(cfg.probe_repeat && !cfg.probe_watch.empty()) {
+		cfg.enumeration.watch = &cfg.probe_watch;
+		cfg.enumeration.watch_offered = &offer_this_step;
+	}
 	for(const ResolveReq& req : cfg.resolve_min)
 		resolve_total += req.min_count;
 	// Graine de la borne brulees : les meilleures brulees des phases
@@ -425,6 +434,11 @@ uint64_t Search::Digest() const {
 }
 
 bool Search::FillChoices(ChoiceList& out) {
+	// SONDE D'OFFRE : les bits valent pour LE prompt qu'on enumere maintenant.
+	// Remis a zero ici et pas chez l'appelant, parce que FillChoices est le seul
+	// point de passage de TOUTES les strategies — un oubli dans l'une d'elles
+	// ferait fuiter une offre d'un prompt sur le suivant, en silence.
+	offer_this_step = 0;
 	EnumerateInto(prompt_type, prompt_payload.data(),
 				  static_cast<uint32_t>(prompt_payload.size()),
 				  cfg.enumeration, out);
@@ -601,6 +615,97 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 // COUT PLANCHER, JAMAIS INFINI (regle 2) : un produit sans recette connue vaut
 // 1. Le graphe vide rend donc exactement le `h` d'aujourd'hui, et l'activer ne
 // peut pas rendre un but inatteignable.
+// Combien d'entites presentes satisfont une exigence — et, au cadre RECLAMANT
+// de DistanceLocked (la recette du haut et ses materiaux directs), quelles
+// entites sont deja SERVIES : un meme corps ne peut plus etre a la fois le
+// materiau nomme et l'un des « 3 monstres Lunalight » de la meme invocation
+// (revue session 12). Recherche binaire sur la table triee pour une carte
+// nommee, parcours pour une exigence cardinale (la table n'est triee ni sur
+// l'archetype ni sur le niveau).
+//
+// AU NIVEAU DE L'ESPACE DE NOMS ET TEMPLATE (session 17). Deux appelants la
+// partagent desormais : `RecipeDistance` (finisseur, table complete) et
+// `RecipeEval` (tirages, table reduite aux zones exigees). Ils DOIVENT avoir
+// exactement la meme semantique de reclamation, sans quoi la distance mesuree
+// dans les tirages et celle du finisseur ne seraient pas la meme grandeur — et
+// l'A/B comparerait deux definitions. Template parce que `Search::PresentInfo`
+// est un type prive : l'instanciation se fait depuis les membres.
+template<typename Info>
+struct PresentAvailT {
+	const std::vector<Requirement>& present;
+	const std::vector<Info>& info;     // parallele a `present`
+	std::vector<uint8_t>& claimed;     // parallele a `present`
+	static bool ZoneOk(const Requirement& r, uint8_t z) {
+		// Zone JOKER (exigence amorcee par le texte) : n'importe quelle zone ou
+		// un materiau se PREND. Le deck et l'extra n'en sont pas : une carte qui
+		// y dort doit encore etre invoquee, et c'est l'etape que l'on compte.
+		return r.zone == kZoneAny ? ZoneIsPlayable(z) : z == r.zone;
+	}
+	bool CardinalMatch(const Requirement& r, size_t i) const {
+		const Info& pi = info[i];
+		if(!pi.row || !(pi.row->type & kRecipeTypeMonster))
+			return false;
+		if(!ZoneOk(r, pi.zone))
+			return false;
+		if(r.kind == kReqLevel)
+			return (pi.row->level & 0xff) == r.code;
+		for(uint16_t sc : pi.row->setcodes)
+			if(sc && SetcodeMatches(sc, static_cast<uint16_t>(r.code)))
+				return true;
+		return false;
+	}
+	size_t NamedFirst(const Requirement& r) const {
+		auto by_code = [](const Requirement& a, const Requirement& b) {
+			if(a.code != b.code) return a.code < b.code;
+			return a.zone < b.zone;
+		};
+		auto it = std::lower_bound(present.begin(), present.end(),
+								   Requirement{ r.code, 0 }, by_code);
+		return static_cast<size_t>(it - present.begin());
+	}
+	// Comptage PARTAGE (cadres non reclamants) : l'ancien comportement.
+	uint32_t Count(const Requirement& r) const {
+		if(r.kind != kReqCard) {
+			uint32_t n = 0;
+			for(size_t i = 0; i < info.size(); ++i)
+				n += CardinalMatch(r, i) ? 1u : 0u;
+			return n;
+		}
+		for(size_t i = NamedFirst(r);
+			i < present.size() && present[i].code == r.code; ++i)
+			if(ZoneOk(r, present[i].zone))
+				return 1u;
+		return 0u;
+	}
+	// Reclamation d'une copie nommee : la premiere qui convient et n'est pas
+	// deja servie.
+	bool Claim(const Requirement& r) {
+		for(size_t i = NamedFirst(r);
+			i < present.size() && present[i].code == r.code; ++i)
+			if(!claimed[i] && ZoneOk(r, present[i].zone)) {
+				claimed[i] = 1;
+				return true;
+			}
+		return false;
+	}
+	// Cardinale reclamante : compte les entites non servies, en sert jusqu'a
+	// `count`.
+	uint32_t CountAndClaim(const Requirement& r) {
+		uint32_t n = 0, taken = 0;
+		for(size_t i = 0; i < info.size(); ++i) {
+			if(claimed[i] || !CardinalMatch(r, i))
+				continue;
+			++n;
+			if(taken < r.count) {
+				claimed[i] = 1;
+				++taken;
+			}
+		}
+		return n;
+	}
+	void ResetClaims() { std::fill(claimed.begin(), claimed.end(), 0); }
+};
+
 float Search::RecipeDistance(const BoardKey& here, uint64_t resolved,
 							 uint32_t probe_code, uint32_t* d_more) {
 	if(!cfg.recipes) {
@@ -646,95 +751,14 @@ float Search::RecipeDistance(const BoardKey& here, uint64_t resolved,
 			recipe_present_info[i] = { duel.Db().Find(recipe_present[i].code),
 									   recipe_present[i].zone };
 	}
-	// Combien d'entites presentes satisfont une exigence — et, au cadre
-	// RECLAMANT de DistanceLocked (la recette du haut et ses materiaux
-	// directs), quelles entites sont deja SERVIES : un meme corps ne peut plus
-	// etre a la fois le materiau nomme et l'un des « 3 monstres Lunalight »
-	// de la meme invocation (revue session 12). Recherche binaire sur la table
-	// triee pour une carte nommee, parcours pour une exigence cardinale (la
-	// table fait ~60-80 entrees, non triee sur l'archetype ni le niveau).
-	struct PresentAvail {
-		const std::vector<Requirement>& present;
-		const std::vector<PresentInfo>& info;   // vide si aucun cardinal
-		std::vector<uint8_t>& claimed;          // parallele a `present`
-		static bool ZoneOk(const Requirement& r, uint8_t z) {
-			// Zone JOKER (exigence amorcee par le texte) : n'importe quelle
-			// zone ou un materiau se PREND. Le deck et l'extra n'en sont pas :
-			// une carte qui y dort doit encore etre invoquee, et c'est l'etape
-			// que l'on compte.
-			return r.zone == kZoneAny ? ZoneIsPlayable(z) : z == r.zone;
-		}
-		bool CardinalMatch(const Requirement& r, size_t i) const {
-			const PresentInfo& pi = info[i];
-			if(!pi.row || !(pi.row->type & kRecipeTypeMonster))
-				return false;
-			if(!ZoneOk(r, pi.zone))
-				return false;
-			if(r.kind == kReqLevel)
-				return (pi.row->level & 0xff) == r.code;
-			for(uint16_t sc : pi.row->setcodes)
-				if(sc && SetcodeMatches(sc, static_cast<uint16_t>(r.code)))
-					return true;
-			return false;
-		}
-		size_t NamedFirst(const Requirement& r) const {
-			auto by_code = [](const Requirement& a, const Requirement& b) {
-				if(a.code != b.code) return a.code < b.code;
-				return a.zone < b.zone;
-			};
-			auto it = std::lower_bound(present.begin(), present.end(),
-									   Requirement{ r.code, 0 }, by_code);
-			return static_cast<size_t>(it - present.begin());
-		}
-		// Comptage PARTAGE (cadres non reclamants) : l'ancien comportement.
-		uint32_t Count(const Requirement& r) const {
-			if(r.kind != kReqCard) {
-				uint32_t n = 0;
-				for(size_t i = 0; i < info.size(); ++i)
-					n += CardinalMatch(r, i) ? 1u : 0u;
-				return n;
-			}
-			for(size_t i = NamedFirst(r);
-				i < present.size() && present[i].code == r.code; ++i)
-				if(ZoneOk(r, present[i].zone))
-					return 1u;
-			return 0u;
-		}
-		// Reclamation d'une copie nommee : la premiere qui convient et n'est
-		// pas deja servie.
-		bool Claim(const Requirement& r) {
-			for(size_t i = NamedFirst(r);
-				i < present.size() && present[i].code == r.code; ++i)
-				if(!claimed[i] && ZoneOk(r, present[i].zone)) {
-					claimed[i] = 1;
-					return true;
-				}
-			return false;
-		}
-		// Cardinale reclamante : compte les entites non servies, en sert
-		// jusqu'a `count`.
-		uint32_t CountAndClaim(const Requirement& r) {
-			uint32_t n = 0, taken = 0;
-			for(size_t i = 0; i < info.size(); ++i) {
-				if(claimed[i] || !CardinalMatch(r, i))
-					continue;
-				++n;
-				if(taken < r.count) {
-					claimed[i] = 1;
-					++taken;
-				}
-			}
-			return n;
-		}
-		void ResetClaims() { std::fill(claimed.begin(), claimed.end(), 0); }
-	};
 	static thread_local std::vector<uint8_t> claim_scratch;
 	claim_scratch.assign(recipe_present.size(), 0);
 	// `info` doit etre parallele a `present` meme sans cardinaux : les
 	// reclamations indexent les deux tables d'un meme indice.
 	if(!cfg.recipes->HasCardinal())
 		recipe_present_info.assign(recipe_present.size(), PresentInfo{});
-	PresentAvail avail{ recipe_present, recipe_present_info, claim_scratch };
+	PresentAvailT<PresentInfo> avail{ recipe_present, recipe_present_info,
+									  claim_scratch };
 
 	// Cartes cibles manquantes : c'est sur elles que porte la distance.
 	std::vector<uint32_t> missing;
@@ -784,6 +808,216 @@ float Search::RecipeDistance(const BoardKey& here, uint64_t resolved,
 	// modelise que les INVOCATIONS.
 	(void)resolved;
 	return static_cast<float>(total);
+}
+
+// INSTANTANE DU GRAPHE DE RECETTES (session 17) — la frontiere sure.
+//
+// Le graphe partage apprend PENDANT le run, donc il porte un mutex, donc il est
+// interdit aux tirages : seize workers qui le prennent a chaque decision
+// serialisent la recherche. On le copie donc chez soi tous les
+// `cfg.recipe_snap_period` tirages, et l'on en derive d'un coup les trois objets
+// que les chantiers 1, 3 et 4 consomment. Appelee A LA PROFONDEUR 0 d'un
+// tirage, jamais en cours de ligne : `cfg.enumeration.assign_useful` pointe dans
+// `snap_useful`, qu'un prompt en vol ne doit pas voir changer.
+void Search::RecipeSnapshot() {
+	if(!cfg.recipes)
+		return;
+	cfg.recipes->CopyInto(recipe_snap);
+	snap_zone_mask = recipe_snap.ZoneMask();
+	// Les racines sont les cartes de la CIBLE : la decomposition part du but,
+	// c'est tout le principe de la recherche a rebours (Retro*, AO*).
+	static thread_local std::vector<uint32_t> roots;
+	roots = target.codes;
+	std::sort(roots.begin(), roots.end());
+	roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+	recipe_snap.Expand(roots, 3, snap_reqs, snap_backward);
+	// CODES UTILES (chantier 1). Les exigences NOMMEES entrent telles quelles ;
+	// les exigences CARDINALES (« 3 monstres Lunalight ») n'ont pas de code, on
+	// les resout en balayant les cartes que le joueur POSSEDE — deck, extra,
+	// main, cimetiere, terrain. Une carte absente de ces cinq zones ne peut de
+	// toute facon pas servir de materiau. Ce balayage est le seul endroit du
+	// mecanisme qui touche la liste des cartes, et il est paye une fois par
+	// instantane, jamais par decision.
+	snap_useful.clear();
+	for(const Requirement& q : snap_reqs)
+		if(q.kind == kReqCard)
+			snap_useful.push_back(q.code);
+	for(uint32_t c : roots)
+		snap_useful.push_back(c);
+	if(recipe_snap.HasCardinal()) {
+		static thread_local std::vector<QueriedCard> rq;
+		const auto con = static_cast<uint8_t>(cfg.target_player);
+		for(uint32_t loc : { LOCATION_DECK, LOCATION_EXTRA, LOCATION_HAND,
+							 LOCATION_GRAVE, LOCATION_MZONE }) {
+			duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS, rq);
+			for(const QueriedCard& qc : rq) {
+				if(!qc.present)
+					continue;
+				const uint32_t code = duel.Db().Canonical(qc.Code());
+				const CardRow* row = duel.Db().Find(code);
+				if(!row || !(row->type & kRecipeTypeMonster))
+					continue;
+				for(const Requirement& q : snap_reqs) {
+					if(q.kind == kReqCard)
+						continue;
+					bool hit = false;
+					if(q.kind == kReqLevel) {
+						hit = (row->level & 0xff) == q.code;
+					} else {
+						for(uint16_t sc : row->setcodes)
+							if(sc && SetcodeMatches(sc,
+													static_cast<uint16_t>(q.code))) {
+								hit = true;
+								break;
+							}
+					}
+					if(hit) {
+						snap_useful.push_back(code);
+						break;
+					}
+				}
+			}
+		}
+	}
+	std::sort(snap_useful.begin(), snap_useful.end());
+	snap_useful.erase(std::unique(snap_useful.begin(), snap_useful.end()),
+					  snap_useful.end());
+	// Le branchement vers l'enumerateur ne se fait QUE sous --assign : les
+	// chantiers 3 et 4 lisent le meme instantane sans toucher a l'espace
+	// d'actions, et c'est ce qui les rend separables.
+	cfg.enumeration.assign_useful =
+		(cfg.assign && !snap_useful.empty()) ? &snap_useful : nullptr;
+	++stats.recipe_snaps;
+	stats.snap_products = recipe_snap.Products();
+	stats.snap_useful = snap_useful.size();
+	stats.snap_backward = snap_backward.size();
+}
+
+// DISTANCE DE RECETTES ET PROGRES A REBOURS, sur le chemin des TIRAGES.
+//
+// Meme grandeur que `RecipeDistance` (meme recursion, meme table de
+// reclamation) mais payable a chaque decision, par trois economies :
+//   - l'instantane LOCAL : le mutex n'est plus contendu ;
+//   - les zones : on n'interroge que celles qu'une exigence MENTIONNE. Le
+//     finisseur en releve cinq, DECK et EXTRA compris (~55 entites, la moitie
+//     du cout) alors qu'aucune exigence amorcee ne les nomme (kZoneAny exclut
+//     la reserve) ;
+//   - le terrain sort GRATUITEMENT de `here`, deja calcule par l'appelant.
+//
+// UNE SEULE FONCTION POUR LES DEUX MESURES, parce que le cout EST le releve de
+// presence : le refaire pour le progres a rebours doublerait le seul poste qui
+// compte.
+uint32_t Search::RecipeEval(const BoardKey& here, uint32_t* backward_out) {
+	if(backward_out)
+		*backward_out = 0;
+	if(!recipe_snap.Products())
+		return 0;
+	prof::Scope ps(prof::kRecipe);
+	const auto con = static_cast<uint8_t>(cfg.target_player);
+	recipe_present.clear();
+	recipe_present_info.clear();
+	// Terrain : toujours, et sans masque — il ne coute rien (`here.codes` est
+	// deja calcule) et c'est la zone dont le progres a rebours a besoin.
+	for(uint32_t code : here.codes)
+		recipe_present.push_back({ code, NormalizeZone(LOCATION_MZONE) });
+	static thread_local std::vector<QueriedCard> rq;
+	for(uint32_t loc : { LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_HAND,
+						 LOCATION_EXTRA, LOCATION_DECK }) {
+		const uint8_t z = NormalizeZone(static_cast<uint8_t>(loc));
+		// Les valeurs de NormalizeZone sont disjointes bit a bit : le masque se
+		// teste par un simple ET.
+		if(!(snap_zone_mask & z))
+			continue;
+		duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS, rq);
+		for(const QueriedCard& c : rq)
+			if(c.present)
+				recipe_present.push_back({ duel.Db().Canonical(c.Code()), z });
+	}
+	std::sort(recipe_present.begin(), recipe_present.end(),
+			  [](const Requirement& a, const Requirement& b) {
+				  if(a.code != b.code) return a.code < b.code;
+				  return a.zone < b.zone;
+			  });
+	recipe_present_info.assign(recipe_present.size(), PresentInfo{});
+	if(recipe_snap.HasCardinal())
+		for(size_t i = 0; i < recipe_present.size(); ++i)
+			recipe_present_info[i] = { duel.Db().Find(recipe_present[i].code),
+									   recipe_present[i].zone };
+	static thread_local std::vector<uint8_t> claim_scratch;
+	claim_scratch.assign(recipe_present.size(), 0);
+	PresentAvailT<PresentInfo> avail{ recipe_present, recipe_present_info,
+									  claim_scratch };
+	// PROGRES A REBOURS (chantier 4) : combien de sous-produits de la
+	// decomposition sont deja DISPONIBLES. Calcule AVANT la distance, qui
+	// consomme les reclamations.
+	if(backward_out && !snap_backward.empty()) {
+		uint32_t done = 0;
+		for(uint32_t code : snap_backward) {
+			auto it = std::lower_bound(
+				recipe_present.begin(), recipe_present.end(),
+				Requirement{ code, 0 },
+				[](const Requirement& a, const Requirement& b) {
+					if(a.code != b.code) return a.code < b.code;
+					return a.zone < b.zone;
+				});
+			for(; it != recipe_present.end() && it->code == code; ++it)
+				if(ZoneIsPlayable(it->zone)) {
+					++done;
+					break;
+				}
+		}
+		*backward_out = done;
+	}
+	static thread_local std::vector<uint32_t> missing;
+	missing.clear();
+	{
+		static thread_local std::vector<uint32_t> have;
+		have = here.codes;
+		for(uint32_t t : target.codes) {
+			auto it = std::find(have.begin(), have.end(), t);
+			if(it != have.end())
+				have.erase(it);
+			else
+				missing.push_back(t);
+		}
+	}
+	return recipe_snap.DistanceAll(missing, NormalizeZone(LOCATION_MZONE),
+								   avail);
+}
+
+// HINDSIGHT (chantier 2) — les buts de substitution d'UN tirage.
+//
+// Andrychowicz et al., NeurIPS 2017 : un echec re-etiquete par le but qu'il a
+// EFFECTIVEMENT atteint. Le score stocke n'est donc PAS celui du tirage (qui
+// juge l'ancien but) mais le cout de CET accomplissement — au plus tot, au plus
+// court. Sans ce re-etiquetage on garderait, pour « comment payer Perfume
+// Dancer », la ligne qui a le plus de materiel au total : exactement le mauvais
+// exemple.
+void Search::HindsightCommit(
+	const NrpaRun& run,
+	const std::vector<std::pair<uint32_t, uint32_t>>& hits) {
+	if(hits.empty() || run.steps.empty())
+		return;
+	for(const auto& [code, depth] : hits) {
+		const double s = 1e12 - static_cast<double>(depth) * 1e5 -
+						 static_cast<double>(run.steps.size());
+		auto it = hindsight.find(code);
+		if(it == hindsight.end()) {
+			if(hindsight.size() >= cfg.hindsight_k)
+				continue;
+			HindsightGoal g;
+			g.score = s;
+			// SEULEMENT `steps` : c'est tout ce qu'AdaptRun consomme, et copier
+			// `flat` (minage en ligne) doublerait la memoire du mecanisme pour
+			// rien.
+			g.run.steps = run.steps;
+			hindsight.emplace(code, std::move(g));
+			++stats.hindsight_goals;
+		} else if(s > it->second.score) {
+			it->second.score = s;
+			it->second.run.steps = run.steps;
+		}
+	}
 }
 
 // LANDMARKS (chantier 18) : combien d'accomplissements restent a faire.
@@ -1983,6 +2217,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// il y a des decisions d'apres a compter.
 	uint32_t rep_seen[4] = { 0, 0, 0, 0 };
 	bool rep_active = false;
+	// Cartes surveillees deja comptees comme PROPOSEES dans ce tirage : un bit
+	// par entree, pour separer « combien de decisions offraient la carte » de
+	// « combien de tirages en ont vu au moins une ».
+	uint64_t rep_offered = 0;
 	const bool probe_on = cfg.probe_repeat && ProbeCount() > 0;
 	// La source du delta : `--watch` (invocations pures) quand il existe,
 	// sinon l'ancien compteur de resolutions. Les deux sont empaquetes de la
@@ -2036,6 +2274,23 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		bool armed;
 		~QhatGuard() { if(armed) self->QhatCommit(); }
 	} qhat_guard{ this, qhat_on };
+	// HINDSIGHT (chantier 2) : buts de substitution atteints par CE tirage,
+	// (code, profondeur de la premiere invocation). Garde RAII pour la meme
+	// raison que Q^ — les sorties sont trop nombreuses pour un versement ecrit
+	// a la main, et ce sont justement les tirages MORTS qui portent le signal.
+	static thread_local std::vector<std::pair<uint32_t, uint32_t>> hs_hits;
+	const bool hs_on = cfg.hindsight > 0.0f;
+	hs_hits.clear();
+	struct HindsightGuard {
+		Search* self;
+		const NrpaRun* run;
+		const std::vector<std::pair<uint32_t, uint32_t>>* hits;
+		bool armed;
+		~HindsightGuard() { if(armed) self->HindsightCommit(*run, *hits); }
+	} hs_guard{ this, &run, &hs_hits, hs_on };
+	// Les trois mecanismes qui lisent l'instantane du graphe (chantiers 1, 3, 4).
+	const bool rec_on =
+		cfg.recipes && (cfg.assign || cfg.backward || cfg.recipe_weight > 0.0f);
 	if(qhat_on) {
 		qh_nodes.clear();
 		qh_moves.clear();
@@ -2059,6 +2314,26 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			++stats.constraint_cuts;
 			return;
 		}
+		// HINDSIGHT : les monstres d'EXTRA DECK reellement invoques par ce
+		// tirage. Le filtre est un TYPE, pas une liste : aucun nom de carte n'est
+		// compile, et l'ensemble ainsi designe est exactement celui dont l'arite
+		// est le mur (une Fusion, une Synchro, un Xyz, un Lien consomment des
+		// materiaux ; un monstre normal, non).
+		if(hs_on)
+			for(uint32_t raw : summons_this_step) {
+				if(!raw)
+					continue;   // invoquee face verso : code inconnu
+				const uint32_t code = duel.Db().Canonical(raw);
+				const CardRow* row = duel.Db().Find(code);
+				if(!row || !(row->type & (TYPE_FUSION | TYPE_SYNCHRO | TYPE_XYZ |
+										  TYPE_LINK)))
+					continue;
+				bool known = false;
+				for(const auto& p : hs_hits)
+					if(p.first == code) { known = true; break; }
+				if(!known)
+					hs_hits.emplace_back(code, depth);
+			}
 		summons += static_cast<uint32_t>(summons_this_step.size());
 		resolved += resolved_this_step;
 		++stats.nodes;
@@ -2079,6 +2354,13 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		ComputeBoardKeyInto(duel, static_cast<uint8_t>(cfg.target_player),
 							board_scratch);
 		const BoardKey& here = board_scratch;
+		// INSTANTANE DU GRAPHE DE RECETTES (session 17) : la seule frontiere sure
+		// est la profondeur 0 — aucun prompt n'est enumere, donc rien ne tient
+		// l'adresse de `snap_useful`, que --assign sert a l'enumerateur.
+		if(rec_on && depth == 0 && stats.rollout_count >= recipe_snap_next) {
+			recipe_snap_next = stats.rollout_count + cfg.recipe_snap_period;
+			RecipeSnapshot();
+		}
 		// --- SONDE DE REPETITION (session 16) ---
 		// Placee ICI et pas au bloc des resolutions ci-dessus : elle a besoin du
 		// board, qui vient d'etre calcule. Trois releves, dans l'ordre.
@@ -2166,6 +2448,27 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		}
 		ArchiveObserve(here, depth, resolved);
 
+		// --- SESSION 17 : LE GRAPHE DE RECETTES SUR LE CHEMIN CHAUD ---------
+		// Une seule evaluation pour les chantiers 3 (distance) et 4 (progres a
+		// rebours) : le cout EST le releve de presence, le refaire le doublerait.
+		uint32_t rec_rem = 0, rec_back = 0;
+		if(rec_on && (cfg.recipe_weight > 0.0f || cfg.backward)) {
+			rec_rem = RecipeEval(here, cfg.backward ? &rec_back : nullptr);
+			// La reference qui transforme la distance en PROGRES. Prise a la
+			// premiere decision du tirage : tous les tirages d'une meme phase
+			// partent du meme etat, donc c'est une constante de la phase et non
+			// un denominateur qui bouge sous les comparaisons.
+			if(depth == 0)
+				recipe_base = rec_rem;
+			stats.rec_roll_sum += rec_rem;
+			stats.rec_roll_d0_sum += recipe_base;
+			++stats.rec_roll_count;
+			if(cfg.backward) {
+				stats.backward_sum += rec_back;
+				++stats.backward_count;
+			}
+		}
+
 		// Le score d'un tirage est le MAX le long de la ligne, pas l'etat
 		// final : un tirage qui a approche le board puis s'est ecrase reste un
 		// meilleur guide qu'un tirage qui n'a jamais rien pose. La nouveaute
@@ -2184,6 +2487,16 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					? CommonCodes(here.codes, target.codes) * 16u +
 						  ResolveProgress(resolved)
 					: 0u;
+				// SERIALISATION A REBOURS (chantier 4). La partition actuelle
+				// compte les cartes CIBLES posees : elle est plate sur toute la
+				// montee, precisement la ou l'arite tue le solveur. Le nombre de
+				// sous-produits de la decomposition ET/OU deja fabriques, lui,
+				// bouge des la premiere brique — la table de nouveaute se rouvre
+				// donc AVANT qu'aucune carte cible n'existe. Serialized IW /
+				// BFWS, applique a la decomposition apprise et non au but
+				// litteral.
+				if(cfg.backward)
+					partition = partition * 64u + (rec_back & 63u);
 				CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here,
 							 partition, atoms_scratch);
 				if(novelty.Observe(atoms_scratch, depth)) {
@@ -2239,6 +2552,26 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				sc += static_cast<double>(cfg.landmark_weight) * 1000.0 *
 					  static_cast<double>(total - rem);
 			}
+			// DISTANCE DE RECETTES (chantier 3) : le `h` qui DECROIT pendant
+			// qu'on construit, servi la ou il peut changer quelque chose. C'est
+			// le seul terme du score qui bouge AVANT qu'une carte cible ne soit
+			// posee : `common` compte les cartes cibles PRESENTES et vaut donc
+			// zero sur toute la montee, ce qui est la cause mecanique de la loi
+			// d'arite (9.23 (h)).
+			//
+			// EN PROGRES ET NON EN DISTANCE, et ce n'est pas cosmetique : le
+			// score d'un tirage est un MAX initialise a 0, donc un terme negatif
+			// ne remonterait jamais au-dessus et le gradient serait mort. On
+			// compte donc `d0 - d`, ce que la ligne a GAGNE depuis son depart.
+			// HORS de `material` pour la meme raison que les landmarks : cette
+			// variable sert aussi de recompense au bandit Q^, et changer son
+			// echelle rendrait les mesures de la session 15 incomparables.
+			if(cfg.recipe_weight > 0.0f && rec_on) {
+				const double gained = recipe_base > rec_rem
+										  ? double(recipe_base - rec_rem)
+										  : 0.0;
+				sc += static_cast<double>(cfg.recipe_weight) * 1000.0 * gained;
+			}
 			if(sc > run.score)
 				run.score = sc;
 			// Recompense du bandit (--qhat) : le MEME materiel, rapporte a
@@ -2260,6 +2593,27 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		if(!FillChoices(choices)) {
 			++stats.dead_ends;
 			return;
+		}
+		// SONDE D'OFFRE (session 17) : ce prompt PROPOSAIT-IL la carte
+		// surveillee ? C'est la decomposition qui manquait a la session 16 —
+		// « jamais invoquee » recouvre « jamais proposee » (panne d'ETAT) et
+		// « proposee, jamais prise » (panne d'ECHANTILLONNAGE), et les deux
+		// appellent des chantiers opposes.
+		if(probe_on && offer_this_step) {
+			for(size_t i = 0; i < ProbeCount(); ++i) {
+				if(!(offer_this_step & (1ull << i)))
+					continue;
+				++stats.rep[i].offer_steps;
+				// Le TYPE de prompt, sans quoi « proposee » est indiscernable de
+				// « listee par une revelation d'extra deck » (cf. offer_msgs).
+				stats.rep[i].offer_msgs |= 1ull << (prompt_type & 63);
+				if(const int slot = OfferSlot(prompt_type); slot >= 0)
+					++stats.rep[i].offer_by[slot];
+				if(!(rep_offered & (1ull << i))) {
+					rep_offered |= 1ull << i;
+					++stats.rep[i].offer_rollouts;
+				}
+			}
 		}
 
 		size_t pick = 0;
@@ -3000,6 +3354,26 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 			Adapt(pol, best);
 			++stats.nrpa_adapts;
 		}
+		// HINDSIGHT (chantier 2) : le MEME gradient NRPA, applique aux lignes
+		// qui ont atteint un AUTRE but que celui qu'on cherche. C'est tout le
+		// mecanisme de HER — l'information est deja la, `Adapt` n'en renforce
+		// qu'un millionieme (la seule meilleure sequence), et le reste part a
+		// la poubelle a chaque tirage.
+		//
+		// A `cfg.hindsight` fraction d'alpha : ces lignes ne sont PAS des
+		// solutions du probleme pose, seulement des demonstrations de « comment
+		// payer une invocation a k materiaux ». Les adapter a plein regime
+		// ferait converger la politique vers la Fusion la moins chere, c'est-a-
+		// dire vers la panne qu'on corrige.
+		if(cfg.hindsight > 0.0f && !hindsight.empty())
+			for(const auto& [code, g] : hindsight) {
+				(void)code;
+				AdaptRun(pol, &ctx_weights, g.run,
+						 cfg.nrpa_alpha * cfg.hindsight, cfg.nrpa_bias_known,
+						 cfg.hint_bias, cfg.ctx_shrink, cfg.nrpa_temp,
+						 cfg.ctx_max);
+				++stats.hindsight_adapts;
+			}
 	}
 	return best.score;
 }

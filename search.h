@@ -1437,6 +1437,62 @@ public:
 	// rien a chaque noeud developpe. Drapeau pose a l'amorce, jamais retire :
 	// une observation n'en cree pas.
 	bool HasCardinal() const { return has_cardinal.load(std::memory_order_relaxed); }
+	// --- CHEMIN BON MARCHE DES TIRAGES (session 17, chantiers 1/3/4) ---------
+	//
+	// Le graphe apprend PENDANT le run, donc il porte un mutex, donc il est
+	// interdit au chemin chaud : seize workers qui le prennent a chaque decision
+	// serialisent la recherche. La reponse n'est pas de retirer le verrou (les
+	// ecritures sont reelles) mais de ne le prendre que RAREMENT : chaque worker
+	// copie le graphe chez lui tous les N tirages et evalue sur sa copie, dont le
+	// mutex est non contendu (~20 ns). C'est le meme arbitrage que le catalogue
+	// d'options en ligne — un instantane echange a une frontiere sure.
+	void CopyInto(RecipeGraph& out) const {
+		std::lock_guard<std::mutex> lk(mx);
+		out.recipes = recipes;
+		out.has_cardinal.store(has_cardinal.load(std::memory_order_relaxed),
+							   std::memory_order_relaxed);
+	}
+	// Zones normalisees qu'une exigence mentionne, en masque de bits — les
+	// valeurs de NormalizeZone sont deja disjointes bit a bit. C'est ce qui rend
+	// le releve de presence proportionnel a ce que le graphe DEMANDE et non au
+	// nombre de zones qui existent : `RecipeDistance` interroge les cinq zones,
+	// DECK et EXTRA compris (~55 entites, la moitie du cout), alors qu'aucune
+	// exigence amorcee ne les nomme (kZoneAny exclut la reserve, cf.
+	// ZoneIsPlayable).
+	uint8_t ZoneMask() const {
+		std::lock_guard<std::mutex> lk(mx);
+		uint8_t m = 0;
+		for(const auto& [product, list] : recipes)
+			for(const Recipe& r : list)
+				for(const Requirement& q : r.materials)
+					m |= q.zone == kZoneAny
+							 ? static_cast<uint8_t>(0x02 | 0x10 | 0x20 | 0x0c)
+							 : q.zone;
+		return m;
+	}
+	// EXPANSION ET/OU DU BUT, a plat (chantiers 1 et 4 ; Retro*, arXiv:2006.15820
+	// — une invocation est un noeud ET, ses materiaux en sont les enfants).
+	//
+	// Une seule traversee sous verrou pour deux consommateurs : la liste des
+	// codes UTILES (assignation resolue) et la liste ORDONNEE des sous-produits
+	// a fabriquer (serialisation a rebours). Les faire chacun de leur cote
+	// prendrait deux fois le verrou et divergerait a la premiere correction.
+	//
+	// `out_reqs` : toutes les exigences rencontrees, nommees ET cardinales.
+	// `out_products` : les codes qui sont eux-memes des produits connus, en
+	//   ORDRE POSTFIXE (une brique AVANT ce qu'elle sert) et dedoublonnes. C'est
+	//   la decomposition : la resoudre de gauche a droite, c'est construire le
+	//   but a rebours.
+	void Expand(const std::vector<uint32_t>& roots, uint32_t budget,
+				std::vector<Requirement>& out_reqs,
+				std::vector<uint32_t>& out_products) const {
+		std::lock_guard<std::mutex> lk(mx);
+		out_reqs.clear();
+		out_products.clear();
+		std::vector<uint32_t> stack;   // detection de cycle : le graphe en a
+		for(uint32_t c : roots)
+			ExpandLocked(c, budget, stack, out_reqs, out_products);
+	}
 	size_t Size() const {
 		std::lock_guard<std::mutex> lk(mx);
 		size_t n = 0;
@@ -1528,6 +1584,46 @@ private:
 		if(!claim_depth)
 			memo.emplace(key, out);
 		return out;
+	}
+
+	// Expansion recursive sous verrou deja pris. Les recettes AMORCEES sont
+	// ignorees des qu'une invocation reelle du produit a ete vue — meme regle 3
+	// que DistanceLocked, sans quoi la decomposition dirait le texte la ou
+	// l'observation dit autre chose.
+	void ExpandLocked(uint32_t code, uint32_t budget,
+					  std::vector<uint32_t>& stack,
+					  std::vector<Requirement>& out_reqs,
+					  std::vector<uint32_t>& out_products) const {
+		if(!budget ||
+		   std::find(stack.begin(), stack.end(), code) != stack.end())
+			return;
+		auto it = recipes.find(code);
+		if(it == recipes.end() || it->second.empty())
+			return;
+		bool has_observed = false;
+		for(const Recipe& r : it->second)
+			if(!r.primed) { has_observed = true; break; }
+		stack.push_back(code);
+		for(const Recipe& r : it->second) {
+			if(has_observed && r.primed)
+				continue;
+			for(const Requirement& q : r.materials) {
+				if(std::find(out_reqs.begin(), out_reqs.end(), q) ==
+				   out_reqs.end())
+					out_reqs.push_back(q);
+				if(q.kind == kReqCard)
+					ExpandLocked(q.code, budget - 1, stack, out_reqs,
+								 out_products);
+			}
+		}
+		stack.pop_back();
+		// POSTFIXE : le produit entre APRES ses materiaux, donc l'ordre de la
+		// liste est un ordre de FABRICATION. Une racine deja presente dans la
+		// liste (partagee par deux recettes) garde sa premiere position, la plus
+		// profonde — celle qui respecte toutes ses dependances.
+		if(std::find(out_products.begin(), out_products.end(), code) ==
+		   out_products.end())
+			out_products.push_back(code);
 	}
 
 	mutable std::mutex mx;
@@ -2083,6 +2179,65 @@ struct SearchConfig {
 	// Poids dans le `h` du FINISSEUR (meme point d'entree que `recipe_h`).
 	// Separe du precedent pour qu'un A/B puisse n'en bouger qu'un.
 	float landmark_h = 0.0f;
+
+	// --- SESSION 17 : LES QUATRE LEVIERS CONTRE LA LOI D'ARITE ---------------
+	//
+	// LE FAIT MESURE (9.23 (h)) : la frequence d'une invocation s'effondre avec
+	// son nombre de materiaux — 42 525 tirages pour une Fusion a 2 materiaux,
+	// 2 073 a 3, ZERO des qu'un materiau est NOMME. Le solveur echoue a N = 1.
+	// Cause mecanique : `material = common x 100 + ...` ou `common` compte les
+	// cartes cibles PRESENTES, terme nul tant qu'aucune n'est posee. Rien ne
+	// recompense l'APPROCHE d'une Fusion payable.
+	//
+	// Quatre drapeaux, quatre mecanismes SEPARABLES, tous eteints par defaut.
+	// Chacun s'A/B seul : « ne jamais changer deux facteurs ».
+
+	// (1) ASSIGNATION RESOLUE (--assign). Les prompts de sous-ensemble emettent
+	// EN PLUS les deux sous-ensembles extremes au sens des recettes (cf.
+	// EnumOptions::assign_useful). Attaque la troncature LEXICOGRAPHIQUE de
+	// ForEachSubset, qui ne rend pas le bon sous-ensemble rare mais ABSENT.
+	// Periode de rafraichissement de la liste des codes utiles, en tirages : le
+	// graphe apprend pendant le run, la liste doit le suivre sans reprendre son
+	// verrou a chaque decision.
+	bool assign = false;
+
+	// (2) HINDSIGHT (--hindsight w). Andrychowicz et al., NeurIPS 2017 : un
+	// echec re-etiquete par le but qu'il a EFFECTIVEMENT atteint. Notre or
+	// mesure est la : le solveur pose Perfume Dancer 42 525 fois par run et jette
+	// tout, parce que ce n'etait pas la cible — `AdaptRun` ne renforce que la
+	// SEULE meilleure sequence. Ici, chaque monstre d'EXTRA DECK reellement
+	// invoque devient un but de substitution, et la meilleure ligne qui
+	// l'atteint subit le gradient NRPA a `w x alpha`. Aucun corpus, aucun
+	// reseau : le signal existe deja et il est jete.
+	// 0 = eteint, comportement d'avant a l'octet pres.
+	float hindsight = 0.0f;
+	// Buts de substitution retenus au plus (memoire : une NrpaRun complete
+	// chacun, par worker).
+	size_t hindsight_k = 16;
+
+	// (3) DISTANCE DE RECETTES DANS LES TIRAGES (--recipe-w). Le chantier que la
+	// session 16 a ECRIT sans le mesurer : `RecipeDistance` existe depuis le
+	// chantier 16 mais n'est appelee que dans `RunLevin`, c'est-a-dire nulle part
+	// ou 99 % du travail se fait. Portee ici sur un chemin bon marche (copie
+	// locale du graphe, zones interrogees seulement si une exigence les nomme).
+	// EN PROGRES et non en distance : `w x 1000 x (d0 - d)`, ou d0 est la
+	// distance a la premiere decision du tirage — meme convention que les
+	// landmarks, et un score qui reste positif (le score du tirage est un MAX
+	// initialise a 0 ; un terme negatif le tuerait).
+	float recipe_weight = 0.0f;
+	// Periode de rafraichissement de l'instantane du graphe, en tirages.
+	uint64_t recipe_snap_period = 2048;
+
+	// (4) SERIALISATION A REBOURS (--backward). Retro* / AO* : une invocation
+	// est un noeud ET, ses materiaux en sont les enfants ; l'arite, fatale en
+	// AVANT, devient une DECOMPOSITION en arriere. `RecipeGraph::Expand` rend la
+	// liste des sous-produits en ordre de fabrication ; le nombre de ceux qui
+	// sont deja poses entre dans la PARTITION de la table de nouveaute. La table
+	// se rouvre donc a chaque brique fabriquee — avant qu'aucune carte cible ne
+	// soit sur le terrain, c'est-a-dire exactement la ou la serialisation
+	// actuelle (cartes cibles posees) est plate. Serialized IW / BFWS, applique
+	// a la decomposition apprise au lieu du but litteral.
+	bool backward = false;
 	// Poids d'une resolution exigee (--resolve) dans le gradient des tirages.
 	// A 100 (une carte cible), les lignes 8/8 SANS rip gagnent la course
 	// d'adaptation contre les lignes rip-partielles (mesure session 4 :
@@ -2281,7 +2436,61 @@ struct RepeatProbe {
 	// distance de 1 est ambigue entre « plancher, rien a dire » et « une
 	// invocation suffit » — deux lectures opposees (cf. RecipeGraph::Knows).
 	bool known = false;
+	// SONDE D'OFFRE (session 17) — LA DECOMPOSITION DE LA LOI D'ARITE.
+	//
+	// `reached[0] == 0` (« jamais invoquee ») recouvre deux pannes opposees, et
+	// la session 16 a conclu sans les separer :
+	//   - offer_rollouts == 0 : la carte n'est JAMAIS PROPOSEE. Le core ne liste
+	//     une Fusion que si ses materiaux sont payables a cet instant, donc la
+	//     panne est dans l'ETAT — chantiers 3 (h qui decroit) et 4 (rebours).
+	//   - offer_rollouts > 0 et reached[0] == 0 : elle est PROPOSEE et jamais
+	//     prise. La panne est dans l'ECHANTILLONNAGE — chantiers 1 (assignation)
+	//     et 2 (hindsight).
+	// `offer_steps` compte les DECISIONS, `offer_rollouts` les TIRAGES : leur
+	// rapport dit si l'occasion est unique ou repetee.
+	uint64_t offer_steps = 0, offer_rollouts = 0;
+	// TYPES DE PROMPT qui l'ont proposee, un bit par `prompt_type` — meme
+	// mecanique que `forced_default_prompts`. RESERVE QUI LES REND
+	// INDISPENSABLES : « presente dans le pool d'un prompt » n'est PAS
+	// « invocable ». Un effet qui REVELE l'extra deck, une defausse, une
+	// recherche listent aussi la carte. Sans la ventilation, une offre de 5 %
+	// se lirait « le jeu te l'a propose 33 000 fois et tu as refuse » alors
+	// qu'aucune de ces 33 000 fois n'etait peut-etre une invocation.
+	uint64_t offer_msgs = 0;
+	// OFFRES COMPTEES PAR TYPE DE PROMPT. Le masque seul ne suffisait pas, et la
+	// premiere lecture de la session 17 s'est trompee a cause de cela : Leo et
+	// Liger etaient « proposes dans 36 500 tirages », ce qui se lisait « le jeu
+	// te les a offerts et tu as refuse » — alors que le compte de DECISIONS
+	// valait 36 507 pour 36 503 tirages, c'est-a-dire UN prompt par tirage,
+	// toujours le meme, et aucune trace de pose. Un pool qui contient les
+	// QUATRE Fusions du deck a la fois est l'extra deck lu en entier, pas une
+	// liste d'invocations payables.
+	//
+	// Indices : cf. kOfferMsgs. Six types suffisent — au-dela on paierait 64
+	// compteurs par carte pour des prompts qui ne portent aucune invocation.
+	uint64_t offer_by[6] = { 0, 0, 0, 0, 0, 0 };
 };
+
+// Types de prompt suivis nommement par la sonde d'offre. L'ordre est celui de
+// RepeatProbe::offer_by et il est partage par le solveur et l'impression.
+//   0 IDLECMD  : invocation normale/speciale/pose depuis la main ou l'extra
+//   1 CARD     : selection generique — c'est LUI qui est ambigu
+//   2 UNSELECT : selection incrementale de materiaux
+//   3 SUM      : tributs, materiaux Synchro
+//   4 CHAIN    : fenetre de chaine
+//   5 POSITION : la carte est POSEE — la seule preuve directe d'invocation
+inline int OfferSlot(uint8_t msg) {
+	switch(msg) {
+	case MSG_SELECT_IDLECMD:       return 0;
+	case MSG_SELECT_CARD:
+	case MSG_SELECT_TRIBUTE:       return 1;
+	case MSG_SELECT_UNSELECT_CARD: return 2;
+	case MSG_SELECT_SUM:           return 3;
+	case MSG_SELECT_CHAIN:         return 4;
+	case MSG_SELECT_POSITION:      return 5;
+	default:                       return -1;
+	}
+}
 
 struct SearchStats {
 	uint64_t nodes = 0;             // etats developpes
@@ -2365,6 +2574,29 @@ struct SearchStats {
 	// (piege 52).
 	double landmark_h_sum = 0.0;
 	uint64_t landmark_h_count = 0;
+	// --- SESSION 17 : LA VIE DES QUATRE MECANISMES (piege 52) ---------------
+	// Un mecanisme dont on ne mesure ni le travail ni le cout finit regle a
+	// l'aveugle, et la session 16 l'a paye : `landmarks : h moyen` n'etait
+	// imprime que par une fonction qui ne couvre PAS la phase des tirages,
+	// c'est-a-dire pas la ou le drapeau agissait — l'A/B est parti sans savoir
+	// si le `h` decroissait.
+	//
+	// (3) distance de recettes evaluee DANS LES TIRAGES : somme, compte, et la
+	// reference d0 sommee. `d0_sum / count` contre `sum / count` dit si la
+	// distance a REELLEMENT decru, et non seulement si elle a ete calculee.
+	double rec_roll_sum = 0.0, rec_roll_d0_sum = 0.0;
+	uint64_t rec_roll_count = 0;
+	// Instantanes du graphe pris par les workers (chantiers 1/3/4) et taille du
+	// dernier : a 0 produits, les trois mecanismes sont VIVANTS ET INERTES.
+	uint64_t recipe_snaps = 0;
+	uint64_t snap_products = 0, snap_useful = 0, snap_backward = 0;
+	// (4) sous-produits deja fabriques, sommes sur les evaluations. Rapporte a
+	// `snap_backward`, c'est la profondeur de decomposition reellement atteinte.
+	double backward_sum = 0.0;
+	uint64_t backward_count = 0;
+	// (2) hindsight : buts de substitution retenus, et adaptations qu'ils ont
+	// declenchees. A 0 buts, le mecanisme n'a rien vu passer.
+	uint64_t hindsight_goals = 0, hindsight_adapts = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -2692,6 +2924,30 @@ private:
 	// zones cachees ne sont interrogees que si un landmark y vit — c'est ce qui
 	// rend l'appel payable dans les TIRAGES, ou RecipeDistance ne l'est pas.
 	uint32_t LandmarkRemaining(const BoardKey& here);
+	// --- SESSION 17 : LE CHEMIN BON MARCHE DU GRAPHE DE RECETTES -------------
+	//
+	// Rafraichit l'instantane local du graphe (copie sous verrou, tous les
+	// `cfg.recipe_snap_period` tirages) et en derive les trois objets que les
+	// chantiers 1, 3 et 4 consomment : le masque de zones, la liste des codes
+	// UTILES et la decomposition a rebours. Appelee a la frontiere sure d'un
+	// tirage (depth 0), jamais en cours de ligne — `cfg.enumeration.assign_useful`
+	// pointe dans `snap_useful`, qui ne doit pas bouger sous un prompt en vol.
+	void RecipeSnapshot();
+	// Distance de recettes ET progres a rebours, sur l'instantane local et avec
+	// un releve de presence limite aux zones qu'une exigence mentionne.
+	//
+	// UNE SEULE FONCTION POUR LES DEUX, parce que le cout EST le releve de
+	// presence : le calculer deux fois doublerait la facture du seul poste qui
+	// compte. `backward_out`, non nul, recoit le nombre de sous-produits de la
+	// decomposition deja disponibles.
+	uint32_t RecipeEval(const BoardKey& here, uint32_t* backward_out);
+	// HINDSIGHT (chantier 2) : verse les buts de substitution atteints par un
+	// tirage. `hits` : (code, profondeur de la premiere invocation). Appelee par
+	// un garde RAII — PolicyRollout sort par une douzaine de `return`, et un
+	// tirage qui MEURT apres avoir pose une Fusion reste un exemple parfait de
+	// « comment payer cette Fusion ».
+	void HindsightCommit(const NrpaRun& run,
+						 const std::vector<std::pair<uint32_t, uint32_t>>& hits);
 	// Liste des cartes que la SONDE observe. `--watch` quand il est donne (pur
 	// comptage, aucun biais) ; a defaut les entrees --resolve/--summon-min,
 	// pour ne pas casser les mesures anterieures — mais celles-la BIAISENT
@@ -2788,6 +3044,43 @@ private:
 	// re-echantillonnage (le graphe de recettes grossit pendant le run).
 	static constexpr uint64_t kRepD0Period = 2048;
 	uint64_t rep_d0_next = 0;
+	// Cartes surveillees PROPOSEES par le dernier prompt enumere, un bit par
+	// entree (`--watch`). Remis a zero par FillChoices, donc valable pour le
+	// prompt courant et lui seul. Strictement observationnel.
+	uint64_t offer_this_step = 0;
+
+	// --- SESSION 17 : INSTANTANE LOCAL DU GRAPHE DE RECETTES -----------------
+	// Copie PAR WORKER, rafraichie tous les `cfg.recipe_snap_period` tirages.
+	// Son mutex n'est jamais contendu : c'est ce qui rend l'evaluation payable
+	// dans les tirages, la ou le graphe partage ne l'est pas.
+	RecipeGraph recipe_snap;
+	uint64_t recipe_snap_next = 0;
+	// Zones normalisees qu'une exigence de l'instantane mentionne. Le releve de
+	// presence n'interroge que celles-la — DECK et EXTRA (~55 entites) ne sont
+	// payes que si une recette observee les nomme vraiment.
+	uint8_t snap_zone_mask = 0;
+	// Codes UTILES (chantier 1) : servis a l'enumerateur par
+	// `cfg.enumeration.assign_useful`. Ce vecteur ne doit etre reecrit qu'a la
+	// frontiere d'un tirage — l'enumerateur en tient l'adresse.
+	std::vector<uint32_t> snap_useful;
+	// Decomposition a rebours (chantier 4) : sous-produits en ordre de
+	// fabrication, dedoublonnes.
+	std::vector<uint32_t> snap_backward;
+	std::vector<Requirement> snap_reqs;   // tampon de RecipeGraph::Expand
+	// Distance de recettes a la PREMIERE decision du tirage courant : la
+	// reference qui transforme une distance en PROGRES (sans elle, le terme
+	// serait negatif et le score du tirage, initialise a 0, ne bougerait jamais).
+	uint32_t recipe_base = 0;
+
+	// --- HINDSIGHT (chantier 2) ---------------------------------------------
+	// But de substitution -> meilleure ligne qui l'atteint. Le score est
+	// RE-ETIQUETE : ce n'est pas le materiel de la ligne (qui juge l'ancien but)
+	// mais le COUT de l'accomplissement — au plus tot, au plus court.
+	struct HindsightGoal {
+		double score = -1;
+		NrpaRun run;
+	};
+	std::unordered_map<uint32_t, HindsightGoal> hindsight;
 	// Changements de tour vus par le dernier StepToPrompt. Le board cible est
 	// celui de la fin du tour 1 : au-dela, il est fige et tout etat explore est
 	// du temps perdu.
