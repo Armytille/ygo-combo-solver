@@ -4103,3 +4103,663 @@ avec son ancien descripteur, simplement ALLUMÉE — bat le témoin sur les deux
 mesuré dans ce régime. Sans ce bras, le gain de `mcps12` sur le témoin aurait été attribué au
 conditionnement par le chemin. Réserve : ×1,5 est dans la bande de bruit (~2× à graine fixée),
 donc deux graines de même signe sont un indice fort, pas un fait.
+
+### 9.22 Session 15 : `Q̂` implémentée pour de vrai — et la sonde répond seule à la question de l'opérateur
+
+Mission fixée en fin de session 14 : **« nos implémentations sont défaillantes ; plutôt que de
+fallback sur des solutions bricolées non optimales, il faut corriger. »** La session 14 avait
+listé six mécanismes à moitié câblés et s'était fait prendre deux fois à mesurer *autour* d'eux.
+Chantier principal nommé d'avance : la **statistique de permutation `Q̂`** de MCPS
+(arXiv:2510.06381), dont §9.21 (k) avait établi que le projet la **citait sans l'implémenter**.
+
+**(a) LE RECADRAGE, écrit dans le code avant toute mesure.** Le papier a été relu en séance et
+les commentaires qui invoquaient MCPS dans `search.h` sont corrigés :
+
+- le bloc « politique à DEUX NIVEAUX » ne dit plus « inspiré de MCPS ». Il porte désormais un
+  avertissement de paternité : MCPS est un **MCTS** (arbre, compteurs de visites, trois
+  **moyennes de récompense** combinées à **poids proportionnels aux effectifs**) ; `EffectiveWeight`
+  combine deux **logits** mis à jour par le gradient NRPA de la **seule meilleure séquence**. Ce
+  que le bloc emprunte au papier est l'**idée** de combiner des estimateurs pondérés par leur
+  évidence — et sa retenue `s = n/(n+k)` **réintroduit** l'hyperparamètre de biais que la
+  dérivation par variance minimale de MCPS **supprime**. C'est l'inverse du papier, pas son
+  application.
+- `--mcps` est **marqué RÉFUTÉ** dans `search.h`, dans `--help` et **à l'exécution** : le run
+  imprime le verdict de 9.21 (k) et le diagnostic (« conditionnement de MCPS greffé sur un
+  LOGIT »). Il reste utilisable — *un mécanisme réfuté qu'on ne peut plus rejouer n'est plus
+  réfutable* — mais aucune mesure ne peut plus en sortir en croyant mesurer MCPS. `--qhat` et
+  `--mcps` refusent de se composer, et le run le dit au lieu de mélanger deux mécanismes
+  incompatibles.
+
+**(b) `--qhat <k>` : ce qu'on prend du papier, ce qu'on n'en prend pas, et pourquoi.** Un
+**bandit de tête** sur les `k` premières décisions enregistrées : le coup y est choisi par
+`argmax val`, au-delà NRPA échantillonne comme avant, **à l'octet près**.
+
+    val(a) = (n·Q(s,a) + n̂·Q̂(s_r,a)) / (n + n̂)
+
+- **`Q̂`, oui** — la fenêtre à bitsets est transportable telle quelle dans une architecture SANS
+  arbre : elle ne dépend que des tirages. Un bitset par code de coup sur les W derniers tirages,
+  le tableau parallèle des récompenses, `Q̂` par `popcount` sur l'intersection.
+- **`Q`, oui, sur un arbre minuscule** — `k` plis seulement. Le haut de l'arbre est étroit
+  (mesuré §9.21 (j) : 207 cases à k = 6) et c'est là qu'une ouverture décide de la viabilité de
+  toute la ligne. Clé de nœud : la **somme mélangée** des coups joués — commutative, donc deux
+  ordres qui mènent au même multiensemble partagent leurs statistiques. C'est à la fois le
+  principe directeur du projet (recherche sur le GRAPHE d'états) et la lecture de MCPS, dont les
+  permutations disent exactement cela.
+- **`Q̃` (l'AMAF de GRAVE), NON — et c'est une raison de fond, pas de la paresse.** À la racine
+  les deux estimateurs **coïncident identiquement** : `Q̃(root,a)` = moyenne des parties passant
+  par la racine qui contiennent `a` = moyenne de **toutes** les parties contenant `a` =
+  `Q̂(root,a)`, la condition du chemin étant vide. Notre arbre est profond de six plis et sa
+  référence de permutation est la racine ou l'un de ses tout premiers descendants : ajouter `Q̃`
+  compterait deux fois les mêmes tirages, ce que la dérivation par variance minimale — qui
+  suppose les estimateurs **indépendants** — ne pardonne pas. On garde la paire `(Q, Q̂)` et la
+  **même** formule de poids. **Aucun hyperparamètre de biais n'est réintroduit.**
+
+Quatre points de conception que le code imposait :
+
+1. **LA RÉCOMPENSE, choisie explicitement AVANT de coder.** Le papier travaille sur des taux de
+   victoire dans [0,1] ; notre score de tirage est `matériel×1000 + nouveauté`, non borné et
+   incomparable d'un run à l'autre. Retenu : `r = (meilleur matériel atteint le long du tirage) /
+   (matériel du board cible)`, plafonné à 1, et **exactement 1** au but. Trois propriétés voulues
+   — bornée ; **comparable entre runs**, le dénominateur étant une constante du PROBLÈME et non
+   le meilleur score courant (normaliser par lui ferait bouger l'échelle des entrées **déjà dans
+   la fenêtre**, et `Q̂` comparerait des récompenses incomparables) ; alignée sur l'objectif que
+   NRPA optimise déjà. **La nouveauté en est exclue** : c'est un départage de gradient, pas une
+   mesure de réussite, et elle n'est pas bornée.
+2. **LES DÉCISIONS DU BANDIT SONT EXCLUES DU GRADIENT NRPA** (`PolicyStep::bandit`, sauté par
+   `AdaptRun`). Le gradient de NRPA n'est défini que pour un coup **tiré du softmax** ;
+   l'appliquer à un coup choisi par argmax le pousserait `+α` à chaque tirage **sans le moindre
+   contrepoids** — le mode d'échec exact qui a tué `--mcps`. Le bandit a sa propre mémoire (des
+   moyennes sur TOUS les tirages) ; c'est elle qui joue le rôle du gradient sur ces décisions.
+3. **LE VERSEMENT PASSE PAR UN GARDE RAII.** `PolicyRollout` sort par une douzaine de `return`
+   — impasse, terminal, contrainte violée, garde, borne brûlées, budget — et **ce sont justement
+   les tirages MORTS dont `Q̂` tire son signal**. Un versement écrit à la main à chaque sortie en
+   aurait oublié un, en silence.
+4. **LA RACINE N'EST JAMAIS GELÉE.** Le papier gèle les statistiques de permutation d'un nœud à
+   ρ visites et **exclut explicitement la racine** — et pour cause : c'est le seul nœud dont la
+   condition est vide, donc le seul dont la statistique se maintient **incrémentalement** en
+   O(coups du tirage) au lieu d'un balayage. C'est aussi celui qui porte tout le diagnostic. Les
+   nœuds non racine gèlent à ρ et deviennent la référence de leur sous-arbre ; leurs `(n̂, Q̂)`
+   sont calculés **à la demande et mis en cache** — même sémantique que le calcul en bloc du
+   papier (une valeur par (nœud, code), figée dès le premier usage) pour une mémoire
+   proportionnelle aux coups réellement proposés et non à tout le vocabulaire.
+
+**Coût mesuré** (étalon A but seul, 16 workers, W = 4096) : **10 à 11 Mo au total**, 118 à 123
+codes en fenêtre, 48 à 51 nœuds d'arbre au worker le plus chargé à k = 6. Deux ordres de
+grandeur sous ce que la troncature devait borner — le cadran `--qhat-window` a de la marge, et
+la mémoire est imprimée au bilan pour qu'il ne se règle jamais à l'aveugle.
+
+**(c) LA SONDE RÉPOND SEULE À LA QUESTION DE L'OPÉRATEUR — et c'est le résultat de la session.**
+Le chantier exigeait une sonde AVANT tout A/B, parce que la courbe d'accord du corpus est
+**aveugle à `Q̂`** (elle mesure la reproduction d'un corpus qui ne contient QUE des bonnes lignes,
+alors que `Q̂` tire son signal des échecs). Elle imprime deux tables ; c'est la seconde qui
+compte — `Q̂({}, a)` pour **tout** coup `a`, la récompense moyenne des lignes qui l'ont joué,
+n'importe où et dans n'importe quel ordre.
+
+Relevé en fin d'un run nu de 120 s, graine 888 (`s15q_qhat6nu_888.log`).
+
+**LIRE `n̂` CORRECTEMENT, c'est le premier piège de cette table.** Le run a fait 833 000 tirages,
+mais la fenêtre est GLISSANTE et vaut `W = 4096` **par worker** : `Q̂` n'est calculée que sur les
+4 096 derniers tirages de chacun, tout le reste a été évincé. Les `n̂` ci-dessous sont des sommes
+sur seize workers, donc plafonnées à ~65 000. « `n̂ = 34 966` » signifie « présent dans 34 966 des
+~65 000 tirages **encore en fenêtre** », pas dans 34 966 des 833 000. Confondre les deux ferait
+lire ce tableau comme le résultat d'un budget quinze fois plus grand qu'il ne l'est.
+
+| coup, condition `s = {}` | n̂ | Q̂ | indicé ? |
+|---|---|---|---|
+| **Lunalight Gold Leo** | 34 966 | **0,066** | **non** |
+| Fire Formation - Tenki (activer) | 11 671 | 0,053 | non |
+| Lunalight Tiger | 8 372 | 0,012 | oui |
+| Lunalight Kaleido Chick | 8 186 | 0,002 | oui |
+| Lunalight Yellow Marten | 4 096 | 0,002 | non |
+| Lunalight Gold Leo (autre clé) | 1 123 | 0,002 | non |
+
+**Le fait, en une phrase : `Q̂` classe Lunalight Gold Leo PREMIÈRE sur les 24 coups d'effectif
+suffisant, cinq fois au-dessus de Lunalight Tiger et trente-trois fois au-dessus de Kaleido
+Chick — et Gold Leo est la seule de ces cibles à ne recevoir AUCUN `--hint`.** Les deux cibles
+mal classées, elles, sont dans la liste d'indices et partent donc avec un biais
+d'échantillonnage de +2,0. C'est exactement le diagnostic posé par l'opérateur en fin de session
+14 — *si Tenki cherche autre chose que Gold Leo la ligne meurt en ~20 décisions ; le solveur ne
+devrait pas avoir besoin d'indice et devrait le trouver seul et vite* — et il y répond **sur le
+« seul », sans indice, à partir des échecs**. L'information existait (le tirage se termine, c'est
+observable) ; il manquait un endroit où la mettre.
+
+**CE QUE CETTE MESURE NE DIT PAS, ET L'OBJECTION QUI L'A FAIT DIRE (séance).** Elle ne dit rien
+du « **et vite** ». Le relevé est pris EN FIN de run : il établit que le classement est correct à
+ce moment-là, pas à quel budget il l'est devenu. La première rédaction de ce paragraphe annonçait
+« en quelques centaines de milliers de tirages » — **c'était faux par confusion** entre le nombre
+de tirages que le run a effectués et le coût de la découverte, qui n'a pas été mesuré. Le second
+chiffre est d'ailleurs borné par la fenêtre et non par le run : au plus 4 096 tirages par worker
+comptent, quel que soit le budget.
+**Le coût de la découverte est une COURBE, elle est bon marché (quelques runs de 10 à 40 s lus
+sur la sonde), et elle est le premier travail de la session suivante.** Son point de comparaison
+est déjà connu et il est brutal : sans `Q̂`, le solveur ne concentre **jamais**, à aucun budget —
+c'est le diagnostic de 9.21 (j), un poids par code de coup aveugle à l'état et un sous-arbre mort
+re-parcouru des centaines de milliers de fois. Si la courbe donne quelques milliers de tirages,
+le mécanisme tient sa promesse ; si elle donne des dizaines de milliers, il la tient faiblement
+et le chantier suivant est celui que 9.21 (j) nommait déjà — une vraie **mémoire d'impasse** dans
+les tirages, pas une moyenne.
+
+**Ce que la sonde a dû devenir pour dire cela, et la leçon d'instrument.** Première version : la
+table du nœud racine, c'est-à-dire les coups que le bandit **choisit** à la première décision.
+Elle rendait **quatre lignes** — poser Tenki, l'activer, aller en Battle Phase, finir le tour —
+et ne disait rien : la cible de Tenki se décide au **deuxième** prompt. La statistique qui répond
+n'est pas « ce que le bandit décide à la racine » mais **`Q̂({}, ·)` sur tout le vocabulaire**,
+qui existe pour n'importe quel coup dès qu'il apparaît dans un tirage. Les deux tables sont
+désormais imprimées, et c'est la seconde qui est l'instrument.
+
+**(d) LES CINQ AUTRES DÉFAILLANCES : quatre réparées, une réfutée par son propre criblage.**
+
+| mécanisme | ce qui était cassé | état après la s15 |
+|---|---|---|
+| `novelty_rollout_cut` | câblé dans `Rollout()` (tirage glouton, qui ne fait plus rien), **jamais** dans `PolicyRollout` — où le verdict de nouveauté était pourtant CALCULÉ à chaque décision (4 requêtes core, ~60-80 sondes) et jeté après un simple départage | câblé + `--novelty-rollout-cut`. **RÉFUTÉ au criblage** (ci-dessous) |
+| `allow_phase_change` | lu au seul prompt *idle* ; au prompt *bataille* les deux sorties de phase étaient émises **inconditionnellement** — le drapeau ne fermait qu'une moitié de la porte. Aucun drapeau CLI | les deux prompts couverts + `--no-phase-change`, avec garde-fou : un prompt qui n'offrirait plus rien garde ses sorties |
+| `canonical_zones` | déclaré, documenté, allumé nulle part (9.20 (e)) | `--canonical-zones` (non jugé cette session) |
+| archive Go-Explore | clé de tri `résolutions<<44 \| overlap<<36 \| ~décisions` : les résolutions SATURENT en but seul, l'archive range des **fins de ligne**, le finisseur rend ÉPUISÉ en 0-13 expansions (9.21 (f)) | **quota par niveau de progrès** (`--archive-spread`) : l'archive redevient une COUVERTURE et non un palmarès |
+| `--finisher-options` | écrit, compilant, **jamais jugé** ; sans objet sur étalon A (rien à compresser dans 3 expansions) | **non traité** — son juge est l'étalon B contraint, il reste en tête du chantier suivant |
+
+**Le criblage a fait son travail, et il a éliminé.** 90 s, graine 888, lecture sur le critère
+INTERNE de chaque mécanisme (`tools/s15_ab.ps1`) :
+
+| bras | critère interne du mécanisme | témoin | bras |
+|---|---|---|---|
+| `--no-phase-change` | tirages morts au changement de tour | 82 % | **67 %** |
+| `--novelty-rollout-cut` | tirages atteignant ≥1 résolution | 206 093 | **9** |
+| `--archive-spread` | expansions par racine du finisseur (médiane) | 15 | **88** |
+
+`--novelty-rollout-cut` est **RÉFUTÉ sur son propre critère** : le mécanisme ne coupe pas les
+branches muettes, il **détruit les tirages** — ≥1 résolution passe de 206 093 à 9, `best` de 1/4
+à 0/4, et seulement 2 % des tirages atteignent le changement de tour parce qu'ils meurent bien
+avant. C'est **exactement** le mode de défaillance documenté en §9.3 pour Rollout-IW sans arbre
+(la table de nouveauté est partagée entre tirages ; un tirage qui re-parcourt le même début meurt
+à `patience` décisions avant d'avoir pu dévier), mesuré à l'époque sur les tirages GLOUTONS — il
+vaut à l'identique sur les tirages sous politique. Le drapeau reste implémenté et opt-in ; le
+commentaire de `SearchConfig` disait déjà « MESURE et désactivé par défaut », c'est maintenant
+vrai des deux passes. **Coût de ce verdict : 90 secondes.** C'est ce que le criblage sur critère
+interne est censé rendre, et c'est la deuxième fois qu'il rend un verdict pour le prix d'un
+pilote (la première était `--options-len`, 9.21 (i)).
+
+`--archive-spread` survit au criblage sur son critère : l'archive contient désormais des racines
+de niveaux r1 et r2 à côté des r2/r3, la médiane d'expansions par racine passe de 15 à 88
+(×5,9) et le total de 8 002 à 10 296. Elle range de nouveau ce qui a de la ligne devant lui.
+
+**(e) L'A/B DE MASSE, ET CE QU'IL A VRAIMENT MESURÉ.** Quatre bras (témoin `--options-online 60`,
+`--qhat 6`, `--no-phase-change`, `--archive-spread`) sur trois tirages, 300 s, binaire PGO du
+jour. Onze runs terminés sur douze :
+
+| bras | 888 | 1234 | 4242 | lignes écrites |
+|---|---|---|---|---|
+| témoin | 2/4 | 2/4 | 2/4 | **0** |
+| `--qhat 6` | 2/4 | 2/4 | 2/4 | **0** |
+| `--no-phase-change` | 2/4 | 2/4 | — | **0** |
+| `--archive-spread` | 2/4 | 2/4 | — | **0** |
+
+**Aucun bras ne dépasse 2/4 et aucun n'écrit de solution.** Deux lectures, la seconde étant la
+seule qui compte.
+
+*Lecture prématurée, écrite puis RETIRÉE dans la même séance.* Ces onze runs donnant tous 2/4,
+il a été conclu que « la dispersion a disparu du juge ». **Faux** : un douzième run de la MÊME
+commande sur la MÊME graine (`s15gf_temoin_888`, après re-PGO) rend **1/4**. Onze accords ne font
+pas une constante, et la dispersion documentée depuis la session 4 — l'ordre des échanges entre
+workers dépend de l'ordonnancement — n'a pas disparu. Elle était seulement passée sous le seuil
+de résolution d'un juge qui ne compte que jusqu'à 4.
+
+*Lecture qui compte* : **ce plafond n'est pas une propriété de la recherche, c'est un but que le
+jeu interdit de satisfaire.** Voir (f).
+
+**(f) LE BUT ÉTAIT INSATISFIABLE — sept sessions de « but seul » ont mesuré contre l'impossible.**
+Question de l'opérateur : *« ce qui m'intéresse, c'est de savoir si en but seul on peut converger
+vers la solution dans un temps raisonnable (quelques minutes) »*. La réponse a demandé de lire
+le code du but au lieu de dépenser des runs, et elle est **non, pour une raison qui n'est pas la
+recherche**. Trois faits, chacun vérifié dans le source ou dans la base de cartes :
+
+1. **La cible POSÉE a une zone S/T VIDE.** `--target` construit le board *table rase* — « le
+   board de la référence n'entre pas » — et pousse chaque carte en MZONE. La cible ne contient
+   donc aucune magie ni piège.
+2. **Le but est l'ÉGALITÉ EXACTE.** `GoalCheck` teste `here == target`, et `BoardKey::operator==`
+   compare l'égalité des entrées, MZONE **et SZONE confondues**. Une zone S/T vide dans la cible
+   est donc une **exigence d'absence** : le terrain final doit être nu.
+3. **La main ne peut pas laisser la zone S/T vide.** Elle est faite de trois *Fire Formation -
+   Tenki*, `type = 0x20002` — une magie **CONTINUE**, qui reste sur le terrain dès qu'on
+   l'active, et qui l'occupe aussi si on la pose. Et `--resolve 2344618` exige la résolution de
+   *Lunalight Masquerade*, qui siège également en zone S/T.
+
+**Aucune ligne partant de cette main ne pouvait satisfaire ce but.** Le dossier concorde à la
+ligne près : **zéro solution écrite en but seul depuis la session 8**, et un plafond que tous les
+rapports décrivent par la même phrase — « tous les codes y sont : le but ne diffère que par le
+DÉTAIL ». Le détail était les cartes que le jeu oblige à laisser sur le terrain.
+
+**ET IL Y AVAIT UNE SECONDE CAUSE, INDÉPENDANTE.** `EntryOf` mélange les **matériaux Xyz** et les
+compteurs dans l'entrée d'une carte, y compris sous `goal_view`. Une cible posée est un
+`QueriedCard` nu — code et position, **aucun matériau**. Or *Number 41: Bagooska* est un Xyz qui
+porte toujours ses matériaux sur le terrain. **L'entrée « Bagooska posée » ne pouvait donc égaler
+aucune Bagooska réelle**, et Bagooska figure dans TOUTES les commandes de l'étalon A depuis la
+session 7ter. Relâcher la zone S/T seule n'aurait pas suffi.
+
+**L'INSTRUMENT QUI AURAIT DÛ LE MONTRER IMPRIMAIT LE MAUVAIS BOARD.** Le bloc de diagnostic
+« tous les codes y sont » affiche `ref.target_self` — le board du **gabarit** — sous l'étiquette
+« cible : ». Sous `--no-ref` ce n'est pas la cible. L'opérateur lisant ce bloc y voyait un board
+*avec* ses Tenki en zone S/T et ne pouvait pas soupçonner que la cible réelle exigeait le
+contraire. C'est la famille de piège que ce document catalogue depuis la session 9 — *un
+mécanisme qu'on ne mesure pas là où il agit* — appliquée cette fois au but lui-même.
+
+**LE CORRECTIF, en trois pièces.**
+- **La sémantique du but dépend désormais de l'ORIGINE de la cible.** Cible **capturée** sur une
+  vraie ligne (étalon B) : égalité exacte, elle porte ses propres S/T et ses propres matériaux.
+  Cible **POSÉE** (`--target`) : **inclusion, par défaut**. Poser une cible veut dire « je veux
+  ces cartes », pas « ces cartes et le terrain nu autour ». Arbitrage du joueur, versé en séance :
+  *« les S/T sont du bonus, pour Lunalight seuls les monstres comptent in fine »*.
+  `--target-exact` restaure l'ancien comportement pour l'A/B.
+- **L'inclusion porte sur des entrées RELÂCHÉES** — (zone, code, face), sans matériaux ni
+  compteurs (`BoardKey::loose`, `LooseEntryOf`) — sans quoi la seconde cause survivrait.
+- **Le bloc de diagnostic imprime la cible réellement posée**, et dit explicitement qu'une zone
+  S/T absente est une exigence d'absence.
+
+**Santé stricte après correctif : 20 lignes de diff, durées et nom d'outdir seulement.** L'étalon
+même-deck, dont la cible est CAPTURÉE, garde l'égalité exacte et ne bouge pas d'un digest.
+
+**ET LE CORRECTIF NE SUFFIT PAS — c'est le résultat, et il faut le dire sans le tourner.** A/B à
+UN SEUL FACTEUR contre les onze runs ci-dessus : commande témoin identique, graine 888, 300 s,
+binaire re-PGO, seule la sémantique du but change (`s15gf_temoin_888`). Résultat : **1 des 4
+cartes cibles, aucune solution**. Le board n'est tout simplement pas assemblé.
+
+La conclusion correcte a donc deux termes, et confondre les deux serait la faute :
+- **Le but était bien insatisfiable**, c'est prouvé par lecture du source et de la base de
+  cartes, pas par un run. Tant qu'il l'était, *aucune ligne, même parfaite, n'aurait pu être
+  enregistrée comme solution*. Ce plafond-là est réel et il est levé.
+- **Il MASQUAIT le mur, il ne le CAUSAIT pas.** Avec un but désormais atteignable, la recherche
+  n'assemble toujours pas 3 Liger Dancer + Bagooska en 300 s : au mieux 2 des 4 codes, parfois 1.
+  Le mur de l'assemblage est intact et n'a jamais été mesuré proprement — il l'est enfin.
+
+Autrement dit : sept sessions ont mesuré contre un but impossible, et la première mesure contre
+un but possible dit que le problème d'assemblage reste entier. Les deux faits tiennent ensemble ;
+seul le second est désormais un objet de recherche légitime.
+
+**CE QUE CELA RETIRE DU DOSSIER, ET QU'IL FAUT DIRE SANS ATTÉNUER.** Toute conclusion de la forme
+« le but seul plafonne à k/4 » des sessions 8 à 15 portait sur un but que le jeu interdit — y
+compris le « 2/4 sur 3 graines sur 3 » de 9.21 (d) et le « 2/4 à 1 200 s » de 9.21 (f). Les
+verdicts **comparatifs** restent lisibles, tous les bras ayant subi la même contrainte : la
+supériorité de `--options-online` sur le run nu, la réfutation de `--options-ctx`, de
+`--options-len`, de `--mcps`, le signe de `--nrpa-lr`. Ce qui tombe, ce sont les verdicts
+**absolus** sur la capacité du mode but seul — ils n'ont jamais été mesurés.
+
+**(g) RECADRAGE DEMANDÉ EN SÉANCE — LA GRAINE EST UN TIRAGE, PAS UN CADRAN, ET LA DISPERSION EST
+UN DÉFAUT DU SOLVEUR.** Objection de l'opérateur, posée pendant l'A/B : *« cette histoire de
+graine semble être un non-sens ; quelle que soit la seed on devrait avoir les mêmes résultats,
+un utilisateur ne va pas lancer plusieurs runs en changeant la seed. »* Elle est juste, et elle
+l'est davantage que formulée. Trois choses, dans l'ordre.
+
+1. **Ce que les graines multiples mesurent.** Elles ne simulent pas un usage. L'utilisateur lance
+   **un** run ; ce run tombe quelque part dans une distribution d'issues. Tirer trois graines
+   estime **la probabilité que son unique run réussisse** — c'est-à-dire exactement la question
+   qui l'intéresse. Il n'existe pas d'autre façon de l'estimer que de tirer plusieurs fois. Le
+   juge d'un mécanisme n'est donc jamais « 2/4 sur la graine 888 » mais **la fraction de tirages
+   qui convertissent** (9.21 (d) : 3 sur 3 contre 0 sur 3 — c'est cette forme-là qui vaut).
+2. **Fixer la graine ne rend même pas le run reproductible.** 9.21 (i) l'a mesuré sans le
+   chercher : deux runs de la commande IDENTIQUE, même graine, même binaire, rendent 2/4 contre
+   1/4 et ≥3 à 115 933 contre 91 167. La cause est connue depuis la session 4 — seize workers
+   échangent leur meilleure séquence de façon asynchrone et l'ordre des échanges dépend de
+   l'ordonnancement du système. **« Même graine ⇒ même résultat » est déjà faux, et la graine n'y
+   est pour rien.**
+3. **La conséquence, qui est un objectif de produit et non de méthode.** La dispersion n'est pas
+   une propriété de l'instrument à contourner : c'est **un défaut du solveur à supprimer**. La
+   cible n'est pas « ça marche sur la bonne graine » mais « ça converge quel que soit le tirage ».
+   Sa source est identifiée et donc attaquable (échanges asynchrones entre workers) ; le
+   déterminisme strict n'est PAS le remède recherché — un run déterministe qui échoue vaut moins
+   qu'un run dispersé qui réussit huit fois sur dix. Ce qu'il faut porter à 1, c'est la fraction
+   de tirages qui convertissent, et c'est désormais la façon dont ce document rapporte tout A/B
+   de conversion.
+
+
+**(h) LE MUR, ENFIN NOMMÉ : CE N'EST PAS LA TAILLE DU BOARD, CE SONT LES SOUS-BUTS IDENTIQUES QUI
+SE DISPUTENT LES RESSOURCES.** Quatre questions posées en séance par l'opérateur — *quel est le
+mur ? que dit la littérature ? pourquoi bloque-t-on ? retrouve-t-on le board handrip en but seul
+sans référence ?* — et c'est la quatrième qui a répondu aux trois autres.
+
+*La mesure qui retourne le diagnostic* (`s15_B_noplan`, étalon B, `--start` + `--no-plan`, aucune
+contrainte, 300 s, binaire PGO) :
+
+| cas | cible | sans répertoire, 300 s | tirages |
+|---|---|---|---|
+| **étalon B** — board handrip synchron | 8 cartes | **7/8** (208 décisions) | 134 686 |
+| **étalon A** — Lunalight | 4 cartes | **1-2/4** | 1 067 565 |
+
+**Le board à HUIT cartes est presque reconstruit sans la moindre aide ; celui à QUATRE résiste.**
+La difficulté n'est donc ni la taille du but, ni la profondeur de la ligne, ni le budget. La seule
+différence structurelle entre les deux cibles est que l'étalon A demande **trois exemplaires de la
+MÊME carte**, dont la fabrication consomme la même chaîne de ressources (Kaleido Chick → Leo
+Dancer au cimetière → Fusion), et que le deck n'en a **que trois copies** : aucune marge.
+
+*Ce que le mur n'est PAS.* Ce n'est pas un gradient plat : `CommonCodes` est une intersection de
+**multiensembles** (les deux curseurs avancent à l'égalité), donc un deuxième Liger Dancer FAIT
+monter le score. L'hypothèse « la politique n'a aucune raison d'en faire un second » est
+**réfutée par lecture du code**, avant d'avoir coûté un run.
+
+*Ce que le mur EST, et la littérature qui le nomme.* Les trois sous-buts **interfèrent par
+consommation** : atteindre le premier détruit ce qu'il faut pour le deuxième, donc une ligne qui
+prépare deux Ligers doit longtemps PARAÎTRE PIRE qu'une ligne qui en pose un tout de suite.
+- **Bonet & Geffner, arXiv:2311.05490** — IW tourne en temps exponentiel en la LARGEUR, et la
+  largeur n'est bornée que pour des buts **atomiques** ; d'où leur notion de **largeur
+  sérialisée**, bornée dans beaucoup de domaines qui n'ont pas de largeur bornée. Notre but est
+  conjonctif avec trois atomes identiques.
+- **Drexler, Seipp & Geffner, arXiv:2105.04250** — « *SIW échoue quand le but n'est pas facilement
+  sérialisable, ou quand l'un des sous-problèmes a une largeur élevée* ». Notre solveur sérialise
+  DÉJÀ (`novelty_serialize` rouvre la table de nouveauté à chaque carte cible posée) : nous sommes
+  donc dans le second cas, un sous-problème de largeur élevée.
+- **Ståhlberg & Geffner, arXiv:2512.19355** (déjà au dossier §9.15) — domaine *Delivery* :
+  « tous les colis doivent être livrés au même endroit […] **les modèles apprennent à en livrer un
+  seul** ». Notre forme, mot pour mot, et l'avertissement était écrit **avant** cette session.
+- **CraftWorld** (arXiv:2605.30664, au dossier) — matériaux consommés, impasse par consommation.
+
+*LA MESURE QUI MANQUE, et elle ne coûte qu'un compteur* : un histogramme des invocations de Liger
+Dancer par tirage (combien atteignent 1, 2, 3), et le compte des tirages qui posent le premier
+Liger **tout en conservant de quoi en faire un second**. Il dira si le deuxième est **jamais
+tenté** ou **toujours perdu** — deux pannes opposées qui appellent deux correctifs opposés, et que
+`best_overlap` ne sépare pas. À faire AVANT tout mécanisme.
+
+*Réserve d'appariement, dite franchement* : le run étalon B garde la cible CAPTURÉE (seule façon
+de connaître le board) et tourne sans les `--resolve` / `--summon-min` / `--hint` que porte
+l'étalon A. L'appariement n'est donc pas parfait — mais l'écart 7/8 contre 1/4 dépasse de loin ce
+que ces différences peuvent expliquer.
+
+
+**(i) L'ÉTALON B SOUS GARDE PERMANENTE : les contraintes AIDENT, et le blocage est une TROISIÈME
+compétition de ressources.** Demande de l'opérateur : reprendre l'étalon B sans répertoire mais
+avec toutes les contraintes ET **sans `--guard-off`** — la garde anti-Nibiru tenue jusqu'au bout.
+
+| bras (`--start` + `--no-plan`, 300 s, sans répertoire) | board atteint |
+|---|---|
+| aucune contrainte (`s15_B_noplan`) | 7/8 |
+| **contraintes complètes + garde permanente** (`s15_B_dur`) | **8/8** |
+
+**Les contraintes ne font pas qu'élaguer : elles GUIDENT.** `--resolve`, `--summon-min` et la garde
+portent le gradient vers les pièces réelles du combo, et le bras le plus contraint monte PLUS
+HAUT que le bras libre. Le même effet est mesuré sur l'étalon A, où retirer `--resolve` fait
+tomber les invocations de Liger Dancer à **zéro** (`>=1 0 <-- JAMAIS`). C'est contre-intuitif et
+c'est reproductible sur deux étalons.
+
+**Pourquoi toujours pas de solution : `meilleure crête AUX résolutions complètes : 6/8`.** Les
+lignes qui accomplissent les trois résolutions exigées plafonnent à **6/8** cartes ; celles qui
+atteignent **8/8** n'ont pas rippé. **Jamais les deux ensemble.** Les 24 racines du finisseur sont
+toutes à `6/8 r3` et rendent `ÉPUISÉ` en 0 à 32 expansions. Le projet avait bâti l'instrument
+exact pour cette question (`best_overlap_ripped`) avec le commentaire prémonitoire — « *si elles
+plafonnent loin du board pendant que les lignes muettes font 8/8, les deux buts sont probablement
+incompatibles en RESSOURCES* » — et le chiffre le confirme.
+
+**TROIS FOIS LE MÊME MOTIF, sur trois cibles sans rapport entre elles :**
+
+| cas | sous-buts en compétition | plafond mesuré |
+|---|---|---|
+| étalon A | 3× Liger Dancer (même chaîne de matériaux, 3 copies au deck) | 1 Liger |
+| étalon B nu | board complet | 7/8 — la dernière Synchro n'est plus possible |
+| étalon B contraint | board **et** handrip | 8/8 sans rips, **ou** 6/8 avec |
+
+Ce n'est donc pas une particularité de deck : c'est **le** mode d'échec du solveur. Atteindre un
+sous-but consomme ce dont le suivant a besoin, et rien dans la recherche ne le voit venir — les
+états quasi-atteints sont MORTS et le finisseur le découvre en quelques expansions, run après run.
+
+**LA LIGNE QUI SATISFAIT LA GARDE PERMANENTE EXISTE — fournie en séance par l'opérateur** :
+`D:\ProjectIgnis\replay\synchron handrip optimized.yrpX`. Jugée par l'outil : **45 fenêtres
+adverses sous menace, 0 découverte**, `0 MSG_RETRY`, 307 décisions, 19 brûlées (pic 23), même
+board que l'étalon B (empreinte `89affac93b7a4c52`). La réserve écrite plus haut — « la garde
+permanente n'est satisfaite par aucune ligne connue », vraie de `synchron handrip 2`, dont le
+rapport dit « la référence VIOLE la garde : 2 fenêtres découvertes sur 47 » — est donc levée :
+**la contrainte est satisfiable, et nous en avons maintenant le témoin**. C'est le nouvel étalon
+de la discipline complète, et le cas où « le solveur retrouve-t-il seul une ligne que l'humain a
+trouvée ? » a enfin un oui de référence.
+
+**INSTRUMENT À CORRIGER, repéré au passage.** Le bloc « tous les codes y sont : le but ne diffère
+que par le DÉTAIL » affiche, sur `s15_B_dur`, des écarts **ATK/DEF uniquement** — or le critère de
+but IGNORE explicitement la position de combat (`EntryOf(..., goal_view=true)` replie la position
+sur recto/verso). Le bloc désigne donc un écart qui n'en est pas un, et reste muet sur le vrai
+blocage (les résolutions). Même famille que le « cible : » corrigé en (f) : un diagnostic qui
+répond à côté de sa propre question.
+
+
+### 9.23 Session 16 : la sonde retourne le diagnostic — le SECOND exemplaire n'est pas le problème, le PREMIER l'est
+
+Mission fixée en fin de session 15 : **apprendre un graphe de landmarks généralisés depuis les
+plans résolus, boucle de répétition comprise, et le servir comme `h`** (Hanou, Dumančić & de
+Weerdt, arXiv:2508.21564). Avec une exigence préalable non négociable (piège 40) : poser **avant**
+tout mécanisme le compteur qui sépare deux pannes opposées que `best_overlap` confond — le
+deuxième exemplaire *jamais tenté* (le matériau était là : panne d'échantillonnage) du deuxième
+*toujours perdu* (la chaîne était consommée : panne de `h`).
+
+La sonde a été posée. Elle a répondu, et **sa réponse n'est ni l'une ni l'autre** : sur les deux
+étalons, ce n'est pas le second exemplaire qui manque, c'est le premier.
+
+**(a) `--probe-repeat` : ce qu'elle mesure, et les TROIS défauts d'instrument corrigés avant de la
+croire.** Par carte surveillée (`--summon-min` / `--resolve`) elle relève : l'**histogramme des
+invocations PAR TIRAGE**, en compte BRUT et par entrée — distinct de `resolve_reached`, qui
+plafonne à `min_count` et SOMME les entrées, et c'est ce plafonnement qui rendait le dossier
+aveugle à « un Liger contre trois » ; à la **première** invocation, la distance de recettes à un
+exemplaire **de plus**, l'exemplaire frais retiré de la disponibilité (sans ce retrait la réponse
+serait « 0, il est là », qui n'est pas la question) ; la distance au **reste** de la cible au même
+instant ; la décision moyenne de cette première invocation et le nombre de décisions qui la
+suivent.
+
+Trois défauts ont été trouvés **sur la première lecture**, chacun capable de produire une
+conclusion fausse — et le troisième a été introduit par le correctif du second :
+
+1. **La référence et la mesure portaient sur deux graphes différents.** `d0` était pris au tout
+   premier tirage, sur un graphe de recettes quasi vide ; la distance d'arrivée, des centaines de
+   secondes plus tard, sur un graphe enrichi par toutes les invocations observées entre-temps. Le
+   biais va vers le faux « consommé ». Corrigé : la référence est **re-prise tous les 2 048
+   tirages**, la classification conservé/consommé se fait **dans le worker** contre sa référence
+   contemporaine, et le nombre de relevés est imprimé.
+2. **La sonde ne couvrait que la phase tirages.** C'est exactement le piège d'instrument de
+   9.21 (d) — la 2ᵉ Liger de la session 14 avait été trouvée dans les tirages **enracinés** du
+   finisseur, invisibles dans la ligne de résumé. Un « jamais » s'y serait lu comme un jamais du
+   RUN. Corrigé : **deux tables**, imprimées séparément.
+3. **Le garde-fou du plancher confondait deux lectures opposées.** Le graphe de recettes rend 1
+   pour un produit dont il ne connaît AUCUNE recette (règle 2) *et* pour un produit qui est à une
+   invocation près. `RecipeGraph::Knows` sépare désormais les deux.
+
+**ET UNE RÉSERVE QUI SUBSISTE — l'axe « distance » NE REND AUCUN VERDICT, et le run le dit
+lui-même.** Deux causes cumulées. Les cartes surveillées hors board cible n'avaient aucune recette
+amorcée (corrigé : `SeedRecipesFromText` les amorce désormais — mais la plupart restent au
+plancher, faute de ligne de matériaux). Et là où une recette existe, elle est **amorcée par le
+texte**, donc porte la zone JOKER, qui accepte le cimetière — or les matériaux que l'invocation
+vient de consommer y sont justement arrivés, et comptent donc encore comme disponibles. Une
+distance uniformément égale à 1 est la **signature de ce biais**, pas la preuve d'un matériau
+conservé. Le run imprime cette réserve à la place du verdict. C'est un axe à réparer, pas un axe
+qui a parlé.
+
+**(b) CE QUE L'HISTOGRAMME DIT — et il retourne le diagnostic du chantier.** Le contrôle est
+INTERNE : dans le même run et la même table, deux cartes que l'échantillonnage répète en
+permanence, et une qu'il ne répète jamais.
+
+*Étalon A, deck et main NEUFS (`Lunalight Gold Leo` + 3 `Fake Trap`, versés par l'opérateur en
+séance), 300 s, graine 888, binaire non-PGO — 930 676 tirages + 439 430 enracinés* :
+
+| carte surveillée | phase tirages : ≥1 / ≥2 / ≥3 | finisseur enraciné : ≥1 / ≥2 |
+|---|---|---|
+| Lunalight Masquerade | 362 008 / 359 506 / **290 463** | 59 036 / 137 |
+| Lunalight Wolf | 350 015 / 145 780 / 8 819 | 7 913 / 4 117 |
+| **Lunalight Liger Dancer** | **0 / 0 / 0** | **62 / 0** |
+
+**Le fait, en une phrase : l'échantillonnage fabrique trois Masquerade dans 290 463 tirages et ne
+fabrique pas UN SEUL Liger Dancer sur 930 676 — alors que le but en demande trois.** Ce n'est donc
+pas « le solveur ne sait pas répéter » : il répète tout le temps, et jamais la bonne carte. Le
+finisseur, lui, pose une première Liger 62 fois sur 439 430 tirages enracinés, et **jamais une
+seconde**.
+
+*Le même motif sur l'ancien départ* (ancien = 3 `Fire Formation - Tenki`, même deck neuf, 300 s) :
+Masquerade 301 552 → 299 586 (**99,3 %**), Wolf 317 657 → 156 379 (**49,2 %**), Liger **0** en
+phase tirages et **3 767 → 0** au finisseur. Deux départs sans rapport, le même mur.
+
+Et la colonne qui donne le mécanisme, sur l'ancien départ : après la première Liger il reste
+**10,0 décisions** au tirage, contre 89,0 après la première Masquerade et 56,4 après le premier
+Wolf, alors que la référence humaine met **~16 décisions par invocation** (9.21 (g)). Là où une
+première Liger tombe, **il n'y a plus la place d'en tenter une seconde**.
+
+*Étalon B optimisé, 300 s* : `>=1 22 095, >=2 1 305, >=3 **0**` — aucun tirage n'accomplit les
+trois résolutions exigées alors que le board monte à 8/8, et **Trishula ne résout que dans 314
+tirages sur 363 551** (0,086 %). Le verrou n'est pas le board, c'est la dernière résolution.
+
+**LA CONSÉQUENCE POUR LE CHANTIER, à écrire sans la tourner.** La question posée — « le second
+exemplaire est-il jamais tenté ou toujours perdu ? » — **présupposait un premier**. Il n'y en a
+pas. Le chantier suivant n'est donc pas celui que la session 15 avait nommé : c'est *pourquoi
+l'échantillonnage n'atteint jamais la première Liger alors qu'il accomplit ses trois activateurs
+87 785 fois*.
+
+**LA CIBLE EST FAISABLE — vérifié en séance, et le vérifier était obligatoire.** L'arithmétique
+apparente ne fermait pas : Liger exige « Leo Dancer + 3 monstres Lunalight », Leo Dancer exige
+« Panther Dancer + 2 Lunalight » — et Panther Dancer est ABSENT du deck, ce que le solveur signale
+de lui-même (« 1 recette écartée : elle nomme un matériau absent de ce deck »). L'extra ne porte
+que DEUX Leo Dancer pour TROIS Liger. Réponse de l'opérateur, confirmée par le texte des cartes :
+**Kaleido Chick se substitue à Leo Dancer sur le terrain** (copie de nom), et surtout
+**`Lunalight Wolf` (effet Pendule) invoque une Fusion en bannissant les matériaux depuis le
+terrain OU LE CIMETIÈRE**, tandis que **`Lunalight Masquerade` autorise également les matériaux du
+cimetière**. Les Leo Dancer envoyés au cimetière redeviennent donc des matériaux. **La cible est
+atteignable, et tout échec de l'étalon A est imputable au solveur.**
+Corollaire qui éclaire un chiffre du dossier : les trois `--resolve` de l'étalon A ne sont pas des
+décorations, ce sont **exactement les activateurs de matériaux depuis le cimetière** qui rendent la
+répétition possible — d'où le « retirer `--resolve` fait tomber les invocations de Liger à zéro »
+de 9.22 (i), qui n'avait jusqu'ici pas d'explication.
+
+**(c) LE GRAPHE DE LANDMARKS APPRIS (chantier 18) : écrit, imprimé, et il apprend la bonne
+chose.** Landmark = **(code, zone, k)**, « k exemplaires de ce code dans cette zone ». Le COMPTE
+est ce qui généralise, et la chaîne (code,zone,1) → (code,zone,2) → (code,zone,3) EST la boucle de
+répétition du papier. Trois règles, héritées du graphe de recettes :
+
+1. **UN LANDMARK EST UN ACCOMPLISSEMENT, pas un fait.** Seul un compte STRICTEMENT supérieur au
+   compte initial est retenu — sans quoi « 3 Tenki en main » serait le premier landmark, satisfait
+   à la décision 0, et `h` serait plat à nouveau (piège 42 mot pour mot).
+2. **LE GRAPHE NE PRUNE JAMAIS, IL PONDÈRE.** Un landmark non atteint ajoute 1 à `h` ; aucun état
+   n'est déclaré mort. Au pire `h` redevient le `h` plat.
+3. **L'INTERSECTION, PAS L'UNION.** Un landmark doit apparaître dans TOUS les plans du corpus. Avec
+   un seul plan l'intersection EST ce plan, et le run l'imprime en avertissement : ce ne sont pas
+   des landmarks généralisés, c'est la trace d'une ligne.
+
+**L'ÉCART AU PAPIER, dit d'avance** (la leçon de 9.21 (k) est qu'un écart tu est un verdict perdu).
+Le papier est PDDL : ses landmarks sont des PRÉDICATS extraits d'un modèle d'actions. Nous n'en
+avons pas — nos actions sont des scripts Lua. Nos landmarks s'extraient donc des **TRACES** :
+chaque plan résolu est rejoué par `LiftPolicyRun` et l'on relève, à chaque décision, le
+multiensemble des faits (code canonique, zone normalisée). Ce qu'on perd est la garantie de
+nécessité logique ; ce qu'on garde est ce dont `h` a besoin — un ordre et des comptes appris de
+plans qui ONT marché.
+
+**LE POINT QUI A ÉVITÉ UN MÉCANISME MUET SUR LA MOITIÉ DU BUT.** Un relevé limité au joueur cible
+ne peut pas exprimer un **handrip** : aucun fait de notre moitié de terrain ne devient vrai quand
+l'adversaire perd une carte. Le graphe aurait appris à construire le board et serait resté muet sur
+exactement la moitié qui manque, **tout en ayant l'air de fonctionner**. `CollectStateFacts` relève
+donc aussi les zones de l'ADVERSAIRE, marquées par le bit 0x80. Le résultat le justifie : sur
+l'étalon B, le graphe appris depuis deux plans résolus sort
+
+    0.54   Fake Trap                      ADV banni     x3   <-- BOUCLE
+
+— **« trois cartes bannies de la main adverse », landmark COMPTÉ, à l'ordre 0,54 de la ligne.**
+C'est le handrip, appris tout seul, sous la forme exacte que le chantier demandait, et c'est le
+sous-but que le solveur n'accomplit jamais. Le graphe complet fait **60 landmarks sur 55 faits
+distincts, dont 4 boucles de répétition**, et son ordre est lisible (Assault Sonic Warrior main
+0,02 → terrain 0,04 → cimetière 0,07 ; Stardust Synchron main 0,13 → terrain 0,15 → cimetière ×2
+0,19 → banni 0,78).
+
+Servi comme `h` en deux points, séparés pour qu'un A/B n'en bouge qu'un : `--landmark-w` dans le
+**score des tirages** (99 % du travail ; en PROGRÈS et non en distance, puisque le score est un
+« plus haut vaut mieux ») et `--landmark-h` dans le **`h` du finisseur** (le point d'entrée que
+`recipe_h` occupait sans jamais être consommé). Le coût est rendu payable dans les tirages par un
+choix de représentation : on ne relève pas l'état, on relève les **clés de landmark** — quelques
+dizaines de cases — et une zone cachée n'est interrogée que si un landmark y vit (`ZoneMask`).
+
+**(d) L'A/B : LE MÉCANISME N'EST PAS DÉMONTRÉ, et le criblage qui semblait le démontrer ne tient
+pas au budget long.** Juge : étalon B optimisé — le seul cas où **une solution existe** (9.22 (i)),
+donc où un échec est imputable au solveur. Binaire unique, non-PGO, identique pour tous les bras ;
+la session n'a pas re-déroulé de pipeline PGO, un A/B apparié n'en ayant pas besoin (conséquence
+assumée : les DÉBITS ne sont pas comparables à ceux de la session 15).
+
+*Criblage 90 s, graine 888* — et il donnait une belle réponse en dose :
+
+| bras | ≥1 | ≥2 | ≥3 | crête aux rés. complètes | approche écrite |
+|---|---|---|---|---|---|
+| témoin | 0 | 0 | **0** | 0/8 | 3/8 |
+| `lm0` (appris, poids ZÉRO) | 21 | 0 | 0 | 0/8 | 7/8 |
+| `lmw20` | 1 002 | 12 | 0 | 0/8 | 7/8 |
+| `lmw60` | 2 539 | 205 | **28** | **5/8** | 8/8 |
+
+*A/B 300 s, graine 888* — et il ne le confirme pas :
+
+| bras | ≥1 | ≥2 | ≥3 | crête | approche | exp/racine (méd.) |
+|---|---|---|---|---|---|---|
+| témoin | 22 417 | 861 | **0** | 0/8 | 8/8 | 16 |
+| `lmw60` | 18 859 | 546 | **0** | 0/8 | 8/8 | 33 |
+| `lmx60` (ligne tenue à l'écart) | 20 035 | 1 090 | **14** | **3/8** | 8/8 | 2 |
+| `--archive-spread` | 18 082 | 577 | **0** | 0/8 | 8/8 | **164** |
+
+**Lecture honnête, et c'est le verdict de ce chantier : `>=3` est un ÉVÉNEMENT RARE — il vaut 0
+dans quatre runs sur six, et il est non nul dans DEUX BRAS DIFFÉRENTS à deux budgets différents
+(`lmw60` à 90 s, `lmx60` à 300 s).** Sur une seule graine, cela ne démontre rien : c'est exactement
+la configuration contre laquelle 9.21 (i) et 9.22 (g) mettent en garde. Le mécanisme est **écrit,
+instrumenté, et NON DÉMONTRÉ**. Aucune ligne n'a été écrite par aucun bras.
+
+Ce qui reste debout de cet A/B, et qui vaut d'être gardé : le bras `lmx60` n'apprend QUE sur
+`synchron handrip 2` — une **ligne tenue à l'écart** de celle qu'on juge, qui atteint le même board
+et rippe mais VIOLE la garde permanente. C'est le montage à refaire, parce qu'un gain appris sur la
+ligne jugée ne prouverait rien. *Réserve à ne pas effacer : c'est une LIGNE tenue à l'écart, pas
+une INSTANCE — même deck, même board. La généralisation reste entièrement à mesurer.*
+
+**UN TROU DANS NOTRE PROPRE INSTRUMENT, trouvé en relisant l'A/B.** La colonne « `lm h` » du
+relevé était VIDE partout. Cause : le compteur de vie du `h` de landmarks n'était imprimé que par
+`PrintCuts`, qui ne couvre pas la phase tirages — c'est-à-dire précisément pas la phase où
+`--landmark-w` travaille. Piège 52 appliqué au mécanisme de la session elle-même. Corrigé (la ligne
+est désormais imprimée au bilan des tirages), **mais l'A/B ci-dessus a tourné sans elle** : on ne
+sait donc pas si le `h` appris a réellement décru pendant ces runs. C'est la première chose à
+relever au prochain A/B, avant tout juge de recherche.
+
+**(e) `--archive-spread` DÉPARTAGÉ sur un juge valide (chantier (c) de la mission).** Son critère
+INTERNE se confirme, et largement : la médiane d'expansions par racine du finisseur passe de **16 à
+164 (×10)** sur l'étalon B optimisé — la s15 mesurait ×5,9 sur l'étalon A. L'archive range de
+nouveau des états qui ont de la ligne devant eux. **Sur les juges de recherche, en revanche, il est
+NEUTRE à légèrement négatif** (≥1 18 082 contre 22 417, ≥3 0 contre 0, 0 ligne). Verdict : le
+mécanisme fait ce qu'il annonce, et **ce qu'il annonce ne convertit pas**. Il reste opt-in. Les deux
+autres réparés de la s15 (`--no-phase-change`, `--canonical-zones`) restent non départagés.
+
+**(f) SANTÉ.** Santé stricte en cours de chantier : 22 lignes de diff contre `s15_sante.log` ;
+**santé finale : 14 lignes**, toutes des durées et le nom d'outdir (273 digests, 210/273 coups
+identifiés, 209 candidates, 16 replays sur 209). Les trois mécanismes de la session
+(`--probe-repeat`, `--landmarks`, les zones adverses du relevé de faits) sont dormants à l'octet
+près quand ils sont éteints.
+
+**(g) LA QUESTION DE L'OPÉRATEUR, posée en fin de séance, et qui vaut d'être au dossier :
+« est-ce un solveur GÉNÉRIQUE pour n'importe quel deck, ou du réglage fin sur nos deux decks de
+test ? »** La réponse a deux moitiés qui ne vont pas dans le même sens, et confondre les deux
+serait la faute.
+
+*Le MOTEUR est générique, et cela se vérifie ligne à ligne.* Aucune connaissance de carte n'est
+compilée : l'arène, le graphe d'états, la transposition, l'élagage par nouveauté, NRPA, le
+finisseur LTS, l'archive Go-Explore, les macros et le bandit `Q̂` ne manipulent que des prompts et
+des digests. Le graphe de RECETTES apprend des `MSG_MOVE`/`MSG_SUMMONING` observés, et son amorce
+parse la ligne de matériaux depuis la `.cdb` — aucune liste de cartes en dur. Le graphe de
+LANDMARKS relève des faits `(code, zone, compte)` sur des plans rejoués, sans nommer une seule
+carte. Tout ce qui est spécifique à un deck — `--hint`, `--resolve`, `--summon-min`, `--guard`,
+`--target`, `--deck`, `--hand` — est une ENTRÉE de ligne de commande. Les scripts de `tools/`
+codent nos deux cas en dur, mais ce sont des bancs de mesure, pas le produit.
+
+*Les PREUVES, elles, ne sont pas génériques — et c'est le risque réel.* Quatre points, à ne pas
+enjoliver :
+
+1. **Les constantes sont calibrées sur DEUX decks** — `resolve_weight = 250`, `burn_slack`, la
+   patience de nouveauté, `--options-len 8`, et maintenant `--landmark-w`. Plusieurs sont DÉRIVÉES
+   d'une mesure plutôt que posées au jugé (la patience vient de la plus longue série muette
+   mesurée le long de la référence, `burn_slack` du pic de brûlées réel) — ce qui est meilleur,
+   mais mesuré sur deux decks.
+2. **La liste `--hint` de l'étalon A est de la connaissance métier injectée à la main.** 9.22 (c)
+   l'avait déjà établi : `Q̂` trouve Gold Leo SANS indice, et les cartes indicées classent plus
+   mal. C'est une béquille assumée, pas un mécanisme.
+3. **Le graphe de landmarks apprend depuis des plans résolus de l'INSTANCE.** L'entraîner sur la
+   ligne qu'on juge revient à lui souffler la réponse — d'où le bras `lmx60` sur une ligne tenue à
+   l'écart, et la réserve qui l'accompagne : c'est une LIGNE tenue à l'écart, pas une INSTANCE.
+4. **Aucune mesure n'existe sur un TROISIÈME deck.** Toute affirmation de généralité serait
+   aujourd'hui une croyance.
+
+*Ce qui joue en faveur du moteur* : la discipline du dossier a RÉFUTÉ plus de mécanismes qu'elle
+n'en a réglés — `--mcps` (deux fois), `--options-len`, `--options-pool`, `--nrpa-lr 2`,
+`--novelty-rollout-cut`, la garde sémantique en ligne. Ce n'est pas un historique de boutons
+tournés jusqu'à ce que deux cas passent.
+
+*Le chantier que cette question ouvre, et qui est désormais prioritaire* : un **TROISIÈME deck**,
+sans rapport avec les deux autres, avec sa propre ligne de référence — et le seul juge qui vaille
+pour la généralité : apprendre les landmarks sur A et B, les SERVIR sur C. Avec, au passage, une
+limite du mécanisme d'aujourd'hui à corriger : il exige un plan résolu, donc il ne sert à rien à
+FROID. La voie naturelle est de le miner EN LIGNE sur les meilleures approches du run lui-même,
+exactement comme `--options-online` le fait déjà pour les macros.

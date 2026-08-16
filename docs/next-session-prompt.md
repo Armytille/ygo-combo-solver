@@ -1,168 +1,191 @@
-# Session 15 — CORRIGER LES IMPLÉMENTATIONS, PAS LES CONTOURNER
+# Session 17 — LE PREMIER EXEMPLAIRE, ET LE TROISIÈME DECK
 
 Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`).
-Lis `README.md` puis `docs/combo-solver-design.md` **§9.21** (session 14) et
-§9.20. **Ne redécouvre rien de ce qui y est chiffré.**
+Lis `README.md` puis `docs/combo-solver-design.md` **§9.23** (session 16) en
+entier, puis §9.22. **Ne redécouvre rien de ce qui y est chiffré, et ne
+re-cherche pas la littérature : elle est en §9.22 (h) et §9.23 (c).**
 
-## LA MISSION, fixée par l'opérateur en fin de session 14
+## CE QUE LA SESSION 16 A RETOURNÉ
 
-> « Nos implémentations sont défaillantes ; plutôt que de fallback sur des
-> solutions bricolées non optimales, il faut corriger. »
+La session 15 avait nommé le mur — « atteindre un sous-but consomme ce dont le
+suivant a besoin » — et posé la question : *le deuxième exemplaire est-il **jamais
+tenté** ou **toujours perdu** ?* La sonde a été construite (`--probe-repeat`) et
+elle répond : **ni l'un ni l'autre. La question présupposait un premier
+exemplaire, et il n'y en a pas.**
 
-La session 14 a trouvé **six mécanismes à moitié câblés** (tableau plus bas) et
-s'est fait prendre deux fois à mesurer autour d'eux au lieu de les réparer. La
-session 15 répare. Le chantier principal est nommé et il est gros : implémenter
-pour de vrai la **statistique de permutation `Q̂`**.
+Étalon A, deck et main NEUFS (`Gold Leo` + 3 `Fake Trap`), 300 s, graine 888 :
 
-## LE RECADRAGE — MCPS n'a jamais été implémenté
+| carte surveillée | tirages : ≥1 / ≥2 / ≥3 | finisseur enraciné : ≥1 / ≥2 |
+|---|---|---|
+| Lunalight Masquerade | 362 008 / 359 506 / **290 463** | 59 036 / 137 |
+| Lunalight Wolf | 350 015 / 145 780 / 8 819 | 7 913 / 4 117 |
+| **Lunalight Liger Dancer** | **0 / 0 / 0** | **62 / 0** |
 
-`search.h` dit que la politique à deux niveaux est « inspirée de MCPS
-(arXiv:2510.06381) ». **C'est trompeur et il faut corriger le commentaire.** Le
-papier a été lu en séance ; voici ce qu'il fait :
+**L'échantillonnage fabrique TROIS Masquerade dans 290 463 tirages et pas UN SEUL
+Liger sur 930 676.** Le contrôle est dans la même table et le même run : ce n'est
+pas « le solveur ne sait pas répéter ». Même motif sur l'ancien départ
+(Masquerade 99,3 % de répétition, Wolf 49,2 %, Liger 0 puis 3 767 → 0).
 
-- MCPS est un **MCTS** : arbre, compteurs de visites par nœud, et **trois
-  estimateurs qui sont des MOYENNES DE RÉCOMPENSE** —
-  `Q(s,a)` (parties commençant par le chemin puis `a`), `Q̃(s_r,a)` (AMAF chez
-  l'ancêtre de référence), et **`Q̂(s_r,a)` : les parties contenant `a` ET tous
-  les coups de `s`, dans n'importe quel ordre, n'importe où** (la contribution
-  propre du papier, rattachée par lui à Virtual Global Search).
-- Combinaison : `val = (n·Q + ñ·Q̃ + n̂·Q̂) / (n + ñ + n̂)` — poids
-  **proportionnels aux effectifs**, combinaison convexe qui minimise la variance
-  sous indépendance. C'est ce qui **supprime l'hyperparamètre de biais** de GRAVE.
-- Machinerie : **un bitset par code de coup** sur une fenêtre glissante de
-  W = 10 000 parties récentes + le tableau des récompenses ; `Q̂` se calcule par
-  `popcount` sur l'intersection. Les stats de permutation d'un nœud sont gelées
-  quand il atteint ρ visites et propagées à son sous-arbre.
+**LA CIBLE EST FAISABLE — vérifié en séance, ne pas y revenir.** L'arithmétique
+apparente ne ferme pas (Liger exige Leo Dancer, Leo Dancer exige Panther Dancer
+qui est absent du deck, et l'extra n'a que 2 Leo Dancer pour 3 Liger). Réponse de
+l'opérateur, confirmée par le texte des cartes : Kaleido Chick se substitue à Leo
+Dancer par copie de nom, et **`Lunalight Wolf` (effet Pendule) invoque une Fusion
+en bannissant les matériaux depuis le terrain OU LE CIMETIÈRE**, tandis que
+`Lunalight Masquerade` autorise également les matériaux du cimetière. Les Leo
+Dancer envoyés au cimetière redeviennent donc des matériaux. **Tout échec de
+l'étalon A est imputable au solveur.** Corollaire : les trois `--resolve` de
+l'étalon A sont exactement les activateurs de matériaux depuis le cimetière —
+d'où le « retirer `--resolve` fait tomber les Liger à zéro » de 9.22 (i), qui
+n'avait jusqu'ici pas d'explication.
 
-Notre `EffectiveWeight` fait `(1−s)·w_global + s·w_ctx` sur des **logits**, mis à
-jour par le **gradient NRPA de la seule meilleure séquence**. Ni arbre, ni
-compteur de visites, ni moyenne de récompense, ni bitset. Une combinaison convexe
-de deux logits n'est pas une combinaison convexe de deux taux de victoire.
+## LA MISSION — DEUX CHANTIERS, DANS CET ORDRE
 
-**`--mcps` (session 14) est un conditionnement ajouté au mauvais objet.** Il est
-RÉFUTÉ deux fois : (a) en recherche — 0 comparaison gagnée sur 4 contre le simple
-fait d'allumer l'ancien niveau, plus un **effondrement total** à k=6 (`best 0/4`,
-99 % de morts au tour, 27 lignes distinctes retenues sur 8 751 offertes :
-verrouillage de bassin, le gradient pousse +α sans le contrepoids qu'une moyenne
-sur toutes les parties apporterait) ; (b) en représentation — la courbe d'accord
-donne le même palier que l'ancien conditionnement (59 contre 59). **Le désarmer
-ou le marquer explicitement comme tel ; ne pas le régler.**
+### 1. POURQUOI LE PREMIER LIGER N'ARRIVE JAMAIS
 
-## CHANTIER 1 — `Q̂` POUR DE VRAI
+> **L'échantillonnage accomplit ses trois activateurs 87 785 fois et ne fabrique
+> pas une seule Fusion cible. Trouver où la ligne meurt, et le mesurer.**
 
-C'est la seule partie de MCPS transportable dans une architecture **sans arbre**,
-et c'est exactement la mémoire d'état que le diagnostic de l'opérateur réclame :
-*si Tenki cherche autre chose que Gold Leo, la ligne meurt en ~20 décisions ; le
-solveur ne devrait pas avoir besoin d'indice et devrait le trouver seul et vite.*
-À la première décision `s = {}`, donc `Q̂({}, a)` est la récompense moyenne des
-lignes ayant joué `a` — **moyennée sur TOUS les tirages, y compris les mauvais**.
+C'est la question que la sonde a ouverte, et elle est plus précise que tout ce
+que les sessions 8-15 ont pu poser. Trois pistes, la première étant la moins
+chère :
 
-Ce qu'il faut construire :
-- un **bitset par code de coup** sur une fenêtre glissante des W derniers tirages
-  (par worker ; W à calibrer, 10 000 chez le papier) ;
-- le tableau parallèle des **récompenses** de ces W tirages ;
-- `Q̂(s,a)` et `n̂(s,a)` par `popcount` sur l'intersection des bitsets de
-  `{a} ∪ coups(s)` ;
-- la règle de combinaison **à poids proportionnels aux effectifs** — et non un
-  biais additif calibré à la main, sinon on réintroduit exactement
-  l'hyperparamètre que le papier supprime.
+- **LA LÉGALITÉ, PAS L'ÉCHANTILLONNAGE ?** Le compteur `hint_seen`/`hint_taken`
+  existe déjà et il agrège toutes les cartes indicées ensemble. Le décomposer
+  PAR CARTE dirait si l'invocation de Liger est jamais seulement PROPOSÉE par un
+  prompt. Si elle ne l'est jamais, le problème n'est pas la recherche — c'est
+  que l'état requis n'est jamais atteint, et il faut remonter d'un cran.
+  **Attention au piège mesuré en s16** : un choix qui « engage » une carte n'est
+  pas forcément une invocation de cette carte, et une Fusion passe par
+  l'activation du sort, pas par un choix portant le nom du monstre. Décomposer
+  par GROUPE de `MSG_SELECT_IDLECMD` (0 invocation, 1 inv. spéciale, 5
+  activation), pas par `Choice::card` seul.
+- **LA PROFONDEUR.** Sur l'ancien départ, après la première Liger il ne reste que
+  **10 décisions** au tirage, contre 89 après une Masquerade — alors que la
+  référence met ~16 décisions par invocation. Mesurer où meurent les tirages qui
+  ont accompli les trois activateurs : coupure de tour, impasse, plafond ?
+- **LE `h` PLAT, ENCORE.** Rien dans le score ne récompense « Leo Dancer au
+  cimetière ». C'est ce que le graphe de landmarks devait apporter, et il n'a pas
+  pu être jugé sur l'étalon A faute de plan résolu (voir ci-dessous).
 
-Deux difficultés de conception à trancher, et elles sont réelles :
-1. **Moyennes contre logits.** NRPA échantillonne un softmax de logits ; MCPS
-  choisit l'argmax de moyennes de récompense. Les composer naïvement rendrait un
-  hyperparamètre. Piste : appliquer la règle de sélection MCPS **aux k premières
-  décisions seulement** (un vrai bandit en haut de l'arbre, là où le branchement
-  est étroit — mesuré : **207 cases** couvrent les 6 premières décisions) et
-  laisser NRPA échantillonner au-delà.
-2. **Quelle récompense ?** Notre score de tirage est
-  `matériel×1000 + nouveauté`, non borné et non comparable d'un run à l'autre.
-  `Q̂` a besoin d'une récompense normalisée. À définir explicitement AVANT de
-  coder (la normaliser par le meilleur score courant est un choix, pas une
-  évidence).
+### 2. LE TROISIÈME DECK — la seule mesure de généralité qui existe
 
-**COMMENT LE JUGER — et le piège d'instrument à connaître d'avance.** La courbe
-d'accord du corpus (`--adapt`, déterministe, quelques secondes) **NE PEUT PAS**
-juger `Q̂` : elle mesure la reproduction d'un corpus qui ne contient QUE des
-bonnes lignes, alors que `Q̂` tire son signal des ÉCHECS. C'est un instrument
-gratuit et aveugle à cette question précise. Le juge est donc en recherche :
-≥2/≥3 et l'approche écrite, appariés multi-graines.
-**Sonde préalable obligatoire** (elle, gratuite) : imprimer pour chaque cible de
-Tenki les `n̂` et `Q̂` accumulés. Si Gold Leo n'y ressort pas nettement au bout de
-quelques milliers de tirages, le mécanisme ne marche pas et aucun A/B n'est utile.
+> **Question posée par l'opérateur en fin de session 16 : « est-ce un solveur
+> générique pour n'importe quel deck, ou du réglage fin sur nos deux decks de
+> test ? »** §9.23 (g) y répond en deux moitiés : le MOTEUR est générique (aucune
+> connaissance de carte compilée, tout le spécifique est une entrée de ligne de
+> commande) ; les PREUVES ne le sont pas (constantes calibrées sur deux decks,
+> liste `--hint` injectée à la main, et **aucune mesure sur un troisième deck**).
 
-## CHANTIER 2 — LES CINQ AUTRES DÉFAILLANCES CONFIRMÉES
+Le chantier : **un troisième deck, sans rapport avec les deux autres, avec sa
+propre ligne de référence.** Il rend possible le seul juge de généralité qui
+vaille — apprendre les landmarks sur A et B, les **servir sur C**. Demander le
+replay à l'opérateur ; le solveur le juge d'abord (`--guard`, `--resolve`,
+`MSG_RETRY`) avant d'en faire un étalon.
 
-| mécanisme | état réel, vérifié session 14 |
-|---|---|
-| `novelty_rollout_cut` | câblé dans `Rollout()` (tirage GLOUTON) seulement — **jamais dans `PolicyRollout`**, qui fait tout le travail. Le verdict de nouveauté y est pourtant CALCULÉ à chaque décision (4 requêtes core, ~60-80 sondes) et jeté après un simple départage |
-| `allow_phase_change` | lu au prompt *idle* ([enumerate.cpp:225](enumerate.cpp#L225)), **pas** au prompt *battle* où les phases sont émises inconditionnellement ; aucun drapeau CLI |
-| `canonical_zones` | déclaré, documenté, **allumé nulle part** (9.20 (e)) |
-| archive Go-Explore | clé de tri `résolutions<<44 \| overlap<<36 \| ~décisions` : les résolutions SATURENT sur étalon A (tout à `r4`), donc l'archive range des **fins de ligne**. Conséquence mesurée : les 37 racines du finisseur rendent `ÉPUISÉ` en **0 à 13 expansions** |
-| `--finisher-options` | écrit et compilant (arêtes macro dans `RunLevin`), **jamais jugé**. Contrôle REDÉFINI d'avance dans `tools/s14_aretes_macro.ps1` : mêmes best par racine / aucune solution perdue / ÉPUISÉ toujours ÉPUISÉ — **pas** le compte d'expansions. Sans objet sur étalon A (rien à compresser dans 3 expansions) ; à juger sur **étalon B contraint**, où 9.20 (d) mesure 32 lignes arrivées au board par le finisseur |
+## L'ÉTAT DES MÉCANISMES DE LA SESSION 16
 
-Le sixième était la politique à deux niveaux elle-même : **éteinte par défaut
-depuis la session 7** (`ctx_shrink = -1`) et jamais mesurée dans ce régime. Elle
-l'a été (bras `ctx8`) : **×4,5 et ×1,5 sur ≥3, 2 graines sur 2**. À confirmer sur
-plus de graines, puis à passer par défaut si ça tient.
+- **`--probe-repeat` : l'instrument, il MARCHE et il a rendu son verdict.** Deux
+  tables (phase tirages, tirages enracinés), histogramme brut par entrée
+  surveillée. Trois défauts d'instrument corrigés en séance, dont un introduit
+  par le correctif d'un autre — lire §9.23 (a) avant de le modifier.
+  **RÉSERVE : son axe « distance de recettes » ne rend AUCUN verdict** et le dit
+  lui-même. Cause : les recettes amorcées portent la zone JOKER, qui accepte le
+  cimetière — le matériau qu'on vient de consommer y est justement arrivé, donc
+  « un exemplaire de plus » paraît toujours à une invocation près. Une distance
+  uniformément égale à 1 est la signature de ce biais. **Le réparer demande de
+  n'utiliser que les recettes OBSERVÉES** (qui portent des zones concrètes) pour
+  cette question précise.
+- **`--landmarks` / `--landmark-w` / `--landmark-h` : ÉCRITS, INSTRUMENTÉS, NON
+  DÉMONTRÉS.** Le graphe apprend la bonne chose — sur l'étalon B, depuis deux
+  lignes résolues, il sort `Fake Trap @ADV banni x3` à l'ordre 0,54, c'est-à-dire
+  **le handrip lui-même en landmark compté**, sans qu'aucune carte soit nommée
+  dans le code. Mais l'A/B ne conclut pas : `>=3` est un événement rare, nul dans
+  quatre runs sur six, non nul dans **deux bras différents à deux budgets
+  différents** (`lmw60` à 90 s, `lmx60` à 300 s), sur une seule graine.
+  **À refaire : plusieurs graines, et le bras qui compte est `lmx60`** (landmarks
+  appris sur une LIGNE TENUE À L'ÉCART de celle qu'on juge).
+- **UN TROU D'INSTRUMENT CORRIGÉ APRÈS L'A/B** : la ligne « landmarks : h moyen »
+  n'était imprimée que par `PrintCuts`, qui ne couvre pas la phase tirages —
+  donc pas la phase où `--landmark-w` travaille. Elle l'est maintenant, mais
+  **l'A/B de la s16 a tourné sans elle** : on ne sait pas si le `h` appris a
+  réellement décru. **Première chose à relever au prochain A/B.**
+- **`--archive-spread` : DÉPARTAGÉ.** Son critère interne se confirme largement
+  sur un juge valide (médiane d'expansions par racine **16 → 164**, ×10) ; sur
+  les juges de recherche il est **neutre à légèrement négatif** (0 ligne, ≥3
+  inchangé à 0). Il fait ce qu'il annonce, et ce qu'il annonce ne convertit pas.
+  Reste opt-in. **`--no-phase-change` et `--canonical-zones` restent non
+  départagés.**
+- **LIMITE DE FOND DU GRAPHE DE LANDMARKS, à traiter** : il exige un plan
+  RÉSOLU, donc il ne sert à rien À FROID — et l'étalon A n'a aucun plan résolu,
+  donc le mécanisme n'y est pas jugeable. La voie naturelle est de le miner **en
+  ligne** sur les meilleures approches du run lui-même, exactement comme
+  `--options-online` le fait pour les macros.
 
-## CE QUI EST ACQUIS — ne pas re-mesurer (détail §9.21)
+## CE QUI EST ACQUIS — ne pas re-mesurer, ne pas re-chercher
 
-- **`--options-online` tient la mission** : étalon A but seul, 300 s, zéro
-  corpus / zéro `--approach` / une traite → **2/4 sur 3 graines sur 3** contre
-  1/4 sur 0/3 pour le run nu ; ≥3 de 0/0/25 à 76 k-116 k. À 1 200 s le nu y
-  arrive aussi : le gain est en BUDGET, pas en plafond.
-- **RÉFUTÉS** : `--options-ctx` dans la boucle en ligne (elle AUGMENTE les
-  avortements, 0,25→0,38) ; `--options-len 16/24` (le catalogue s'effondre à
-  1 macro et la perte de Levin EMPIRE : 28,6 → 32,0/35,4) ; `--options-pool 24` ;
-  `--mcps` (ci-dessus). La saturation des catalogues à `max=8` était un symptôme
-  de la sélection gloutonne, pas un manque.
-- **`--nrpa-lr 4`** : positif sur ≥3 aux 4 paires (dont 0 → 701 et 0 → 1 536 sur
-  les bras nus), neutre sur la conversion, et il **divise les avortements de
-  macros par 2-3**. R=2 reste réfuté (s4). Opt-in.
-- **Plafond de représentation** : accord du corpus, palier 52 (niveau éteint) →
-  59 (contextuel) → **64 (mémorisation pure)**. Cinq points de marge : aucun
-  meilleur descripteur de contexte ne sauvera la masse.
+- **Bibliographie faite** (§9.22 (h), §9.23 (c)) : Bonet & Geffner
+  (arXiv:2311.05490, largeur sérialisée) ; Drexler, Seipp & Geffner
+  (arXiv:2105.04250, « SIW échoue quand un sous-problème a une largeur élevée ») ;
+  Ståhlberg & Geffner (arXiv:2512.19355, « les modèles apprennent à en livrer un
+  seul ») ; Hanou, Dumančić & de Weerdt (arXiv:2508.21564, landmarks généralisés).
+  **Trois résultats NÉGATIFS à ne pas re-chercher** : la littérature des jeux de
+  cartes porte sur l'information cachée ou le deckbuilding ; le nogood/CDCL vit
+  dans des solveurs déclaratifs, or nos actions sont des scripts Lua ;
+  « ressources consommables + heuristique » ne ramène que du réseau et du
+  matériel. Piste secondaire non explorée : **arXiv:2601.21684, *Do Not Waste
+  Your Rollouts*** — recyclage NÉGATIF des motifs d'échec, sans entraînement.
+- **RÉFUTÉS** : `--options-ctx` en ligne ; `--options-len 16/24` ;
+  `--options-pool 24` ; `--mcps` (deux fois) ; `--nrpa-lr 2` ;
+  `--novelty-rollout-cut` (criblage 90 s : ≥1 résolution 206 093 → **9**).
+- **LES CONTRAINTES GUIDENT** — `--resolve` / `--summon-min` / la garde ne font
+  pas qu'élaguer : le bras le plus contraint monte PLUS HAUT. **Ne jamais
+  « simplifier » en les retirant.** La session 16 a trouvé POURQUOI sur
+  l'étalon A : ces trois cartes sont les activateurs de matériaux depuis le
+  cimetière.
+- **`Q̂` (`--qhat`) est implémentée fidèlement** et trouve la bonne ouverture
+  seule (§9.22 (b)-(c)). **`--finisher-options`** : écrit, **toujours jamais
+  jugé**.
+- **Plafond de représentation** : accord du corpus 52 → 59 → 64 (mémorisation
+  pure). Aucun meilleur descripteur de contexte ne sauvera la masse.
 
-## MÉTHODE — ce que la session 14 a appris sur ses propres mesures
+## MÉTHODE — ce qui a payé en session 16
 
-- **Un run coûte EXACTEMENT son budget** : préambule complet ~80 ms, run réel
-  287 s pour `--solve-ms 300000`. Il n'y a RIEN à récupérer dans l'outillage ; le
-  coût d'un A/B est son plan d'expérience.
-- **Cribler sur le critère INTERNE du mécanisme** (`tools/s14_crible.ps1`, 90 s) :
-  `--options-len` était réfutable par la perte de Levin du mineur dès le premier
-  tour de minage. Le criblage ÉLIMINE, il ne promeut jamais ; à 90 s, ≥2/≥3 et
-  l'approche écrite ne sont PAS des juges.
-- **Avant tout A/B qui touche la représentation de la politique**, faire tourner
-  la courbe d'accord (`tools/s14_accord_mcps.ps1`) : déterministe, quelques
-  secondes, et elle dit si le mécanisme change ce que la politique PEUT
-  représenter avant de dépenser des runs. (Mais elle est aveugle à `Q̂`, cf.
-  chantier 1.)
-- **BANDE DE BRUIT** : à graine fixée, ≥3 varie d'un facteur **~2**, et la
-  conversion bascule 1/4 ↔ 2/4. Une conversion mono-graine ne vaut RIEN ; un
-  écart de moins de 2× sur ≥3 non plus.
-- **Le juge est l'APPROCHE ÉCRITE** (`best_approach_kof4.yrp`), pas la ligne
-  `NRPA … best k/4` qui ne couvre que la phase tirages — elle aurait compté
-  1 conversion sur 3 au lieu de 3 sur 3. `tools/s14_lecture.ps1` lit les deux.
-- **Jamais mesuré, scripts prêts** : `tools/s14_parallelisme.ps1` (2 processus à
-  8 threads contre 1 à 16 — si la contention est intra-processus et non la bande
-  passante, c'est ~1,6× sur tous les A/B futurs) et le budget de criblage à 120 s.
+- **L'INSTRUMENT AVANT LE MÉCANISME, et l'instrument lui-même se met en doute.**
+  Trois défauts trouvés sur la PREMIÈRE lecture de la sonde, dont un introduit
+  par le correctif d'un autre. Sans cette relecture, la session aurait publié
+  « matériau conservé à 100 % » — un verdict fabriqué à partir d'une absence de
+  mesure.
+- **LIRE LE TEXTE DES CARTES AVANT DE DÉPENSER DES RUNS.** La faisabilité de la
+  cible A a été tranchée par une requête `.cdb` et une question à l'opérateur,
+  pas par un run.
+- **UN CRIBLAGE 90 s NE PROMEUT PAS.** Il avait donné une belle réponse en dose
+  (0 → 28 sur `>=3`) que le budget long n'a pas confirmée. **Le criblage ÉLIMINE,
+  il ne promeut jamais** — la règle était écrite, elle vient d'être payée.
+- **LA GRAINE EST UN TIRAGE, PAS UN CADRAN.** Le juge est la fraction de tirages
+  qui convertissent, jamais « k/4 sur la graine 888 ». Et fixer la graine ne rend
+  pas le run reproductible (échanges asynchrones entre workers) : c'est un
+  **défaut du solveur**, pas une propriété de l'instrument.
+- **NE JAMAIS CHANGER DEUX FACTEURS.** La session 16 n'a pas re-déroulé de
+  pipeline PGO, précisément pour que l'A/B reste apparié sur un binaire unique.
+  Conséquence assumée et écrite : les DÉBITS ne sont pas comparables à la s15.
 
 ## PIÈGES DE BUILD ET D'ENVIRONNEMENT
 
-- Un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` : après tout changement de
-  moteur → rebuild, santé stricte, puis un pipeline PGO **propre à la session**
-  (`tools/s14_pgo_b.ps1` comme modèle — ne jamais écraser le témoin précédent).
-  Témoins : `combosolver_preopt`, `_lto_s12`, `_lto_s13`, `_lto_s14`, `_lto_s14b`.
-  NB : les `.pgc` des sessions passées ne sont pas effacés avant l'entraînement
-  (procédure telle qu'elle tourne depuis la s12, conservée pour comparabilité).
-- **Le gabarit est désormais ÉPINGLÉ** (`gabarits/etalon_a_lunalight.yrp`). Il
-  pointait sur le `_LastReplay.yrpX` d'EDOPro — un fichier VIVANT, réécrit en
-  plein pilote le 15/08/2026 à 23:42. L'outil a échoué bruyamment et l'en-tête de
-  gabarit imprimé a permis de vérifier que les runs antérieurs portaient le même
-  duel. **La `.cdb` reste non épinglée** : à vérifier d'abord si un A/B
-  inter-jours diverge sur l'énumération.
-- Runs séquentiels, un `--outdir` par run, jamais de relink pendant une mesure.
-  Logs PS 5.1 en UTF-16 : `Select-String`/`pwsh`, jamais `grep`.
+- Un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` : le binaire courant est
+  **non-PGO**. Témoins PGO : `combosolver_preopt`, `_lto_s12`, `_lto_s13`,
+  `_lto_s14`, `_lto_s14b`, `_lto_s15` (`tools/s15_pgo.ps1` comme modèle — ne
+  jamais écraser le témoin précédent).
+- **Une mesure en cours VERROUILLE le binaire** (`LNK1104`). C'est voulu.
+  Attendre : `while (Get-Process combosolver) { Start-Sleep 15 }`.
+- **Le gabarit est ÉPINGLÉ** (`gabarits/etalon_a_lunalight.yrp`). **Le DECK ne
+  l'est pas** : `D:\ProjectIgnis\deck\Lunalight.ydk` a changé le 16/08/2026 à
+  13:19, en pleine session. La `.cdb` non plus.
+- **Les noms de cartes sont AMBIGUS** : « Lunalight Gold Leo » existe en 8379983
+  ET 101301005 ; « Junk Meister » et « Crimson Dragon » l'étaient déjà. Toujours
+  passer les CODES pour l'étalon A.
+- Runs séquentiels, un `--outdir` par run. Logs PS en UTF-16 : `Select-String`,
+  jamais `grep`.
 
 ## Montage de mesure
 
@@ -174,20 +197,30 @@ plus de graines, puis à passer par défaut si ça tient.
 # sante — LA porte de tout changement de moteur, avant ET apres
 .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
     --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000 `
-    --outdir s15_sante --no-chain Zalen --no-chain "Crystal Wing"
-# 273 digests, 210/273, 209 candidates, 16 replays sur 209, 19/56/272.
+    --outdir s17_sante --no-chain Zalen --no-chain "Crystal Wing"
+# 273 digests, 210/273, 209 candidates, 16 replays sur 209.
+
+# ETALON A, depart NEUF (deck refait + main Gold Leo/Fake Trap) :
+.\tools\s16_sonde.ps1 -Ms 300000 -Cas A -Prefixe s17
+
+# ETALON B OPTIMISE — le seul cas ou UNE SOLUTION EXISTE :
+.\tools\s16_ab.ps1 -Ms 300000 -Bras temoin,lmx60 -Seeds 888,1234,4242
 ```
 
-Outils : `s14_crible.ps1` (criblage 90 s), `s14_accord_mcps.ps1` (courbe
-d'accord), `s14_masse_ab.ps1` (A/B étalon A, bras nommés), `s14_lecture.ps1`
-(juges + vie du mécanisme), `s14_aretes_macro.ps1` (contrôle du finisseur),
-`s14_parallelisme.ps1`, `s13_exploitation_longue.ps1` (étalon B contraint).
+Outils : `s16_sonde.ps1` (sonde de répétition, étalons A et B),
+`s16_ab.ps1` (A/B étalon B, bras nommés dont `lmx60` à ligne tenue à l'écart),
+`s16_lecture.ps1` (juges + vie du mécanisme + expansions du finisseur),
+`s15_ab.ps1`, `s15_lecture.ps1`, `s15_curriculum.ps1`, `s15_courbe_qhat.ps1`,
+`s15_pgo.ps1`, `s14_accord_mcps.ps1`, `s14_aretes_macro.ps1`,
+`s13_exploitation_longue.ps1`, `s14_parallelisme.ps1` (jamais mesuré).
 
 ## Définition de « terminé »
 
-(a) `Q̂` implémenté fidèlement — bitsets, fenêtre glissante, poids proportionnels
-aux effectifs — avec la sonde `n̂`/`Q̂` par cible de Tenki lue AVANT tout A/B.
-(b) `--mcps` désarmé ou explicitement marqué comme conditionnement au mauvais
-objet, et le commentaire MCPS de `search.h` corrigé. (c) Au moins deux des cinq
-défaillances du chantier 2 réparées et jugées. (d) §9.22 documenté, ce prompt
-régénéré.
+(a) **Où meurt la ligne avant la première Fusion cible**, mesuré et non supposé —
+avec le compteur qui sépare « jamais proposée par un prompt » de « proposée et
+jamais prise ».
+(b) Un **troisième deck** au dossier, jugé par l'outil, et le premier transfert
+de landmarks A+B → C.
+(c) L'A/B des landmarks **refait sur plusieurs graines**, avec la ligne
+« landmarks : h moyen » lue en premier.
+(d) §9.24 documenté, ce prompt régénéré.

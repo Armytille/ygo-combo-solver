@@ -64,6 +64,18 @@ constexpr uint32_t kHiddenFlags = QUERY_CODE | QUERY_ALIAS | QUERY_POSITION;
 // n'est pas un Junk Signal face recto. Le digest d'ETAT, lui, garde la
 // position complete : une position differente EST un etat de jeu different,
 // et la fusionner ferait disparaitre des lignes sans le signaler.
+// Entree RELACHEE : zone, code, face — et RIEN d'autre. C'est la comparaison
+// qu'appelle une cible POSEE a la main (`--target`), qui est un code et une
+// position et ne peut PAS porter de materiaux : un Xyz pose sans materiaux ne
+// serait sinon egal a aucun Xyz reel, puisque tout Xyz sur le terrain en porte.
+// Session 15 : c'etait la SECONDE raison, independante de la zone S/T vide,
+// pour laquelle le but de l'etalon A etait insatisfiable — Bagooska figure dans
+// toutes ses commandes depuis la session 7ter.
+uint64_t LooseEntryOf(uint32_t loc_kind, uint32_t code, uint32_t position) {
+	uint64_t h = Mix(loc_kind * 0x1000193ull, code);
+	return Mix(h, (position & POS_FACEUP) ? POS_FACEUP : POS_FACEDOWN);
+}
+
 uint64_t EntryOf(uint32_t loc_kind, const QueriedCard& c, const CardDB& db,
 				 bool goal_view = false) {
 	uint64_t h = Mix(loc_kind * 0x1000193ull, c.Code());
@@ -93,6 +105,7 @@ void ComputeBoardKeyInto(Duel& duel, uint8_t con, BoardKey& key) {
 	static thread_local std::vector<QueriedCard> cards;
 	key.hash = 0;
 	key.entries.clear();
+	key.loose.clear();
 	key.codes.clear();
 	key.mzone_count = 0;
 	for(uint32_t loc : { LOCATION_MZONE, LOCATION_SZONE }) {
@@ -101,6 +114,7 @@ void ComputeBoardKeyInto(Duel& duel, uint8_t con, BoardKey& key) {
 			if(!c.present)
 				continue;
 			key.entries.push_back(EntryOf(loc, c, duel.Db(), /*goal_view=*/true));
+			key.loose.push_back(LooseEntryOf(loc, c.Code(), c.position));
 			key.codes.push_back(c.Code());
 			if(loc == LOCATION_MZONE)
 				++key.mzone_count;
@@ -109,6 +123,7 @@ void ComputeBoardKeyInto(Duel& duel, uint8_t con, BoardKey& key) {
 	// Tri : deux boards identiques a permutation de colonnes pres doivent
 	// donner la meme cle (criterium d'equivalence retenu, cf. section 1).
 	std::sort(key.entries.begin(), key.entries.end());
+	std::sort(key.loose.begin(), key.loose.end());
 	std::sort(key.codes.begin(), key.codes.end());
 	for(uint64_t e : key.entries)
 		key.hash = Mix(key.hash, e);
@@ -127,6 +142,8 @@ BoardKey MakeBoardKey(const std::vector<QueriedCard>& mzone,
 		if(!c.present)
 			continue;
 		key.entries.push_back(EntryOf(LOCATION_MZONE, c, db, /*goal_view=*/true));
+		key.loose.push_back(
+			LooseEntryOf(LOCATION_MZONE, db.Canonical(c.Code()), c.position));
 		key.codes.push_back(c.Code());
 		++key.mzone_count;
 	}
@@ -134,9 +151,12 @@ BoardKey MakeBoardKey(const std::vector<QueriedCard>& mzone,
 		if(!c.present)
 			continue;
 		key.entries.push_back(EntryOf(LOCATION_SZONE, c, db, /*goal_view=*/true));
+		key.loose.push_back(
+			LooseEntryOf(LOCATION_SZONE, db.Canonical(c.Code()), c.position));
 		key.codes.push_back(c.Code());
 	}
 	std::sort(key.entries.begin(), key.entries.end());
+	std::sort(key.loose.begin(), key.loose.end());
 	std::sort(key.codes.begin(), key.codes.end());
 	for(uint64_t e : key.entries)
 		key.hash = Mix(key.hash, e);
@@ -571,9 +591,13 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 // COUT PLANCHER, JAMAIS INFINI (regle 2) : un produit sans recette connue vaut
 // 1. Le graphe vide rend donc exactement le `h` d'aujourd'hui, et l'activer ne
 // peut pas rendre un but inatteignable.
-float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
-	if(!cfg.recipes)
+float Search::RecipeDistance(const BoardKey& here, uint64_t resolved,
+							 uint32_t probe_code, uint32_t* d_more) {
+	if(!cfg.recipes) {
+		if(d_more)
+			*d_more = 0;
 		return 0.0f;
+	}
 	prof::Scope ps(prof::kRecipe);
 	const auto con = static_cast<uint8_t>(cfg.target_player);
 	// Zones cachees, relevees une fois par appel. Le terrain vient de
@@ -718,10 +742,122 @@ float Search::RecipeDistance(const BoardKey& here, uint64_t resolved) {
 	// pour toutes les cartes manquantes.
 	const uint32_t total = cfg.recipes->DistanceAll(
 		missing, NormalizeZone(LOCATION_MZONE), avail);
+	// SONDE DE REPETITION : « combien d'invocations pour un exemplaire DE PLUS ».
+	// L'exemplaire FRAIS est retire du terrain avant de poser la question —
+	// sinon `Claim` le trouverait present et rendrait 0, c'est-a-dire « tu en as
+	// un », qui n'est pas ce qu'on demande. Le retrait se fait apres le calcul
+	// ci-dessus pour que la distance au RESTE de la cible, elle, porte sur
+	// l'etat reel. L'effacement preserve le tri, et les trois tables paralleles
+	// (present / info / reclamations) perdent le meme indice.
+	if(d_more) {
+		*d_more = 0;
+		if(probe_code) {
+			const uint8_t onfield = NormalizeZone(LOCATION_MZONE);
+			for(size_t i = 0; i < recipe_present.size(); ++i)
+				if(recipe_present[i].code == probe_code &&
+				   recipe_present[i].zone == onfield) {
+					recipe_present.erase(recipe_present.begin() + i);
+					if(i < recipe_present_info.size())
+						recipe_present_info.erase(
+							recipe_present_info.begin() + i);
+					if(i < claim_scratch.size())
+						claim_scratch.erase(claim_scratch.begin() + i);
+					break;
+				}
+			claim_scratch.assign(recipe_present.size(), 0);
+			static thread_local std::vector<uint32_t> one;
+			one.assign(1, probe_code);
+			*d_more = cfg.recipes->DistanceAll(one, onfield, avail);
+		}
+	}
 	// Les resolutions exigees restent comptees comme avant : le graphe ne
 	// modelise que les INVOCATIONS.
 	(void)resolved;
 	return static_cast<float>(total);
+}
+
+// LANDMARKS (chantier 18) : combien d'accomplissements restent a faire.
+//
+// LE POINT QUI REND LE MECANISME PAYABLE DANS LES TIRAGES. On ne releve pas
+// l'etat, on releve les CLES DE LANDMARK — quelques dizaines de cases. Le
+// terrain sort gratuitement de `here`, deja calcule par l'appelant ; une zone
+// cachee n'est interrogee que si un landmark y vit (`ZoneMask`). Sur l'etalon A
+// cela fait UNE requete (le cimetiere) la ou RecipeDistance en fait cinq, plus
+// un tri et ~80 recherches de base — la raison pour laquelle celui-ci ne tourne
+// que dans le finisseur et celui-la partout.
+//
+// REGLE 2 (heritee du graphe de recettes) : cette valeur ne coupe RIEN. Elle
+// entre dans un score, jamais dans un test de vie ou de mort.
+uint32_t Search::LandmarkRemaining(const BoardKey& here) {
+	if(!cfg.landmarks || cfg.landmarks->Empty())
+		return 0;
+	const LandmarkGraph& g = *cfg.landmarks;
+	lm_counts.assign(g.KeyCount(), 0);
+	const auto con = static_cast<uint8_t>(cfg.target_player);
+	const uint32_t mask = g.ZoneMask();
+	constexpr uint8_t kOnField = 0x0c;
+	if(mask & LandmarkGraph::ZoneBit(kOnField))
+		for(uint32_t code : here.codes) {
+			const size_t ix = g.IndexOf(LandmarkGraph::KeyOf(code, kOnField));
+			if(ix != SIZE_MAX)
+				++lm_counts[ix];
+		}
+	static thread_local std::vector<QueriedCard> rq;
+	// Les deux cotes, et seulement les zones ou un landmark vit : le masque est
+	// ce qui rend la facture proportionnelle a ce qui a ete APPRIS, et non au
+	// nombre de zones qui existent.
+	for(int side = 0; side < 2; ++side) {
+		const uint8_t who = side ? (con ^ 1) : con;
+		const uint8_t tag = side ? 0x80 : 0x00;
+		for(uint32_t loc : { LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_HAND }) {
+			const uint8_t z = static_cast<uint8_t>(
+				NormalizeZone(static_cast<uint8_t>(loc)) | tag);
+			if(!(mask & LandmarkGraph::ZoneBit(z)))
+				continue;
+			duel.Query(who, loc, QUERY_CODE | QUERY_ALIAS, rq);
+			for(const QueriedCard& c : rq)
+				if(c.present) {
+					const size_t ix = g.IndexOf(
+						LandmarkGraph::KeyOf(duel.Db().Canonical(c.Code()), z));
+					if(ix != SIZE_MAX)
+						++lm_counts[ix];
+				}
+		}
+	}
+	const uint32_t rem = g.Remaining(lm_counts);
+	stats.landmark_h_sum += rem;
+	++stats.landmark_h_count;
+	return rem;
+}
+
+// SONDE DE REPETITION (session 16) — le releve a la PREMIERE invocation du
+// produit surveille. Un balayage de zones, une fois par tirage qui y arrive.
+void Search::RepeatProbeFirst(size_t i, const BoardKey& here,
+							  uint64_t resolved, uint32_t depth) {
+	if(!cfg.recipes || i >= 4 || i >= cfg.resolve_min.size())
+		return;
+	RepeatProbe& rp = stats.rep[i];
+	const uint32_t code = cfg.resolve_min[i].code;
+	rp.code = code;
+	rp.known = cfg.recipes->Knows(code);
+	uint32_t more = 0;
+	const float rest = RecipeDistance(here, resolved, code, &more);
+	++rp.more_n;
+	rp.more_sum += more;
+	rp.rest_sum += rest;
+	rp.first_depth_sum += depth;
+	rp.more_min = (std::min)(rp.more_min, more);
+	rp.more_max = (std::max)(rp.more_max, more);
+	// Le verdict tient dans cette comparaison : un deuxieme exemplaire aussi
+	// proche que le premier l'etait au depart = le materiau a ete CONSERVE
+	// (panne d'echantillonnage) ; plus loin = la chaine a ete CONSOMMEE (panne
+	// de `h`). Sans reference mesuree, `more` seul ne dit rien.
+	if(rp.d0 != 0xffffffffu) {
+		if(more <= rp.d0)
+			++rp.more_kept;
+		else
+			++rp.more_lost;
+	}
 }
 
 uint32_t Search::Heuristic(const BoardKey& here) const {
@@ -790,12 +926,23 @@ bool Search::GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,
 		stats.best_monsters = here.mzone_count;
 	// But principal, ou un des buts ALTERNATIFS (test adverse --fire : le
 	// board sans les cartes sacrifiees pour contrer la menace).
+	// BUT PAR INCLUSION (--target-subset) ou par EGALITE EXACTE (defaut). Les
+	// entrees sont triees des deux cotes, donc l'inclusion est un merge lineaire.
+	auto reaches = [&](const BoardKey& want) {
+		if(!cfg.goal_subset)
+			return here == want;
+		// Inclusion sur les entrees RELACHEES (zone, code, face) : une cible
+		// posee ne porte ni materiaux ni compteurs, donc la comparer aux
+		// entrees completes ne pourrait jamais reussir sur un Xyz.
+		return std::includes(here.loose.begin(), here.loose.end(),
+							 want.loose.begin(), want.loose.end());
+	};
 	bool alt_hit = false;
-	if(!(here == target)) {
+	if(!reaches(target)) {
 		if(!cfg.target_alts)
 			return false;
 		for(const BoardKey& a : *cfg.target_alts)
-			if(here == a) {
+			if(reaches(a)) {
 				alt_hit = true;
 				break;
 			}
@@ -995,15 +1142,43 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 				  (static_cast<uint64_t>((std::min)(overlap, 255u)) << 40) |
 				  (bb << 32) | tail;
 	};
+	// QUOTA PAR NIVEAU DE PROGRES (session 15, --archive-spread). Le plancher
+	// global est le mecanisme qui a rendu l'archive INUTILE en regime but seul
+	// (9.21 (f)) : quand resolutions et overlap SATURENT — tout a r4 sur
+	// l'etalon A — la cle de tri ne departage plus que par la longueur, et
+	// l'archive se remplit d'etats de FIN DE LIGNE. Les 37 racines du finisseur
+	// rendaient alors EPUISE en 0 a 13 expansions : elle rangeait ce qui est
+	// TERMINAL, pas ce qui est prometteur, et le « premier retour puis explore »
+	// de Go-Explore n'avait plus rien a explorer.
+	// Le correctif est celui de Go-Explore lui-meme : une archive est une
+	// COUVERTURE de cellules, pas un palmares. Chaque niveau de progres
+	// (resolutions, cartes posees) recoit un quota, et un nouvel etat evince le
+	// pire de SON niveau quand celui-ci est plein — jamais le meilleur d'un
+	// niveau moins avance, qui est justement celui qui a encore de la ligne
+	// devant lui.
+	const uint32_t lvl = ArchiveLevel(rp, overlap);
+	const bool spread = cfg.archive_spread;
 	// Cas courant gratuit : le score OPTIMISTE (0 brulees) sous le plancher
-	// evite les deux requetes de zone du compte reel.
+	// evite les deux requetes de zone du compte reel. Sous quota, le plancher
+	// qui s'applique est celui du NIVEAU de l'etat, et il ne s'applique que si
+	// ce niveau est deja plein — sinon un etat peu avance serait refuse par le
+	// palmares avant meme d'avoir sa place reservee.
+	auto floor_of = [&](void) -> uint64_t {
+		if(!spread)
+			return archive.size() >= cfg.archive_k ? archive_min_score
+												   : 0ull;
+		auto ic = archive_levels.find(lvl);
+		if(ic == archive_levels.end() || ic->second.count < ArchiveQuota(lvl))
+			return 0ull;
+		return ic->second.min_score;
+	};
 	uint64_t score = pack(0);
-	if(archive.size() >= cfg.archive_k && score <= archive_min_score)
+	if(uint64_t fl = floor_of(); fl && score <= fl)
 		return;
 	if(cfg.anytime) {
 		burned = CurrentBurned();
 		score = pack(burned);
-		if(archive.size() >= cfg.archive_k && score <= archive_min_score)
+		if(uint64_t fl = floor_of(); fl && score <= fl)
 			return;
 	}
 	auto it = archive_cells.find(here.hash);
@@ -1022,14 +1197,59 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		archive.push_back({ here.hash, score, overlap, rp, depth, burned, path });
 	} else {
 		size_t worst = 0;
-		for(size_t i = 1; i < archive.size(); ++i)
-			if(archive[i].score < archive[worst].score)
-				worst = i;
-		if(score <= archive[worst].score)
-			return;
+		if(spread) {
+			// La victime est le pire de CE niveau s'il est a quota ; sinon le
+			// pire du niveau le PLUS PEUPLE — c'est ainsi qu'un niveau neuf se
+			// fait de la place sans que le palmares le lui refuse.
+			auto ic = archive_levels.find(lvl);
+			const bool full_here =
+				ic != archive_levels.end() && ic->second.count >= ArchiveQuota(lvl);
+			uint32_t target_lvl = lvl;
+			if(!full_here) {
+				uint32_t best_count = 0;
+				uint64_t best_min = ~0ull;
+				for(const auto& [l, st] : archive_levels)
+					if(st.count > best_count ||
+					   (st.count == best_count && st.min_score < best_min)) {
+						best_count = st.count;
+						best_min = st.min_score;
+						target_lvl = l;
+					}
+			}
+			bool found = false;
+			for(size_t i = 0; i < archive.size(); ++i) {
+				if(ArchiveLevel(archive[i].resolves, archive[i].overlap) !=
+				   target_lvl)
+					continue;
+				if(!found || archive[i].score < archive[worst].score) {
+					worst = i;
+					found = true;
+				}
+			}
+			if(!found)
+				return;
+			// Un etat n'evince que dans SON niveau : ailleurs il prend une place
+			// libre, sans avoir a battre l'occupant.
+			if(target_lvl == lvl && score <= archive[worst].score)
+				return;
+		} else {
+			for(size_t i = 1; i < archive.size(); ++i)
+				if(archive[i].score < archive[worst].score)
+					worst = i;
+			if(score <= archive[worst].score)
+				return;
+		}
 		archive_cells.erase(archive[worst].cell);
 		archive_cells.emplace(here.hash, worst);
 		archive[worst] = { here.hash, score, overlap, rp, depth, burned, path };
+	}
+	if(spread) {
+		archive_levels.clear();
+		for(const ArchiveEntry& e : archive) {
+			LevelStat& st = archive_levels[ArchiveLevel(e.resolves, e.overlap)];
+			++st.count;
+			st.min_score = (std::min)(st.min_score, e.score);
+		}
 	}
 	archive_min_score = ~0ull;
 	for(const ArchiveEntry& e : archive)
@@ -1745,7 +1965,21 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			 summons = cfg.initial_summons;
 	uint64_t resolved = cfg.initial_resolved;
 	uint32_t rp_prev = ResolveProgress(resolved);
+	// SONDE DE REPETITION (session 16) : compte BRUT des invocations de chaque
+	// carte surveillee dans CE tirage. Distinct de `ResolveProgress`, qui
+	// plafonne a min_count et somme toutes les entrees — c'est ce plafonnement
+	// et cette somme qui rendaient l'histogramme aveugle a « un Liger contre
+	// trois ». `rep_active` : au moins une premiere invocation a eu lieu, donc
+	// il y a des decisions d'apres a compter.
+	uint32_t rep_seen[4] = { 0, 0, 0, 0 };
+	bool rep_active = false;
+	const bool probe_on = cfg.probe_repeat && !cfg.resolve_min.empty();
 	double novel_states = 0;
+	// Decisions consecutives sans atome inedit, et le verdict differe de
+	// l'elagage par nouveaute (cfg.novelty_rollout_cut). A drapeau eteint,
+	// `stale` compte pour rien et rien ne change — comportement d'avant.
+	uint32_t stale = 0;
+	bool novelty_cut = false;
 	std::vector<double> logit;
 	// Macro en cours d'execution (chantier 17) : les cles restantes se jouent
 	// sans echantillonner ni produire de PolicyStep. Les prompts FORCES
@@ -1768,10 +2002,31 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const bool want_ctx = cfg.ctx_shrink >= 0.0f ||
 						  (cfg.options && cfg.options->ctx_tol >= 0) ||
 						  (mine_flat && cfg.options_online->ctx_tol >= 0);
-	// CONDITIONNEMENT PAR LE CHEMIN (MCPS) : somme melangee des coups joues sur
-	// les `mcps_depth` premieres decisions ENREGISTREES, figee au-dela. Nul et
-	// jamais lu quand le mecanisme est eteint.
+	// CONDITIONNEMENT PAR LE CHEMIN (--mcps, REFUTE 9.21 (k)) : somme melangee
+	// des coups joues sur les `mcps_depth` premieres decisions ENREGISTREES,
+	// figee au-dela. Nul et jamais lu quand le mecanisme est eteint.
 	uint64_t path_ctx = 0;
+	// BANDIT DE TETE (--qhat) : cle du noeud courant, somme melangee des coups
+	// DEJA joues. Distinct de `path_ctx` — il porte le coup EFFECTIVEMENT choisi
+	// (l'id de la macro quand une macro est prise, pas sa premiere cle) et il
+	// n'est pas fige au-dela de k, il cesse simplement d'etre consulte.
+	uint64_t qh_ctx = 0;
+	const bool qhat_on = cfg.qhat_depth != 0;
+	// GARDE RAII : PolicyRollout sort par une douzaine de `return` — impasse,
+	// terminal, contrainte violee, garde, borne brulees, budget — et ce sont
+	// justement les tirages MORTS dont Q^ tire son signal. Un versement ecrit a
+	// la main a chaque sortie en aurait oublie un, en silence.
+	struct QhatGuard {
+		Search* self;
+		bool armed;
+		~QhatGuard() { if(armed) self->QhatCommit(); }
+	} qhat_guard{ this, qhat_on };
+	if(qhat_on) {
+		qh_nodes.clear();
+		qh_moves.clear();
+		qh_back.clear();
+		qh_reward = 0.0;
+	}
 
 	for(uint32_t depth = 0; depth < cfg.max_decisions; ++depth) {
 		if(BudgetExhausted()) {
@@ -1809,6 +2064,54 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		ComputeBoardKeyInto(duel, static_cast<uint8_t>(cfg.target_player),
 							board_scratch);
 		const BoardKey& here = board_scratch;
+		// --- SONDE DE REPETITION (session 16) ---
+		// Placee ICI et pas au bloc des resolutions ci-dessus : elle a besoin du
+		// board, qui vient d'etre calcule. Trois releves, dans l'ordre.
+		if(probe_on) {
+			// 1. La REFERENCE, une fois par worker : combien d'invocations pour
+			//    un PREMIER exemplaire, depuis l'etat de depart des tirages.
+			//    Sans elle, la distance mesuree plus loin est un nombre nu.
+			if(depth == 0 && stats.rollout_count >= rep_d0_next) {
+				rep_d0_next = stats.rollout_count + kRepD0Period;
+				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i) {
+					uint32_t d = 0;
+					const float r0 = RecipeDistance(
+						here, resolved, cfg.resolve_min[i].code, &d);
+					stats.rep[i].code = cfg.resolve_min[i].code;
+					stats.rep[i].known =
+						cfg.recipes->Knows(cfg.resolve_min[i].code);
+					stats.rep[i].d0 = d;
+					stats.rep[i].rest0 = static_cast<uint32_t>(r0);
+					++stats.rep[i].d0_samples;
+				}
+			}
+			// 2. L'HISTOGRAMME par tirage, en compte BRUT et par entree.
+			if(resolved_this_step) {
+				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i) {
+					const uint32_t d = static_cast<uint32_t>(
+						(resolved_this_step >> (16 * i)) & 0xffff);
+					if(!d)
+						continue;
+					for(uint32_t k = rep_seen[i]; k < rep_seen[i] + d && k < 5;
+						++k)
+						++stats.rep[i].reached[k];
+					const bool was_first = rep_seen[i] == 0;
+					rep_seen[i] += d;
+					// 3. A la PREMIERE invocation : les distances. Un balayage
+					//    de zones, une seule fois par tirage et par produit.
+					if(was_first) {
+						RepeatProbeFirst(i, here, resolved, depth);
+						rep_active = true;
+					}
+				}
+			}
+			// Decisions d'APRES : « le second n'arrive jamais » ne vaut que si le
+			// tirage avait encore des decisions devant lui.
+			if(rep_active)
+				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i)
+					if(rep_seen[i])
+						++stats.rep[i].after_sum;
+		}
 		if(GoalCheck(here, depth, actions, resolved)) {
 			// Atteindre le board domine tout ; le cout departage en
 			// LEXICOGRAPHIQUE — brulees d'abord, puis actions, puis decisions
@@ -1821,6 +2124,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 							  static_cast<double>(depth);
 			if(gs > run.score)
 				run.score = gs;
+			// Recompense du bandit : le but vaut exactement 1, le maximum de
+			// l'echelle. C'est le seul point ou elle ne se derive pas du
+			// materiel — un board atteint n'est pas « beaucoup de materiel ».
+			if(qhat_on)
+				qh_reward = 1.0;
 			if(!cfg.anytime)
 				return;
 			// Anytime : la ligne CONTINUE — des decisions de plus peuvent
@@ -1865,8 +2173,23 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				if(novelty.Observe(atoms_scratch, depth)) {
 					++stats.novelty_novel;
 					novel_states += 1;
+					stale = 0;
 				} else {
 					++stats.novelty_stale;
+					// ELAGAGE PAR NOUVEAUTE DANS LES TIRAGES SOUS POLITIQUE
+					// (repare session 15). `novelty_rollout_cut` etait cable
+					// dans Rollout() — le tirage GLOUTON, qui ne fait plus rien
+					// — et JAMAIS ici, alors que le verdict de nouveaute y est
+					// deja CALCULE a chaque decision (quatre requetes au core,
+					// ~60-80 sondes de table) et jete apres un simple
+					// departage. Le mecanisme le plus cher du tirage ne servait
+					// qu'a briser des egalites de score.
+					// La coupure est differee a la fin du bloc : le score de CE
+					// point compte quand meme, sans quoi couper ferait perdre du
+					// materiel deja atteint.
+					if(cfg.novelty_rollout_cut &&
+					   ++stale > cfg.novelty_patience)
+						novelty_cut = true;
 				}
 			}
 			// Les resolutions exigees (--resolve) pesent PLUS que des cartes
@@ -1876,8 +2199,45 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 							  static_cast<double>(cfg.resolve_weight) *
 								  ResolveProgress(resolved);
 			double sc = material * 1000.0 + novel_states;
+			// LANDMARKS APPRIS (chantier 18) : le `h` qui DECROIT, servi la ou
+			// il peut changer quelque chose. Chaque accomplissement de landmark
+			// vaut `landmark_weight` points de materiel — meme unite que
+			// `resolve_weight`, donc reglable dans la meme echelle.
+			//
+			// EN PROGRES ET NON EN DISTANCE, et c'est ce qui compte : le score
+			// des tirages est un « plus haut vaut mieux », donc on compte les
+			// landmarks ACCOMPLIS, pas ceux qui restent. Poser « Leo Dancer au
+			// cimetiere » une deuxieme fois fait monter le score AVANT qu'aucun
+			// Liger n'existe — c'est exactement ce que le `h` plat ne sait pas
+			// faire, et la raison pour laquelle une ligne qui prepare deux
+			// Ligers paraissait pire qu'une ligne qui en pose un.
+			//
+			// HORS de `material` : `material` sert aussi de recompense au
+			// bandit Q^, normalisee par le materiel du board cible. Y verser des
+			// points de landmark changerait cette echelle et rendrait les
+			// mesures de la session 15 incomparables.
+			if(cfg.landmark_weight > 0.0f && cfg.landmarks) {
+				const uint32_t total =
+					static_cast<uint32_t>(cfg.landmarks->Items().size());
+				const uint32_t rem = LandmarkRemaining(here);
+				sc += static_cast<double>(cfg.landmark_weight) * 1000.0 *
+					  static_cast<double>(total - rem);
+			}
 			if(sc > run.score)
 				run.score = sc;
+			// Recompense du bandit (--qhat) : le MEME materiel, rapporte a
+			// celui du board cible. Bornee, comparable entre runs, et
+			// SANS la nouveaute — qui est un departage de gradient, pas une
+			// mesure de reussite, et qui n'est pas bornee.
+			if(qhat_on && qhat_scale > 0.0) {
+				const double r = material / qhat_scale;
+				if(r > qh_reward)
+					qh_reward = r;
+			}
+			if(novelty_cut) {
+				++stats.novelty_cuts;
+				return;
+			}
 		}
 
 		ChoiceList& choices = ro_choices;
@@ -2028,14 +2388,131 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					step.hinted.push_back(0);
 				}
 			}
-			double sum = 0;
-			for(double& x : logit) { x = std::exp(x - mx); sum += x; }
-			double u = double(next() >> 11) * (1.0 / 9007199254740992.0) * sum;
-			double acc = 0;
 			size_t pick_index = 0;
-			for(size_t i = 0; i < logit.size(); ++i) {
-				acc += logit[i];
-				if(u < acc || i + 1 == logit.size()) { pick_index = i; break; }
+			// BANDIT DE TETE (--qhat) : sur les k premieres decisions
+			// ENREGISTREES, la regle de selection de MCPS remplace le softmax.
+			// Elle est GLOUTONNE (argmax), comme dans le papier : la diversite
+			// vient du tirage NRPA en dessous, pas d'un bruit ajoute ici — et
+			// les moyennes bougent a chaque tirage, y compris quand il meurt.
+			bool by_bandit = false;
+			if(qhat_on && nsteps < cfg.qhat_depth) {
+				BanditNode* node = nullptr;
+				auto in = bandit.find(qh_ctx);
+				if(in != bandit.end()) {
+					node = &in->second;
+				} else if(bandit.size() < cfg.qhat_max_nodes) {
+					node = &bandit[qh_ctx];
+					// La CONDITION de Q^ a ce noeud : les coups du CHEMIN,
+					// c'est-a-dire ceux que le bandit a lui-meme choisis
+					// (`qh_back`), et non tout ce que le tirage a joue depuis.
+					// Les decisions absorbees par une macro n'en font pas
+					// partie : l'arete de l'arbre est la MACRO, ses pas sont sa
+					// consequence — les inclure retrecirait l'ensemble
+					// conditionnant sans rien conditionner de plus.
+					node->cond.reserve(qh_back.size());
+					for(const auto& [nk, mk] : qh_back)
+						node->cond.push_back(mk);
+					std::sort(node->cond.begin(), node->cond.end());
+					node->cond.erase(
+						std::unique(node->cond.begin(), node->cond.end()),
+						node->cond.end());
+				} else {
+					++stats.qhat_fallback;
+				}
+				if(node) {
+					qh_nodes.push_back(qh_ctx);
+					// REFERENCE DE PERMUTATION : le noeud GELE le plus profond
+					// du chemin (le s_r du papier, propage au sous-arbre).
+					// Aucun -> la racine, dont la statistique est tenue
+					// incrementalement et toujours fraiche.
+					BanditNode* sr = nullptr;
+					for(size_t i = qh_nodes.size(); i-- > 0;) {
+						auto it = bandit.find(qh_nodes[i]);
+						if(it != bandit.end() && it->second.frozen) {
+							sr = &it->second;
+							break;
+						}
+					}
+					double best_val = -1e300;
+					uint32_t ties = 0;
+					// ETIQUETAGE POUR LA SONDE, aux tout premiers passages sur
+					// ce noeud seulement (`q` se remplit des la premiere
+					// retropropagation) : la sonde doit pouvoir NOMMER les
+					// coups, y compris ceux que le bandit n'a jamais choisis —
+					// ce sont justement eux que Q^ departage. L'etiqueter a
+					// chaque visite couterait une sonde de table par candidat.
+					const bool label_here =
+						cfg.enumeration.db && node->q.empty();
+					for(size_t i = 0; i < step.keys.size(); ++i) {
+						const uint64_t key = step.keys[i];
+						if(label_here && i < choices.size())
+							bandit_code.emplace(key, choices[i].card);
+						PermStat ph;
+						if(sr) {
+							auto ic = sr->perm.find(key);
+							if(ic != sr->perm.end()) {
+								ph = ic->second;
+							} else {
+								ph = perm_win.Stat(key, sr->mask);
+								sr->perm.emplace(key, ph);
+							}
+						} else {
+							ph = perm_win.Root(key);
+						}
+						uint32_t n = 0;
+						double w = 0;
+						if(auto iq = node->q.find(key); iq != node->q.end()) {
+							n = iq->second.first;
+							w = iq->second.second;
+						}
+						// val = (n Q + n^ Q^) / (n + n^), avec n Q = w. Poids
+						// PROPORTIONNELS AUX EFFECTIFS : c'est la combinaison
+						// de variance minimale, et c'est elle qui supprime
+						// l'hyperparametre de biais de GRAVE. Un coup jamais vu
+						// (n + n^ = 0) passe devant tous les autres — la regle
+						// de premiere visite du papier, qui garantit que chaque
+						// ouverture est essayee au moins une fois.
+						const double val =
+							(n + ph.n) ? (w + double(ph.n) * double(ph.q)) /
+											 double(n + ph.n)
+									   : 2.0;
+						// Ex aequo departages au hasard (reservoir) : sans
+						// cela l'ordre d'ENUMERATION du core deciderait de
+						// l'ouverture pendant toute la premiere passe, ou tout
+						// est ex aequo a 2,0.
+						if(val > best_val) {
+							best_val = val;
+							pick_index = i;
+							ties = 1;
+						} else if(val == best_val &&
+								  (next() % ++ties) == 0) {
+							pick_index = i;
+						}
+					}
+					by_bandit = true;
+					step.bandit = 1;
+					++stats.qhat_decisions;
+					if(!nsteps)
+						++stats.qhat_first;
+					qh_back.emplace_back(qh_ctx, step.keys[pick_index]);
+					if(cfg.enumeration.db && pick_index < choices.size())
+						bandit_code.emplace(step.keys[pick_index],
+											choices[pick_index].card);
+				}
+			}
+			if(!by_bandit) {
+				double sum = 0;
+				for(double& x : logit) { x = std::exp(x - mx); sum += x; }
+				double u = double(next() >> 11) *
+						   (1.0 / 9007199254740992.0) * sum;
+				double acc = 0;
+				for(size_t i = 0; i < logit.size(); ++i) {
+					acc += logit[i];
+					if(u < acc || i + 1 == logit.size()) {
+						pick_index = i;
+						break;
+					}
+				}
 			}
 			if(pick_index >= choices.size()) {
 				// Macro choisie : la reponse appliquee est son premier coup,
@@ -2048,9 +2525,19 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					active_macro = &seq;
 					macro_pos = 1;
 				}
+				// La macro est un COUP a part entiere pour la fenetre : son id
+				// est un code comme un autre, et c'est ainsi que Q^ peut la
+				// departager de ses concurrentes atomiques a la meme decision.
+				if(qhat_on)
+					qh_moves.push_back(cfg.options->ids[mi]);
 			} else {
 				pick = pick_index;
 			}
+			// Le CHEMIN du bandit s'allonge du coup effectivement choisi (id de
+			// macro compris). Au-dela de k il n'est plus consulte : inutile de
+			// le tenir.
+			if(qhat_on && nsteps < cfg.qhat_depth)
+				qh_ctx += MixMove(step.keys[pick_index]);
 			// Visibilite des indices : un coup indice etait-il seulement LEGAL
 			// ici ? C'est la mesure qui separe "mal echantillonne" de "jamais
 			// propose par le core".
@@ -2090,6 +2577,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// ce qui BORNE la table au lieu d'y creer une case par noeud.
 			if(cfg.mcps_depth && nsteps < cfg.mcps_depth)
 				path_ctx += MixMove(choices[pick].plan_key);
+			// Le coup ATOMIQUE joue entre dans le multiensemble du tirage, que
+			// la decision ait ete echantillonnee, dictee par le bandit ou
+			// ABSORBEE par une macro : « la partie contient a » ne se soucie ni
+			// de l'ordre ni de qui a decide.
+			if(qhat_on)
+				qh_moves.push_back(choices[pick].plan_key);
 			++nsteps;
 		}
 		duel.SetResponse(choices[pick].response);
@@ -2097,6 +2590,85 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	}
 	// Sortie par le HAUT : plafond de decisions (C2).
 	++stats.edges_skipped;
+}
+
+void Search::QhatCommit() {
+	// Recompense du tirage, bornee. Elle vaut 0 pour un tirage qui n'a rien
+	// pose — ce qui est le cas des tirages MORTS, et c'est tout l'interet : Q^
+	// moyenne sur TOUS les tirages, pas sur les meilleurs.
+	double r = qh_reward;
+	if(r < 0.0) r = 0.0;
+	if(r > 1.0) r = 1.0;
+	++stats.qhat_playouts;
+	stats.qhat_reward_sum += r;
+	// 1. LA FENETRE GLISSANTE. Le multiensemble des coups du tirage, trie et
+	//    dedoublonne : MCPS ne compte qu'une presence par partie.
+	std::sort(qh_moves.begin(), qh_moves.end());
+	qh_moves.erase(std::unique(qh_moves.begin(), qh_moves.end()),
+				   qh_moves.end());
+	perm_win.Push(qh_moves, static_cast<float>(r));
+	// 2. Q(s,a) : retropropagation sur les couples (noeud, coup) traverses.
+	for(const auto& [nk, mk] : qh_back) {
+		auto it = bandit.find(nk);
+		if(it == bandit.end())
+			continue;
+		auto& e = it->second.q[mk];
+		++e.first;
+		e.second += r;
+	}
+	// 3. VISITES ET GEL. Un noeud non racine qui atteint rho visites fige sa
+	//    statistique de permutation et devient la reference de son sous-arbre.
+	//    La racine (condition vide) ne gele jamais : elle est tenue
+	//    incrementalement par la fenetre, donc toujours fraiche — et c'est elle
+	//    qui porte le diagnostic de la premiere decision.
+	for(uint64_t nk : qh_nodes) {
+		auto it = bandit.find(nk);
+		if(it == bandit.end())
+			continue;
+		BanditNode& nd = it->second;
+		++nd.visits;
+		if(!nd.frozen && !nd.cond.empty() && nd.visits >= cfg.qhat_rho) {
+			nd.frozen = true;
+			perm_win.Mask(nd.cond, nd.mask);
+		}
+	}
+}
+
+std::vector<BanditProbe> Search::RootBandit() const {
+	std::vector<BanditProbe> out;
+	if(!cfg.qhat_depth)
+		return out;
+	// L'UNION de deux ensembles, et c'est le point de la sonde. Les coups que
+	// le bandit a CHOISIS a la racine (`q`) ne sont que les quatre ouvertures
+	// du premier prompt — une decision triviale. Ce que le diagnostic vise est
+	// Q^({}, a) pour TOUT coup a : la recompense moyenne des lignes qui l'ont
+	// joue, n'importe ou et dans n'importe quel ordre. C'est exactement la
+	// statistique de racine de la fenetre, et elle existe pour tous les codes
+	// que les k premieres decisions ont proposes — la cible de Tenki comprise,
+	// qui se decide au DEUXIEME prompt et que la table `q` de la racine ne
+	// verrait jamais.
+	std::unordered_map<uint64_t, BanditProbe> acc;
+	if(auto it = bandit.find(0ull); it != bandit.end())
+		for(const auto& [key, nw] : it->second.q) {
+			BanditProbe& p = acc[key];
+			p.key = key;
+			p.n = nw.first;
+			p.w = nw.second;
+		}
+	for(const auto& [key, code] : bandit_code) {
+		BanditProbe& p = acc[key];
+		p.key = key;
+		p.code = code;
+	}
+	out.reserve(acc.size());
+	for(auto& [key, p] : acc) {
+		const PermStat ph = perm_win.Root(key);
+		p.nhat = ph.n;
+		p.qhat_sum = double(ph.n) * double(ph.q);
+		if(p.n || p.nhat)
+			out.push_back(p);
+	}
+	return out;
 }
 
 void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
@@ -2119,6 +2691,12 @@ void AdaptRun(NrpaPolicy& pol, NrpaResidual* res, const NrpaRun& run,
 	};
 	std::vector<double> p;
 	for(const PolicyStep& s : run.steps) {
+		// Decision prise par le BANDIT DE TETE (--qhat) : elle n'a pas ete
+		// tiree du softmax, donc le gradient NRPA n'y est pas defini. L'y
+		// appliquer pousserait +alpha le coup choisi a chaque tirage sans le
+		// moindre contrepoids — le mode d'echec exact de `--mcps` (9.21 (k)).
+		if(s.bandit)
+			continue;
 		p.resize(s.keys.size());
 		double mx = -1e300;
 		for(size_t i = 0; i < s.keys.size(); ++i) {
@@ -2424,6 +3002,21 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	path.clear();
 	novelty.Clear();
 	uint64_t rng = seed ? seed : 1;
+	// BANDIT DE TETE (--qhat) : la fenetre glissante s'alloue ici, une fois par
+	// recherche, et le DENOMINATEUR de la recompense se fixe ici aussi. C'est
+	// une constante du PROBLEME (le materiel du board cible) et non le meilleur
+	// score courant : normaliser par lui ferait bouger l'echelle des entrees
+	// deja dans la fenetre, et Q^ comparerait des recompenses incomparables.
+	// Le plancher de 40 est le cimetiere (`fodder` dans Heuristic), qui n'a pas
+	// de maximum structurel ; la recompense est plafonnee a 1 de toute facon.
+	if(cfg.qhat_depth) {
+		if(!perm_win.Ready())
+			perm_win.Init(cfg.qhat_window);
+		qhat_scale = double(target.codes.size()) * 100.0 +
+					 double(target.entries.size()) * 10.0 +
+					 double(target.mzone_count) * 3.0 + 40.0 +
+					 double(cfg.resolve_weight) * double(resolve_total);
+	}
 
 	arena.Push();     // point de reprise : la racine
 	// Redemarrages successifs contre la convergence prematuree — mais la
@@ -2489,6 +3082,12 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 	// le conditionnement ne distingue rien.
 	stats.ctx_entries = ctx_weights.size();
 	stats.ctx_capped = cfg.ctx_max && ctx_weights.size() >= cfg.ctx_max;
+	// La vie du BANDIT : taille de l'arbre de tete, vocabulaire de la fenetre,
+	// et MEMOIRE mesuree — le cout de ce mecanisme est en memoire et il est paye
+	// par worker. Sans ce chiffre, W se reglerait a l'aveugle.
+	stats.qhat_nodes = bandit.size();
+	stats.qhat_codes = perm_win.Codes();
+	stats.qhat_bytes = perm_win.Bytes();
 }
 
 void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
@@ -2921,6 +3520,14 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			++stats.recipe_h_count;
 			hgoal += cfg.recipe_h * rh;
 		}
+		// LANDMARKS APPRIS (chantier 18) : le MEME point d'entree que le graphe
+		// de recettes, et la meme discipline — toujours EVALUE des que le graphe
+		// existe (le compteur dit ce qu'il saurait dire), il ne PESE que si son
+		// poids est non nul.
+		if(cfg.landmarks && !cfg.landmarks->Empty()) {
+			const uint32_t lrem = LandmarkRemaining(board_scratch);
+			hgoal += cfg.landmark_h * static_cast<float>(lrem);
+		}
 		// Eq. 7 : l'echelle est h a la racine de CETTE recherche (C3).
 		if(idx == 0 && cfg.reroot_h > 0) {
 			h_root = (std::max)(1.0, static_cast<double>(hgoal));
@@ -3238,11 +3845,55 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 	return unknown;
 }
 
+// LES FAITS D'UN ETAT (chantier 18). Cinq requetes de zone : c'est cher, et
+// c'est sans importance — cette fonction ne tourne que HORS LIGNE, au rejeu du
+// corpus de plans resolus (une poignee de lignes de quelques centaines de
+// decisions). Le chemin chaud, lui, ne releve QUE les cles de landmark
+// (Search::LandmarkRemaining), ce qui est une tout autre facture.
+void CollectStateFacts(Duel& duel, uint8_t con,
+					   std::unordered_map<uint64_t, uint32_t>& out) {
+	out.clear();
+	static thread_local std::vector<QueriedCard> rq;
+	for(uint32_t loc : { LOCATION_MZONE, LOCATION_SZONE, LOCATION_GRAVE,
+						 LOCATION_REMOVED, LOCATION_HAND }) {
+		duel.Query(con, loc, QUERY_CODE | QUERY_ALIAS, rq);
+		for(const QueriedCard& c : rq)
+			if(c.present)
+				++out[LandmarkGraph::KeyOf(
+					duel.Db().Canonical(c.Code()),
+					NormalizeZone(static_cast<uint8_t>(loc)))];
+	}
+	// LES ZONES DE L'ADVERSAIRE, et ce n'est pas un raffinement.
+	//
+	// La moitie du but de l'etalon B est un HANDRIP : trois cartes arrachees a
+	// la main adverse. Un releve limite au joueur cible ne peut pas l'exprimer —
+	// aucun fait de sa propre moitie de terrain ne devient vrai quand
+	// l'adversaire perd une carte. Le graphe aurait donc appris a construire le
+	// board et serait reste MUET sur exactement la moitie qui manque, tout en
+	// ayant l'air de fonctionner. C'est la panne la plus chere du dossier (un
+	// diagnostic qui repond a cote de sa propre question), evitee ici avant
+	// d'avoir coute un run.
+	//
+	// Marquees par le bit 0x80 sur la zone : « Ash Blossom au cimetiere
+	// ADVERSE » est un fait distinct de « Ash Blossom a mon cimetiere ».
+	const uint8_t opp = con ^ 1;
+	for(uint32_t loc : { LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_HAND }) {
+		duel.Query(opp, loc, QUERY_CODE | QUERY_ALIAS, rq);
+		for(const QueriedCard& c : rq)
+			if(c.present)
+				++out[LandmarkGraph::KeyOf(
+					duel.Db().Canonical(c.Code()),
+					static_cast<uint8_t>(
+						NormalizeZone(static_cast<uint8_t>(loc)) | 0x80))];
+	}
+}
+
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
 					 const BoardKey& target, NrpaRun& out,
-					 RecipeGraph* recipes, uint32_t mcps_depth) {
+					 RecipeGraph* recipes, uint32_t mcps_depth,
+					 LandmarkTrace* landmarks) {
 	size_t unknown = 0, ri = 0;
 	uint8_t ptype = 0;
 	std::vector<uint8_t> payload;
@@ -3328,6 +3979,29 @@ size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 			break;
 
 		const std::vector<uint8_t>& recorded = yrp.responses[ri];
+		// LANDMARKS (chantier 18) : le multiensemble des faits AVANT de jouer
+		// cette decision. On enregistre, pour chaque fait, l'indice ou son
+		// k-ieme exemplaire est apparu POUR LA PREMIERE FOIS — c'est de la que
+		// sortent a la fois le compte (la boucle de repetition du papier) et
+		// l'ordre (les aretes de progression).
+		//
+		// Le releve porte sur TOUTES les decisions du joueur cible, y compris
+		// les prompts a choix unique : un fait devient vrai pendant une
+		// resolution, pas seulement a un carrefour. Le filtrer sur les
+		// multi-choix aurait rate exactement les faits qui arrivent « tout
+		// seuls » — ceux qu'une macro absorbe.
+		if(landmarks && player == target_player) {
+			static thread_local std::unordered_map<uint64_t, uint32_t> facts;
+			CollectStateFacts(duel, static_cast<uint8_t>(target_player), facts);
+			if(landmarks->decisions == 0)
+				landmarks->initial = facts;
+			for(const auto& [k, n] : facts) {
+				std::vector<float>& v = landmarks->first[k];
+				while(v.size() < n)
+					v.push_back(static_cast<float>(landmarks->decisions));
+			}
+			++landmarks->decisions;
+		}
 		if(player == target_player) {
 			auto choices = Enumerate(ptype, payload.data(),
 									 static_cast<uint32_t>(payload.size()), eo);

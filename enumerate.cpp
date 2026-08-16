@@ -222,7 +222,10 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			out.Clear();
 			return;
 		}
-		if(opt.allow_phase_change) {
+		// Meme garde-fou qu'au prompt de bataille : un prompt idle sans aucune
+		// commande jouable garde ses sorties de phase, sinon le drapeau
+		// fabriquerait une impasse la ou le jeu en offrait une.
+		if(opt.allow_phase_change || out.empty()) {
 			if(to_bp) {
 				Choice& c = out.Emit();
 				PutInt32(c.response, 6);
@@ -271,14 +274,22 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			out.Clear();
 			return;
 		}
-		if(to_m2) {
+		// CHANGEMENT DE PHASE AU PROMPT DE BATAILLE (repare session 15).
+		// `allow_phase_change` n'etait lu qu'au prompt IDLE ; ici les deux
+		// sorties de phase etaient emises INCONDITIONNELLEMENT, donc le drapeau
+		// ne fermait qu'une moitie de la porte. Garde-fou : si le prompt ne
+		// propose RIEN d'autre, elles restent emises — retirer la derniere
+		// reponse legale transformerait un prompt en impasse, ce qui n'est pas
+		// un elagage mais une corruption de l'espace.
+		const bool phase_ok = opt.allow_phase_change || out.empty();
+		if(to_m2 && phase_ok) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 2);
 			c.edge = EdgeOf(message, { 2 });
 			c.phase = true;
 			SetLabel(c, opt, "-> Main 2", 0, false);
 		}
-		if(to_ep) {
+		if(to_ep && (phase_ok || out.empty())) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 3);
 			c.edge = EdgeOf(message, { 3 });

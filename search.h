@@ -19,6 +19,10 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #include "duel.h"
 #include "enumerate.h"
 #include "prompt.h"
@@ -35,6 +39,13 @@ namespace solver {
 struct BoardKey {
 	uint64_t hash = 0;
 	std::vector<uint64_t> entries;   // triees, pour une comparaison exacte
+	// Entrees RELACHEES : (zone, code, face) et rien d'autre — ni materiaux ni
+	// compteurs. Triees. C'est la comparaison des cibles POSEES a la main
+	// (`--target`), qui sont un code et une position : un Xyz pose n'a pas de
+	// materiaux, donc il n'egalerait JAMAIS un Xyz reel, qui en porte toujours.
+	// Session 15 : avec la zone S/T exigee vide, c'etait la seconde raison pour
+	// laquelle le but de l'etalon A ne pouvait pas etre atteint.
+	std::vector<uint64_t> loose;
 	// Codes seuls, tries. Beaucoup plus grossier que `entries`, mais c'est
 	// justement ce qu'il faut pour guider : une carte posee compte des qu'elle
 	// est la, sans attendre d'avoir ses materiaux et sa position finale.
@@ -246,6 +257,14 @@ struct PolicyStep {
 	// d'indice de sqrt-LTS. Ecraser `ctx` casserait ces deux lectures ; les
 	// separer laisse chaque consommateur sur son propre conditionnement.
 	uint64_t cctx = 0;
+	// Cette decision a ete prise par le BANDIT DE TETE (--qhat) et non
+	// echantillonnee sous la politique. AdaptRun la SAUTE : le gradient NRPA
+	// n'est valide que pour un coup TIRE du softmax — l'appliquer a un coup
+	// choisi par argmax le pousserait +alpha a chaque fois sans contrepoids,
+	// c'est-a-dire exactement le mode d'echec qui a tue `--mcps` (9.21 (k)).
+	// Le bandit a sa propre memoire (Q et Q^, moyennes sur TOUS les tirages) ;
+	// c'est elle qui joue le role du gradient sur ces decisions.
+	uint8_t bandit = 0;
 };
 struct NrpaRun {
 	double score = -1;
@@ -283,7 +302,23 @@ struct NrpaShared {
 // RunLevin les consomme, et les workers les fusionnent (moyenne des poids).
 using NrpaPolicy = std::unordered_map<uint64_t, float>;
 
-// --- politique a DEUX NIVEAUX (chantier 5ter, inspire de MCPS 2510.06381) ---
+// --- politique a DEUX NIVEAUX (chantier 5ter) -------------------------------
+//
+// AVERTISSEMENT DE PATERNITE (session 15). Ce bloc a longtemps porte la mention
+// « inspire de MCPS 2510.06381 ». ELLE ETAIT TROMPEUSE et elle est retiree.
+// MCPS est un MCTS : un ARBRE, des compteurs de visites par noeud, et trois
+// estimateurs qui sont des MOYENNES DE RECOMPENSE — Q (parties commencant par
+// le chemin puis a), l'AMAF Q~ chez un ancetre de reference, et la permutation
+// Q^ (parties contenant a ET tous les coups du chemin, dans n'importe quel
+// ordre, n'importe ou) — combines a POIDS PROPORTIONNELS AUX EFFECTIFS.
+// Ce qui suit combine deux LOGITS mis a jour par le gradient NRPA de la SEULE
+// meilleure sequence. Ni arbre, ni compteur de visites, ni moyenne de
+// recompense : une combinaison convexe de deux logits n'est pas une
+// combinaison convexe de deux taux de victoire, et la formule de retenue
+// s = n/(n+k) ci-dessous REINTRODUIT l'hyperparametre de biais que le papier
+// supprime. Ce que ce bloc emprunte a MCPS est l'IDEE de combiner plusieurs
+// estimateurs d'un meme coup ponderes par leur evidence — pas son algorithme.
+// Le vrai MCPS vit plus bas, sous PermWindow / BanditNode (session 15).
 //
 // ATTENTION — CE DIAGNOSTIC A ETE RETIRE PAR LA SESSION 7bis (§9.13, encadre
 // RECTIFICATION ; §9.14). Il disait : « le plafond mesure en session 7 (accord
@@ -310,15 +345,15 @@ using NrpaPolicy = std::unordered_map<uint64_t, float>;
 // case neuve ne dit rien) ; n >> k -> w_ctx (dependance a l'etat pleine) ;
 // k < 0 -> mecanisme ETEINT, comportement d'avant bit pour bit.
 //
-// Ecart assume avec MCPS : ses trois estimateurs sont des moyennes de recompense
-// sur des ensembles de playouts qui se recouvrent, et il les pondere par les
-// effectifs bruts (beta = n/N, variance minimale sous independance). Ici les
-// deux niveaux sont EMBOITES — le global agrege tous les contextes, son
-// effectif domine toujours — et une ponderation par effectifs bruts
-// n'accorderait jamais la main au contextuel. D'ou la retenue par un k calibre,
-// et non par le rapport des effectifs. C'est une combinaison convexe de deux
-// logits de MEME echelle : elle ne change pas la temperature du softmax, donc
-// l'A/B mesure la dependance a l'etat et rien d'autre.
+// Pourquoi une retenue calibree et non des effectifs bruts (le point qui rend
+// ce mecanisme etranger a MCPS) : les deux niveaux sont EMBOITES — le global
+// agrege tous les contextes, son effectif domine toujours — donc une
+// ponderation par effectifs bruts n'accorderait JAMAIS la main au contextuel.
+// D'ou le k calibre. C'est une combinaison convexe de deux logits de MEME
+// echelle : elle ne change pas la temperature du softmax, donc l'A/B mesure la
+// dependance a l'etat et rien d'autre. Mais c'est aussi, exactement,
+// l'hyperparametre de biais que la derivation de MCPS elimine — et c'est
+// pourquoi ce bloc ne peut pas se reclamer du papier.
 struct CtxWeight {
 	float w = 0;
 	uint32_t n = 0;
@@ -343,19 +378,29 @@ inline uint64_t CtxKey(uint64_t key, uint64_t ctx) {
 	return key ^ ((ctx + 1) * 0x9e3779b97f4a7c15ull);
 }
 
-// --- CONDITIONNEMENT PAR LE CHEMIN (session 14, MCPS arXiv:2510.06381) -------
+// --- CONDITIONNEMENT PAR LE CHEMIN (session 14) — REFUTE, CONSERVE POUR L'A/B -
 //
-// LE CORRECTIF D'UN ECART AU PAPIER. Le niveau contextuel ci-dessus dit
-// s'inspirer de MCPS ; il en a repris la FORMULE DE COMBINAISON (plusieurs
-// estimateurs d'un meme coup, ponderes par leur evidence) mais PAS son
-// conditionnement. MCPS conditionne sur « toutes les parties qui contiennent
-// TOUS LES COUPS DU CHEMIN de la racine au noeud » ; nous conditionnions sur un
-// descripteur maison a deux axes (cartes posees, taille de main). Or ce
-// descripteur vaut (0, 3) POUR TOUTES LES BRANCHES a la premiere decision : il
-// ne peut, par construction, distinguer deux premiers coups l'un de l'autre —
-// exactement la ou tout se joue quand une ouverture decide de la viabilite de
-// la ligne. C'est la meme famille d'ecart que les options v1/v2 (9.19 (g)),
-// dont le retour au critere du papier avait renverse le verdict.
+// VERDICT (§9.21 (k), session 14) : REFUTE DEUX FOIS. (1) En recherche — zero
+// comparaison gagnee sur quatre contre le simple fait d'ALLUMER le niveau
+// contextuel avec son ancien descripteur (`--ctx-shrink 8`), et un effondrement
+// total a k = 6 sur une graine (best 0/4, 99 % des tirages morts au changement
+// de tour, 27 lignes distinctes retenues sur 8 751 offertes : verrouillage de
+// bassin). (2) En representation — la courbe d'accord rend le MEME palier que
+// l'ancien conditionnement (59 contre 59).
+//
+// LE DIAGNOSTIC, plus important que le verdict (session 15) : ce drapeau a
+// greffe le CONDITIONNEMENT de MCPS sur le MAUVAIS OBJET. Le papier conditionne
+// une MOYENNE DE RECOMPENSE calculee sur toutes les parties, y compris les
+// mauvaises ; ici il conditionne un LOGIT mis a jour par le gradient de la
+// seule meilleure sequence. Le mode d'echec observe est exactement celui que la
+// moitie manquante predit : le gradient pousse +alpha sans le contrepoids
+// qu'une moyenne sur toutes les parties apporterait, et chaque case
+// conditionnee recoit trop peu de mises a jour concurrentes pour s'en remettre.
+// Le mecanisme du papier est implemente sous PermWindow / BanditNode (--qhat) ;
+// CE drapeau reste uniquement pour pouvoir rejouer l'A/B de la session 14. Il
+// est DEFAIT par defaut et le dit bruyamment quand on l'allume.
+//
+// Ce qui suit decrit ce que le drapeau FAIT, non ce qu'il faudrait faire :
 //
 // COMMUTATIF ET NON SEQUENTIEL, pour deux raisons qui coincident : MCPS parle
 // des parties qui CONTIENNENT les coups (un ensemble, pas une suite), et notre
@@ -370,6 +415,272 @@ inline uint64_t MixMove(uint64_t key) {
 	z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
 	return z ^ (z >> 31);
 }
+
+// --- STATISTIQUE DE PERMUTATION Q^ (session 15, MCPS arXiv:2510.06381) -------
+//
+// LE MECANISME DU PAPIER, POUR DE VRAI. La session 14 avait pris le
+// CONDITIONNEMENT de MCPS et l'avait pose sur des logits NRPA (ci-dessus,
+// refute). Ce qui suit prend l'OBJET : des moyennes de recompense sur des
+// ensembles de tirages, combinees a poids proportionnels aux effectifs.
+//
+// CE QUE MCPS FAIT, en trois lignes. A un noeud s atteint par le chemin
+// (a0..ad), pour evaluer un coup a, il moyenne les recompenses de trois
+// ensembles de parties : Q(s,a) celles qui COMMENCENT par le chemin puis a,
+// Q~(sr,a) l'AMAF de GRAVE chez un ancetre de reference, et Q^(sr,a) — sa
+// contribution — TOUTES les parties qui contiennent a et tous les coups de sr,
+// dans n'importe quel ordre et n'importe ou (Virtual Global Search). Il les
+// combine par val = (n Q + n~ Q~ + n^ Q^) / (n + n~ + n^), la combinaison
+// convexe de variance minimale sous independance, et c'est elle qui SUPPRIME
+// l'hyperparametre de biais de GRAVE. Machinerie : un bitset par code de coup
+// sur une fenetre glissante des W derniers tirages, plus le tableau parallele
+// de leurs recompenses ; Q^ se calcule par popcount sur l'intersection.
+//
+// CE QUE NOUS EN PRENONS, ET CE QUE NOUS N'EN PRENONS PAS.
+//
+// - Q^ et Q, oui. La fenetre a bitsets est transportable telle quelle dans une
+//   architecture SANS arbre : elle ne depend que des tirages, pas d'un arbre.
+//   Q demande un arbre — on en construit un, minuscule, sur les k PREMIERES
+//   decisions seulement (mesure session 14 : 207 cases couvrent les six
+//   premieres). C'est un vrai bandit en haut de l'arbre, la ou le branchement
+//   est etroit et ou une ouverture decide de la viabilite de la ligne ; au-dela
+//   de k, NRPA echantillonne comme avant, a l'octet pres.
+// - Q~ (l'AMAF de GRAVE), NON, et pour une raison de fond et non de paresse :
+//   A LA RACINE LES DEUX ESTIMATEURS COINCIDENT. Q~(root,a) = moyenne des
+//   parties passant par la racine qui contiennent a = moyenne de TOUTES les
+//   parties contenant a = Q^(root,a), la condition du chemin etant vide. Notre
+//   arbre est profond de six plis et sa reference de permutation est la racine
+//   ou l'un de ses tout premiers descendants : ajouter Q~ reviendrait a compter
+//   deux fois les memes tirages, ce que la derivation par variance minimale
+//   (qui suppose les estimateurs independants) ne pardonne pas. On garde donc
+//   la paire (Q, Q^) et la MEME formule de poids — proportionnels aux
+//   effectifs, aucun hyperparametre de biais.
+//
+// LA RECOMPENSE, choisie explicitement AVANT de coder (le papier travaille sur
+// des taux de victoire dans [0,1] ; notre score de tirage est
+// materiel x 1000 + nouveaute, non borne et incomparable d'un run a l'autre).
+// r = (meilleur materiel atteint le long du tirage) / (materiel du board
+// cible), plafonne a 1, et exactement 1 quand le but est atteint. Trois
+// proprietes voulues : bornee, comparable entre runs (le denominateur est une
+// constante du PROBLEME, pas le meilleur score courant — normaliser par lui
+// ferait bouger l'echelle des anciennes entrees de la fenetre), et alignee sur
+// l'objectif que NRPA optimise deja (meme `material`, nouveaute exclue — c'est
+// un departage de gradient, pas une mesure de reussite, et il n'est pas borne).
+//
+// POURQUOI CET INSTRUMENT EST LE BON POUR LE DIAGNOSTIC DE L'OPERATEUR. Si
+// Tenki cherche autre chose que la bonne cible, la ligne meurt en ~20
+// decisions ; l'information EXISTE (le tirage se termine) mais le solveur
+// n'avait aucun endroit ou la mettre — PolicyRollout n'a pas de table de
+// transposition et sa seule memoire est un poids par code de coup, aveugle a
+// l'etat. Q^ est cet endroit : a la premiere decision s = {}, donc Q^({},a) est
+// la recompense moyenne des lignes ayant joue a — MOYENNEE SUR TOUS LES
+// TIRAGES, y compris les mauvais. C'est la moitie manquante du gradient NRPA.
+
+// Effectif et recompense moyenne d'un estimateur.
+struct PermStat {
+	uint32_t n = 0;
+	float q = 0.0f;
+};
+
+inline uint32_t PopCount64(uint64_t x) {
+#if defined(_MSC_VER) && defined(_M_X64)
+	return static_cast<uint32_t>(__popcnt64(x));
+#elif defined(__GNUC__) || defined(__clang__)
+	return static_cast<uint32_t>(__builtin_popcountll(x));
+#else
+	uint32_t c = 0;
+	while(x) { x &= x - 1; ++c; }
+	return c;
+#endif
+}
+
+// FENETRE GLISSANTE DE TIRAGES, un bitset par code de coup. PAR WORKER : le
+// mecanisme n'a aucune synchronisation, comme la table de nouveaute et le
+// niveau contextuel. Le papier prend W = 10 000 ; nous exposons le cadran
+// (--qhat-window) et imprimons la memoire mesuree, parce que nous payons W
+// SEIZE FOIS (un jeu de bitsets par worker) la ou le papier le paie une.
+class PermWindow {
+public:
+	void Init(uint32_t w) {
+		size_ = w ? w : 1;
+		words_ = (size_ + 63) / 64;
+		reward_.assign(size_, 0.0f);
+		present_.assign(words_, 0ull);
+		slot_.assign(size_, std::vector<uint64_t>());
+		bits_.clear();
+		root_.clear();
+		pushed_ = 0;
+	}
+	bool Ready() const { return size_ != 0; }
+	uint64_t Pushed() const { return pushed_; }
+	size_t Codes() const { return bits_.size(); }
+
+	// Verse un tirage. `moves` doit etre TRIE et DEDOUBLONNE (le multiensemble
+	// des codes joues ; MCPS ne compte qu'une presence par partie).
+	void Push(const std::vector<uint64_t>& moves, float r) {
+		const uint32_t slot = static_cast<uint32_t>(pushed_ % size_);
+		const uint64_t bit = 1ull << (slot & 63);
+		const size_t word = slot >> 6;
+		if(present_[word] & bit) {
+			// Le tirage evince rend ses bits, et la statistique de racine — qui
+			// est tenue INCREMENTALEMENT — rend sa recompense.
+			const float old = reward_[slot];
+			for(uint64_t c : slot_[slot]) {
+				auto it = bits_.find(c);
+				if(it == bits_.end())
+					continue;
+				it->second[word] &= ~bit;
+				bool empty = true;
+				for(uint64_t v : it->second)
+					if(v) { empty = false; break; }
+				if(empty)
+					bits_.erase(it);
+				auto ir = root_.find(c);
+				if(ir != root_.end()) {
+					if(--ir->second.n == 0)
+						root_.erase(ir);
+					else
+						ir->second.sum -= old;
+				}
+			}
+		}
+		present_[word] |= bit;
+		reward_[slot] = r;
+		slot_[slot] = moves;
+		for(uint64_t c : moves) {
+			auto& b = bits_[c];
+			if(b.empty())
+				b.assign(words_, 0ull);
+			b[word] |= bit;
+			RootStat& rs = root_[c];
+			++rs.n;
+			rs.sum += r;
+		}
+		++pushed_;
+	}
+
+	// Masque des tirages PRESENTS contenant TOUS les codes de `cond`.
+	void Mask(const std::vector<uint64_t>& cond, std::vector<uint64_t>& out) const {
+		out = present_;
+		for(uint64_t c : cond) {
+			auto it = bits_.find(c);
+			if(it == bits_.end()) {
+				out.assign(words_, 0ull);
+				return;
+			}
+			for(size_t i = 0; i < words_; ++i)
+				out[i] &= it->second[i];
+		}
+	}
+
+	// (n^, Q^) d'un code sous un masque deja calcule — le popcount du papier.
+	PermStat Stat(uint64_t code, const std::vector<uint64_t>& mask) const {
+		PermStat s;
+		auto it = bits_.find(code);
+		if(it == bits_.end() || mask.size() != words_)
+			return s;
+		uint32_t n = 0;
+		double sum = 0;
+		for(size_t i = 0; i < words_; ++i) {
+			uint64_t w = it->second[i] & mask[i];
+			if(!w)
+				continue;
+			n += PopCount64(w);
+			while(w) {
+				// Indice du bit bas : popcount du masque des bits en dessous.
+				const uint32_t b = PopCount64((w & (~w + 1ull)) - 1ull);
+				sum += reward_[(i << 6) + b];
+				w &= w - 1ull;
+			}
+		}
+		s.n = n;
+		s.q = n ? static_cast<float>(sum / n) : 0.0f;
+		return s;
+	}
+
+	// (n^, Q^) A LA RACINE (condition vide), tenus INCREMENTALEMENT a chaque
+	// versement et eviction. Le papier GELE les statistiques de permutation
+	// d'un noeud a rho visites ; il exclut explicitement la racine, et pour
+	// cause — c'est le seul noeud dont la condition est vide, donc le seul dont
+	// la statistique se maintient en O(coups du tirage) au lieu d'un balayage.
+	// C'est aussi celui qui porte tout le diagnostic (la premiere decision).
+	PermStat Root(uint64_t code) const {
+		PermStat s;
+		auto it = root_.find(code);
+		if(it == root_.end() || !it->second.n)
+			return s;
+		s.n = it->second.n;
+		s.q = static_cast<float>(it->second.sum / it->second.n);
+		return s;
+	}
+
+	// Memoire reellement occupee, imprimee au bilan : le cout du mecanisme est
+	// en MEMOIRE et il est paye par worker (piege 52 — un mecanisme dont on ne
+	// mesure pas le cout finit par etre regle a l'aveugle).
+	size_t Bytes() const {
+		size_t b = reward_.size() * sizeof(float) +
+				   present_.size() * sizeof(uint64_t) +
+				   bits_.size() * (words_ * sizeof(uint64_t) + 48) +
+				   root_.size() * 48;
+		for(const auto& s : slot_)
+			b += s.capacity() * sizeof(uint64_t) + 32;
+		return b;
+	}
+
+private:
+	struct RootStat { uint32_t n = 0; double sum = 0; };
+	uint32_t size_ = 0;
+	size_t words_ = 0;
+	uint64_t pushed_ = 0;
+	std::vector<float> reward_;      // recompense du tirage de chaque case
+	std::vector<uint64_t> present_;  // cases remplies (bitset)
+	// Codes du tirage de chaque case : sans eux, evincer un tirage demanderait
+	// de balayer TOUS les bitsets. C'est le poste memoire dominant, et c'est
+	// lui qui fixe le defaut de W.
+	std::vector<std::vector<uint64_t>> slot_;
+	std::unordered_map<uint64_t, std::vector<uint64_t>> bits_;
+	std::unordered_map<uint64_t, RootStat> root_;
+};
+
+// Un noeud du BANDIT DE TETE : les k premieres decisions d'un tirage.
+//
+// La cle du noeud est la SOMME MELANGEE des coups joues — commutative, donc
+// deux ordres qui menent au meme multiensemble partagent leurs statistiques.
+// C'est a la fois le principe directeur du projet (recherche sur le GRAPHE
+// d'etats : A puis B et B puis A convergent) et la lecture de MCPS, dont les
+// permutations disent exactement cela.
+struct BanditNode {
+	uint32_t visits = 0;
+	bool frozen = false;
+	// Multiensemble des coups du chemin : la CONDITION de Q^ a ce noeud.
+	std::vector<uint64_t> cond;
+	// Masque GELE des tirages qui satisfont `cond`, calcule une seule fois
+	// quand le noeud atteint rho visites (le gel du papier). Vide tant que le
+	// noeud n'a pas gele : ses descendants lisent alors l'ancetre gele le plus
+	// proche, la racine au pire — exactement la propagation de MCPS.
+	std::vector<uint64_t> mask;
+	// Cache (n^, Q^) par code sous ce masque. Le papier calcule d'un coup les
+	// statistiques de TOUS les codes au gel ; nous les calculons a la demande
+	// et les gardons — meme semantique (une valeur par (noeud, code), figee des
+	// le premier usage), memoire proportionnelle aux coups REELLEMENT proposes
+	// a ce noeud (quelques dizaines) et non a tout le vocabulaire.
+	std::unordered_map<uint64_t, PermStat> perm;
+	// Q(s,a) : effectif et somme des recompenses des tirages passes par CE
+	// noeud puis ayant joue a.
+	std::unordered_map<uint64_t, std::pair<uint32_t, double>> q;
+};
+
+// Une ligne de la SONDE du bandit (agregee entre workers par l'appelant) :
+// l'instrument obligatoire AVANT tout A/B, parce que la courbe d'accord du
+// corpus ne peut PAS juger Q^ (elle mesure la reproduction d'un corpus qui ne
+// contient QUE des bonnes lignes, alors que Q^ tire son signal des ECHECS).
+struct BanditProbe {
+	uint64_t key = 0;
+	uint32_t code = 0;    // carte engagee par le coup (0 = macro ou inconnu)
+	uint32_t n = 0;       // effectif de Q
+	double w = 0;         // somme des recompenses de Q
+	uint32_t nhat = 0;    // effectif de Q^
+	double qhat_sum = 0;  // n^ * Q^ (additif entre workers)
+};
 
 // Compatibilite SEMANTIQUE entre le contexte courant et celui d'une occurrence
 // de macro dans le corpus (conditionnement des options, 9.19 (g) : la fenetre
@@ -434,11 +745,47 @@ class RecipeGraph;
 // L'IDENTIQUE des deux cotes, sans quoi le gradient du corpus tomberait dans
 // des cases que les tirages ne visitent jamais (la faute exacte que l'audit
 // 7.5 avait trouvee sur hint_bias). 0 = descripteur semantique, comme avant.
+// Releve des FAITS d'un etat, pour l'apprentissage des landmarks : le
+// multiensemble (code canonique, zone normalisee) du joueur cible. MZONE et
+// SZONE se confondent en « terrain », exactement comme dans le graphe de
+// recettes et dans le critere de but — trois endroits qui doivent s'accorder,
+// sans quoi un landmark « sur le terrain » ne serait jamais reconnu satisfait.
+// Le DECK et l'EXTRA sont exclus : une carte qui y dort n'est pas un
+// accomplissement, c'est une reserve (meme raison qu'au kZoneAny du chantier 16).
+void CollectStateFacts(Duel& duel, uint8_t con,
+					   std::unordered_map<uint64_t, uint32_t>& out);
+
+// Trace d'UN plan resolu, pour l'apprentissage des landmarks (cf.
+// LandmarkGraph, plus bas). Au niveau NAMESPACE et non imbriquee dans la
+// classe : `LiftPolicyRun` la remplit et est declaree AVANT elle ; un pointeur
+// vers un type imbrique d'une classe incomplete n'existe pas.
+//
+//   `first[key][k-1]` : quand le k-ieme exemplaire du fait `key` est apparu,
+//                       en indices de decision d'abord, normalise en FRACTION
+//                       de la ligne par Normalize() ;
+//   `initial[key]`    : le compte a l'etat INITIAL (regle 1 : un landmark est
+//                       un ACCOMPLISSEMENT, pas un fait deja vrai).
+struct LandmarkTrace {
+	std::unordered_map<uint64_t, std::vector<float>> first;
+	std::unordered_map<uint64_t, uint32_t> initial;
+	uint32_t decisions = 0;
+	// Les indices bruts deviennent des fractions : deux plans de longueurs
+	// differentes doivent pouvoir moyenner leurs ordres d'atteinte, sinon le
+	// plan le plus long ecrase tous les autres.
+	void Normalize() {
+		const float d = static_cast<float>(decisions > 0 ? decisions : 1);
+		for(auto& [k, v] : first)
+			for(float& x : v)
+				x /= d;
+	}
+};
+
 size_t LiftPolicyRun(Duel& duel, Arena& arena, const Replay& yrp,
 					 int target_player, size_t stop_after, const EnumOptions& eo,
 					 const std::unordered_map<uint64_t, size_t>& repertoire,
 					 const BoardKey& target, NrpaRun& out,
-					 RecipeGraph* recipes = nullptr, uint32_t mcps_depth = 0);
+					 RecipeGraph* recipes = nullptr, uint32_t mcps_depth = 0,
+					 LandmarkTrace* landmarks = nullptr);
 
 // Probabilite moyenne (log) que `pol` donne aux coups CHOISIS par les lignes
 // du corpus, sous les memes biais que l'echantillonnage. C'est l'instrument
@@ -739,6 +1086,17 @@ struct ArchiveEntry {
 	uint32_t burned = 0;     // cout partiel (cimetiere + bannies), anytime
 	std::vector<std::vector<uint8_t>> path;
 };
+
+// NIVEAU DE PROGRES d'une entree d'archive (session 15, --archive-spread) :
+// le couple (resolutions exigees faites, cartes du board cible posees), qui est
+// exactement l'axe sur lequel la cle de tri SATURE en regime but seul. C'est la
+// dimension le long de laquelle l'archive doit ETALER sa couverture au lieu de
+// n'en garder que le sommet.
+inline uint32_t ArchiveLevel(uint32_t resolves, uint32_t overlap) {
+	if(resolves > 15) resolves = 15;
+	if(overlap > 255) overlap = 255;
+	return resolves * 256u + overlap;
+}
 
 // --- table de transposition partagee (lazy SMP) ----------------------------
 //
@@ -1064,6 +1422,16 @@ public:
 		std::lock_guard<std::mutex> lk(mx);
 		return recipes.size();
 	}
+	// Le graphe connait-il une recette pour ce produit ? Sans cette question,
+	// une distance de 1 est AMBIGUE : elle vaut « aucune recette connue, on
+	// rend le plancher » (regle 2) aussi bien que « une seule invocation
+	// suffit, tous les materiaux sont la » — deux lectures OPPOSEES. Toute
+	// sonde qui lit une distance de 1 doit donc lever l'ambiguite ici.
+	bool Knows(uint32_t product) const {
+		std::lock_guard<std::mutex> lk(mx);
+		auto it = recipes.find(product);
+		return it != recipes.end() && !it->second.empty();
+	}
 	// Le graphe porte-t-il au moins une exigence CARDINALE ? Sans elle, relever
 	// niveau et archetypes de chaque entite presente serait un cout paye pour
 	// rien a chaque noeud developpe. Drapeau pose a l'amorce, jamais retire :
@@ -1166,6 +1534,202 @@ private:
 	std::unordered_map<uint32_t, std::vector<Recipe>> recipes;
 	// Hors du mutex : lu a chaque noeud developpe, ecrit une fois a l'amorce.
 	std::atomic<bool> has_cardinal{ false };
+};
+
+// --- GRAPHE DE LANDMARKS APPRIS (chantier 18, session 16) --------------------
+//
+// LE PROBLEME QU'IL RESOUT, nomme en 9.22 (h). Atteindre un sous-but consomme
+// ce dont le suivant a besoin, et RIEN dans la recherche ne le voit venir : le
+// `h` plat compte les cartes cibles manquantes, il ne dit ni ce qu'il faut
+// avoir AVANT, ni COMBIEN de fois. Une ligne qui prepare DEUX Liger Dancer doit
+// donc longtemps PARAITRE PIRE qu'une ligne qui en pose un tout de suite, et
+// l'adaptation NRPA derive vers la seconde.
+//
+// LE PAPIER. Hanou, Dumancic & de Weerdt, arXiv:2508.21564 — landmarks
+// GENERALISES appris depuis un ensemble d'instances RESOLUES, la ou
+// l'extraction classique echoue ; des FONCTIONS D'ETAT qui capturent la
+// REPETITION ; un graphe oriente avec des BOUCLES pour les sous-plans
+// repetitifs.
+//
+// L'ECART AU PAPIER, dit d'avance (c'est le risque du chantier, et la lecon de
+// 9.21 (k) est qu'un ecart tu est un verdict perdu). Le papier est PDDL : ses
+// landmarks sont des PREDICATS extraits d'un modele d'actions. Nous n'en avons
+// pas — nos actions sont des scripts Lua. Nos landmarks s'extraient donc des
+// TRACES : chaque plan resolu est rejoue (LiftPolicyRun) et l'on releve, a
+// chaque decision, le MULTIENSEMBLE des faits (code canonique, zone
+// normalisee). Ce que nous perdons est la garantie de necessite logique ; ce
+// que nous gardons est la seule chose dont le `h` a besoin — un ordre et des
+// comptes appris de plans qui ONT marche.
+//
+// LA FORME D'UN LANDMARK : (code, zone, k) — « k exemplaires de ce code dans
+// cette zone ». Le COMPTE est ce qui generalise, et la chaine
+// (code,zone,1) -> (code,zone,2) -> (code,zone,3) EST la boucle de repetition
+// du papier. « Leo Dancer au cimetiere, COMPTE » est exactement l'objet que le
+// chantier demandait.
+//
+// LES TROIS REGLES, heritees du graphe de recettes et pour les memes raisons.
+//
+// 1. UN LANDMARK EST UN ACCOMPLISSEMENT, PAS UN FAIT. Ce qui est deja vrai a
+//    l'etat initial n'est pas a atteindre : seul un compte STRICTEMENT
+//    SUPERIEUR au compte initial est retenu. Sans ce filtre, « 3 Fire Formation
+//    - Tenki en main » serait le premier landmark de l'etalon A, satisfait a la
+//    decision 0, et `h` serait plat a nouveau — piege 42 mot pour mot.
+//
+// 2. LE GRAPHE NE PRUNE JAMAIS, IL PONDERE. Un landmark non atteint ajoute 1 a
+//    `h` ; aucun etat n'est declare mort, aucune branche coupee. Au pire `h`
+//    redevient le `h` plat d'aujourd'hui, et l'activer ne peut pas rendre un
+//    but inatteignable.
+//
+// 3. L'INTERSECTION, PAS L'UNION. Un landmark doit apparaitre dans TOUS les
+//    plans du corpus — c'est sa definition (un fait qu'il FAUT atteindre). Un
+//    fait present dans une seule ligne est une contingence de cette ligne, et
+//    l'admettre ferait de `h` une distance a UN plan particulier, c'est-a-dire
+//    un repertoire deguise. Avec un seul plan au corpus, l'intersection est ce
+//    plan : le graphe le DIT au lieu de laisser croire a une generalisation.
+struct Landmark {
+	uint32_t key_index = 0;   // position dans LandmarkGraph::Keys()
+	uint32_t code = 0;
+	uint8_t zone = 0;
+	uint32_t count = 1;       // k : le k-ieme exemplaire
+	// Ordre : moyenne, sur les plans, de la fraction de ligne a laquelle le
+	// k-ieme exemplaire est apparu. C'est l'axe de progression du graphe.
+	float order = 0.0f;
+};
+
+class LandmarkGraph {
+public:
+	using PlanTrace = LandmarkTrace;
+	static uint64_t KeyOf(uint32_t code, uint8_t zone) {
+		return (static_cast<uint64_t>(code) << 8) | zone;
+	}
+	static uint32_t CodeOf(uint64_t key) {
+		return static_cast<uint32_t>(key >> 8);
+	}
+	static uint8_t ZoneOf(uint64_t key) {
+		return static_cast<uint8_t>(key & 0xff);
+	}
+
+	void AddPlan(PlanTrace&& t) { plans.push_back(std::move(t)); }
+	size_t Plans() const { return plans.size(); }
+
+	// INTERSECTION sur tous les plans, puis ordre moyen. `Build` est appelee une
+	// fois, hors de tout worker.
+	void Build() {
+		items.clear();
+		keys.clear();
+		zone_mask = 0;
+		if(plans.empty())
+			return;
+		// Candidats : les faits du PREMIER plan. Un landmark doit etre dans tous,
+		// donc partir d'un seul suffit et evite un balayage de l'union.
+		for(const auto& [key, lv] : plans[0].first) {
+			const uint32_t init0 = Initial(plans[0], key);
+			// Niveau maximal RETENABLE : le min sur les plans du compte atteint,
+			// et il doit depasser le compte initial de CHAQUE plan (regle 1).
+			uint32_t kmax = static_cast<uint32_t>(lv.size());
+			uint32_t init_max = init0;
+			double order_sum[64] = {};
+			bool all = true;
+			for(const PlanTrace& p : plans) {
+				auto it = p.first.find(key);
+				if(it == p.first.end()) { all = false; break; }
+				kmax = (std::min)(kmax, static_cast<uint32_t>(it->second.size()));
+				init_max = (std::max)(init_max, Initial(p, key));
+			}
+			if(!all || kmax <= init_max)
+				continue;
+			if(kmax > 63)
+				kmax = 63;
+			for(const PlanTrace& p : plans) {
+				const auto& lvp = p.first.find(key)->second;
+				for(uint32_t k = init_max; k < kmax; ++k)
+					order_sum[k] += lvp[k];
+			}
+			for(uint32_t k = init_max; k < kmax; ++k) {
+				Landmark lm;
+				lm.code = CodeOf(key);
+				lm.zone = ZoneOf(key);
+				lm.count = k + 1;
+				lm.order = static_cast<float>(order_sum[k] /
+											  static_cast<double>(plans.size()));
+				items.push_back(lm);
+			}
+		}
+		// Ordre de progression : c'est LUI le graphe. Un tri par ordre moyen
+		// suffit a porter l'information dont `h` a besoin (« combien reste-t-il
+		// a accomplir »), et les aretes ne servent qu'a l'imprimer lisiblement.
+		std::sort(items.begin(), items.end(),
+				  [](const Landmark& a, const Landmark& b) {
+					  if(a.order != b.order) return a.order < b.order;
+					  if(a.code != b.code) return a.code < b.code;
+					  if(a.zone != b.zone) return a.zone < b.zone;
+					  return a.count < b.count;
+				  });
+		// Index des cles DISTINCTES : le compteur d'etat n'est rempli que pour
+		// elles. C'est ce qui rend l'evaluation abordable dans les TIRAGES —
+		// on ne releve pas l'etat, on releve trente cases.
+		for(const Landmark& lm : items) {
+			const uint64_t k = KeyOf(lm.code, lm.zone);
+			if(std::find(keys.begin(), keys.end(), k) == keys.end())
+				keys.push_back(k);
+		}
+		std::sort(keys.begin(), keys.end());
+		for(Landmark& lm : items) {
+			const uint64_t k = KeyOf(lm.code, lm.zone);
+			lm.key_index = static_cast<uint32_t>(
+				std::lower_bound(keys.begin(), keys.end(), k) - keys.begin());
+			zone_mask |= ZoneBit(lm.zone);
+		}
+	}
+
+	const std::vector<Landmark>& Items() const { return items; }
+	const std::vector<uint64_t>& Keys() const { return keys; }
+	size_t KeyCount() const { return keys.size(); }
+	// Quelles zones normalisees le compteur doit relever. Le terrain sort
+	// gratuitement du board deja calcule ; toute autre zone coute une requete au
+	// core, et n'est payee que si un landmark y vit.
+	uint32_t ZoneMask() const { return zone_mask; }
+	bool Empty() const { return items.empty(); }
+	// Le bit 0x80 marque une zone de l'ADVERSAIRE (handrip : cf.
+	// CollectStateFacts). Chaque zone a donc deux bits, et le masque dit
+	// exactement quelles requetes le chemin chaud doit payer.
+	static uint32_t ZoneBit(uint8_t z) {
+		const uint32_t side = (z & 0x80) ? 5u : 0u;
+		switch(z & 0x7f) {
+		case 0x02: return 1u << (0 + side);   // main
+		case 0x10: return 1u << (1 + side);   // cimetiere
+		case 0x20: return 1u << (2 + side);   // bannie
+		case 0x0c: return 1u << (3 + side);   // terrain
+		default:   return 1u << (4 + side);
+		}
+	}
+	// Position d'une cle dans `keys`, ou SIZE_MAX. Recherche binaire sur une
+	// table de quelques dizaines d'entrees.
+	size_t IndexOf(uint64_t key) const {
+		auto it = std::lower_bound(keys.begin(), keys.end(), key);
+		if(it == keys.end() || *it != key)
+			return SIZE_MAX;
+		return static_cast<size_t>(it - keys.begin());
+	}
+	// `h` : accomplissements de landmark encore MANQUANTS. `have` est parallele
+	// a `keys`. Regle 2 — cette valeur ne coupe rien, elle pondere.
+	uint32_t Remaining(const std::vector<uint32_t>& have) const {
+		uint32_t n = 0;
+		for(const Landmark& lm : items)
+			if(lm.key_index >= have.size() || have[lm.key_index] < lm.count)
+				++n;
+		return n;
+	}
+
+private:
+	static uint32_t Initial(const PlanTrace& p, uint64_t key) {
+		auto it = p.initial.find(key);
+		return it == p.initial.end() ? 0u : it->second;
+	}
+	std::vector<PlanTrace> plans;
+	std::vector<Landmark> items;
+	std::vector<uint64_t> keys;
+	uint32_t zone_mask = 0;
 };
 
 struct SearchConfig {
@@ -1277,6 +1841,31 @@ struct SearchConfig {
 	// c'est-a-dire par la largeur du HAUT de l'arbre — qui est etroite, et c'est
 	// precisement la ou l'information de vie ou de mort se trouve.
 	uint32_t mcps_depth = 0;
+	// --- BANDIT DE TETE A STATISTIQUE DE PERMUTATION (session 15, --qhat) ---
+	// Profondeur, en decisions ENREGISTREES, sur laquelle la regle de selection
+	// de MCPS remplace l'echantillonnage softmax : argmax de
+	// val = (n Q + n^ Q^) / (n + n^), poids proportionnels aux effectifs, aucun
+	// hyperparametre de biais. 0 = ETEINT, comportement d'avant a l'octet pres
+	// (aucune fenetre allouee, aucun noeud cree, aucune recompense calculee).
+	//
+	// Pourquoi une profondeur et non l'arbre entier : un arbre complet
+	// demanderait une case par noeud visite, soit des centaines de millions.
+	// Le haut de l'arbre est ETROIT (mesure session 14 : 207 cases couvrent les
+	// six premieres decisions) et c'est la que l'information de vie ou de mort
+	// se trouve — une ouverture decide de la viabilite de toute la ligne.
+	uint32_t qhat_depth = 0;
+	// Taille de la fenetre glissante de tirages, PAR WORKER. Le papier prend
+	// 10 000 ; nous la payons seize fois. Le bilan imprime la memoire mesuree.
+	uint32_t qhat_window = 4096;
+	// Visites au bout desquelles un noeud NON RACINE gele sa statistique de
+	// permutation et devient la reference de son sous-arbre (le rho de
+	// GRAVE/MCPS). La racine, elle, est tenue incrementalement et jamais gelee.
+	uint32_t qhat_rho = 32;
+	// Plafond de noeuds du bandit, par worker. Au plafond, aucun noeud neuf
+	// n'est cree et la decision retombe sur l'echantillonnage softmax : le
+	// mecanisme degrade vers le comportement d'avant au lieu de faire enfler la
+	// memoire de seize workers.
+	size_t qhat_max_nodes = 65536;
 	// Plafond d'entrees du niveau contextuel, par worker. Au-dela, les cases
 	// EXISTANTES continuent d'etre mises a jour mais aucune nouvelle n'est
 	// creee : le mecanisme degrade vers le poids global au lieu de faire enfler
@@ -1442,15 +2031,88 @@ struct SearchConfig {
 	// MESURE mais n'entre pas dans le cout : c'est le mode qui chiffre ce que
 	// le graphe saurait dire avant de le laisser decider (piege 40).
 	float recipe_h = 0.0f;
+	// --- SONDE DE REPETITION (session 16) : l'instrument AVANT le mecanisme ---
+	//
+	// CE QU'ELLE SEPARE, et pourquoi rien d'autre ne le fait. Le mur du solveur
+	// (9.22 (h)) est « atteindre un sous-but consomme ce dont le suivant a
+	// besoin ». Deux pannes OPPOSEES produisent le meme `best_overlap` :
+	//   - le deuxieme exemplaire n'est JAMAIS TENTE — le materiau etait la, la
+	//     politique n'y est pas allee : le correctif est dans l'ECHANTILLONNAGE ;
+	//   - il est TOUJOURS PERDU — la chaine etait deja consommee quand le
+	//     premier est tombe : le correctif est dans le `h`.
+	// Les deux appellent des chantiers opposes. Cette sonde les departage.
+	//
+	// COMMENT. Par entree --summon-min surveillee : (1) l'histogramme des
+	// invocations PAR TIRAGE ; (2) a la PREMIERE invocation, la distance de
+	// recettes a un exemplaire DE PLUS — l'exemplaire frais retire de la
+	// disponibilite, sans quoi la distance repondrait « 0, il est la » au lieu
+	// de « combien pour le suivant ». La reference est la meme distance depuis
+	// l'ETAT DE DEPART des tirages : distance conservee = materiau conserve.
+	//
+	// COUT : un balayage de zones par tirage AYANT atteint la premiere
+	// invocation (jamais par decision). Exige `recipes` — sans graphe la sonde
+	// n'aurait que l'histogramme, et le dire vaut mieux qu'un chiffre muet.
+	bool probe_repeat = false;
+
+	// --- GRAPHE DE LANDMARKS APPRIS (chantier 18, session 16) ---------------
+	// Appris hors ligne depuis les plans resolus, partage en LECTURE SEULE par
+	// tous les workers : `Build()` est appelee une fois, avant le premier
+	// thread, et rien n'y ecrit ensuite. Pas de verrou, donc utilisable sur le
+	// chemin chaud — c'est la difference de nature avec le graphe de recettes,
+	// qui apprend PENDANT le run et paie un mutex.
+	const LandmarkGraph* landmarks = nullptr;
+	// Poids dans le SCORE DES TIRAGES, en unites de `Heuristic` (une carte
+	// cible posee vaut 100, une resolution exigee `resolve_weight`). C'est le
+	// branchement qui compte : 99 % du travail est dans les tirages, et c'est
+	// leur score que l'adaptation NRPA suit. 0 = mesure sans peser (piege 40).
+	float landmark_weight = 0.0f;
+	// Poids dans le `h` du FINISSEUR (meme point d'entree que `recipe_h`).
+	// Separe du precedent pour qu'un A/B puisse n'en bouger qu'un.
+	float landmark_h = 0.0f;
 	// Poids d'une resolution exigee (--resolve) dans le gradient des tirages.
 	// A 100 (une carte cible), les lignes 8/8 SANS rip gagnent la course
 	// d'adaptation contre les lignes rip-partielles (mesure session 4 :
 	// 850 k tirages enracines, zero rip converti) ; a 250, un rip vaut 2,5
 	// cartes posees et une ligne 5 cartes + 2 rips bat une ligne 8/8 muette.
 	float resolve_weight = 250.0f;
+	// BUT PAR INCLUSION (session 15) : `target ⊆ here` au lieu de
+	// `here == target`. Toutes les entrees posees doivent etre presentes, les
+	// cartes en trop sont tolerees.
+	//
+	// LE DEFAUT DEPEND DE L'ORIGINE DE LA CIBLE, et c'est tout le correctif.
+	// - Cible CAPTUREE sur une vraie ligne (etalon B, `--start` sans
+	//   `--target`) : EGALITE EXACTE. Le board de reference porte ses propres
+	//   magies continues, donc l'exiger a l'identique a un sens.
+	// - Cible POSEE a la main (`--target`) : INCLUSION, par defaut depuis la
+	//   session 15. Poser une cible veut dire « je veux ces cartes-la », pas
+	//   « ces cartes-la et le terrain vide autour ».
+	//
+	// CE QUE L'ANCIEN DEFAUT COUTAIT, mesure : il rendait l'etalon A
+	// INSATISFIABLE. La cible posee est construite table rase et chaque
+	// `--target` va en MZONE, donc sa zone S/T est VIDE — c'est-a-dire qu'elle
+	// EXIGE un terrain sans aucune magie ni piege. Or la main de depart est
+	// faite de trois Fire Formation - Tenki, une magie CONTINUE (type 0x20002)
+	// qui reste sur le terrain des qu'on l'active ou qu'on la pose, et
+	// `--resolve` y ajoute Lunalight Masquerade, egalement en zone S/T. Aucune
+	// ligne ne pouvait satisfaire ce but. Sept sessions ont mesure contre
+	// l'impossible : ZERO solution ecrite en but seul depuis la session 8, avec
+	// un plafond toujours decrit comme « tous les codes y sont, le but ne
+	// differe que par le DETAIL » — le detail etant les cartes S/T que le jeu
+	// oblige a laisser. Arbitrage du joueur (session 15) : « les S/T sont du
+	// bonus, pour Lunalight seuls les monstres comptent in fine ».
+	// `--target-exact` restaure l'ancienne semantique pour l'A/B.
+	bool goal_subset = false;
 	// Archive Go-Explore : nombre d'etats DISTINCTS (cellule = board complet)
 	// conserves avec leur chemin pendant la recherche. 0 = pas d'archive.
 	size_t archive_k = 0;
+	// QUOTA PAR NIVEAU DE PROGRES (session 15). L'archive est classee par un
+	// score qui SATURE en regime but seul — toutes les racines a r4 sur
+	// l'etalon A — et elle se remplit alors d'etats de FIN DE LIGNE, mesure
+	// 9.21 (f) : 37 racines, EPUISE en 0 a 13 expansions. Le quota reserve une
+	// part des cases a chaque couple (resolutions, cartes posees), c'est-a-dire
+	// rend a l'archive sa nature de COUVERTURE. false = comportement d'avant,
+	// a l'octet pres (palmares global).
+	bool archive_spread = false;
 
 	// --- reparation : resynchronisation semantique ---
 	// digest -> index dans yrp.responses (cf. LiftRefLine). Nul = pas de
@@ -1562,6 +2224,51 @@ struct Solution {
 	bool alt = false;
 };
 
+// SONDE DE REPETITION (session 16) — un jeu de compteurs par entree
+// --summon-min surveillee. Additive entre workers : tout y est somme, min ou
+// max, jamais une moyenne de moyennes.
+struct RepeatProbe {
+	uint32_t code = 0;
+	// Tirages atteignant >= k invocations du produit, k = 1..5. `reached[0]`
+	// est donc « au moins une », et l'ecart reached[0] -> reached[1] est la
+	// question du chantier.
+	uint64_t reached[5] = { 0, 0, 0, 0, 0 };
+	// A la PREMIERE invocation : distance de recettes a un exemplaire DE PLUS.
+	uint64_t more_n = 0;
+	double more_sum = 0.0;
+	uint32_t more_min = 0xffffffffu, more_max = 0;
+	// Tirages ou cette distance est <= la reference (materiau CONSERVE) et ou
+	// elle est > (chaine CONSOMMEE). C'est la ligne qui rend le verdict.
+	uint64_t more_kept = 0, more_lost = 0;
+	// Distance au RESTE de la cible au meme instant : l'axe consommation, qui
+	// vaut aussi pour un but sans repetition (etalon B).
+	double rest_sum = 0.0;
+	// Reference : les memes distances depuis l'ETAT DE DEPART des tirages.
+	// 0xffffffff = jamais mesuree.
+	//
+	// ELLE SE RE-MESURE, et c'est un correctif et non un raffinement. Le graphe
+	// de recettes s'ENRICHIT pendant le run (chaque invocation observee y entre) :
+	// une reference prise au tout premier tirage serait comparee, mille secondes
+	// plus tard, a une distance calculee sur un graphe qui n'est plus le meme.
+	// Le biais va dans le sens du faux positif — la distance d'arrivee monte
+	// parce que le graphe en sait plus, pas parce que le materiau a ete
+	// consomme. La reference est donc re-prise periodiquement, et
+	// `d0_samples` dit combien de fois : a 1, la lire comme un chiffre unique.
+	uint32_t d0 = 0xffffffffu;
+	uint32_t rest0 = 0xffffffffu;
+	uint64_t d0_samples = 0;
+	// Decisions restantes apres la premiere invocation — sans elle, « le second
+	// n'arrive jamais » est indiscernable de « le tirage etait fini ». Et la
+	// PROFONDEUR de cette premiere invocation, qui est la question de l'etalon
+	// B : « a quelle decision le materiau a-t-il ete consomme ? ».
+	uint64_t after_sum = 0;
+	uint64_t first_depth_sum = 0;
+	// Le graphe connait-il une recette pour cette carte ? Sans ce drapeau, une
+	// distance de 1 est ambigue entre « plancher, rien a dire » et « une
+	// invocation suffit » — deux lectures opposees (cf. RecipeGraph::Knows).
+	bool known = false;
+};
+
 struct SearchStats {
 	uint64_t nodes = 0;             // etats developpes
 	uint64_t transpositions = 0;    // fusions par la table
@@ -1634,6 +2341,16 @@ struct SearchStats {
 	// dit si le paysage s'est reellement creuse ou s'il est reste plat.
 	double recipe_h_sum = 0.0;
 	uint64_t recipe_h_count = 0;
+	// --- graphe de landmarks (chantier 18) ---
+	// Accomplissements ENCORE MANQUANTS, sommes sur les evaluations, et leur
+	// compte. Leur rapport est le `h` de landmarks MOYEN. Compare au nombre
+	// total de landmarks appris, il dit si le paysage se creuse vraiment : un
+	// `h` colle au total signifie que la recherche n'accomplit RIEN, un `h`
+	// colle a zero que les landmarks sont trop faciles et ne guident pas.
+	// Sans ces deux compteurs, un `h` allume est indiscernable d'un `h` inerte
+	// (piege 52).
+	double landmark_h_sum = 0.0;
+	uint64_t landmark_h_count = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -1693,6 +2410,23 @@ struct SearchStats {
 	// un conditionnement dont la table sature n'est plus celui du papier.
 	size_t ctx_entries = 0;
 	bool ctx_capped = false;
+	// --- BANDIT DE TETE (--qhat) : la vie du mecanisme, piege 52 ---
+	// `qhat_decisions` = decisions prises par la regle MCPS (a zero, le bandit
+	// n'a jamais decide : profondeur nulle ou plafond de noeuds atteint d'emblee).
+	// `qhat_playouts` = tirages verses a la fenetre, `qhat_reward_sum` leur
+	// recompense cumulee (leur rapport dit a quelle hauteur le run travaille :
+	// une recompense moyenne collee a zero signifie que la fenetre ne contient
+	// que des echecs indiscernables et que Q^ ne peut rien separer).
+	// `qhat_first` = decisions prises A LA PREMIERE decision du tirage, celle
+	// que le diagnostic vise.
+	uint64_t qhat_decisions = 0;
+	uint64_t qhat_first = 0;
+	uint64_t qhat_playouts = 0;
+	double qhat_reward_sum = 0;
+	uint64_t qhat_fallback = 0;   // decisions rendues au softmax (plafond)
+	size_t qhat_nodes = 0;
+	size_t qhat_codes = 0;
+	size_t qhat_bytes = 0;
 	// Visibilite des indices (--hint) : dans combien d'etats un coup indice
 	// etait LEGAL, et combien de fois il a ete pris. hint_seen = 0 signifie
 	// que le probleme n'est pas l'echantillonnage mais la LEGALITE — le core
@@ -1717,6 +2451,8 @@ struct SearchStats {
 	// sont probablement incompatibles en RESSOURCES — question de jeu (ou de
 	// relaxation arithmetique a prouver), plus de recherche.
 	uint32_t best_overlap_ripped = 0;
+	// SONDE DE REPETITION (--probe-repeat) : une entree par carte --summon-min.
+	RepeatProbe rep[4];
 	double ms = 0;
 	bool exhausted = false;         // espace epuise dans les bornes donnees
 	bool hit_time_limit = false;
@@ -1850,6 +2586,11 @@ public:
 	// Politique apprise par RunNrpa, exportee en fin de run — elle guidait
 	// les tirages, elle guide ensuite le finisseur (RunLevin).
 	const NrpaPolicy& LearnedPolicy() const { return final_policy; }
+	// SONDE DU BANDIT : les statistiques de la RACINE (s = {}), c'est-a-dire
+	// de la premiere decision du tirage. C'est l'instrument que le chantier
+	// exige AVANT tout A/B — la courbe d'accord du corpus est aveugle a Q^.
+	// Vide quand --qhat est eteint.
+	std::vector<BanditProbe> RootBandit() const;
 
 private:
 	enum class Step { Prompt, Ended, Rejected };
@@ -1897,6 +2638,12 @@ private:
 	// vivant, rachete le catalogue s'il a change, et re-mine si c'est le tour de
 	// ce worker. Sans effet si cfg.options_online est nul.
 	void OnlineOptionsTick(const NrpaRun& best);
+	// Fin d'un tirage sous --qhat : verse la ligne et sa recompense a la
+	// fenetre glissante, retropropage Q(s,a) sur les noeuds traverses, et GELE
+	// ceux qui atteignent rho visites. Appele par un garde RAII, parce que
+	// PolicyRollout sort par une douzaine de `return` — et que les tirages qui
+	// MEURENT sont precisement ceux dont Q^ tire son signal.
+	void QhatCommit();
 	// Enumere le prompt courant dans `out` (adversaire : "ne rien faire" seul ;
 	// prompt non enumerable : reponse par defaut). false = branche morte.
 	bool FillChoices(ChoiceList& out);
@@ -1913,7 +2660,24 @@ private:
 	uint32_t Heuristic(const BoardKey& here) const;
 	// Distance sur le graphe de recettes (chantier 16). Non const : releve les
 	// zones cachees et remplit un tampon reutilise.
-	float RecipeDistance(const BoardKey& here, uint64_t resolved);
+	//
+	// `probe_code` non nul (sonde de repetition, session 16) : sous LA MEME
+	// table de disponibilite — un seul balayage de zones, qui est tout le cout —
+	// rendre AUSSI dans `*d_more` la distance a un exemplaire DE PLUS de ce
+	// produit, UN exemplaire present sur le TERRAIN etant retire de la
+	// disponibilite. Sans ce retrait la reponse serait « 0, il est la », qui
+	// n'est pas la question posee.
+	float RecipeDistance(const BoardKey& here, uint64_t resolved,
+						 uint32_t probe_code = 0, uint32_t* d_more = nullptr);
+	// Sonde de repetition : releve les distances a la premiere invocation du
+	// produit surveille `i`. Ne fait rien sans graphe de recettes.
+	void RepeatProbeFirst(size_t i, const BoardKey& here, uint64_t resolved,
+						  uint32_t depth);
+	// LANDMARKS : accomplissements encore MANQUANTS dans cet etat (chantier 18).
+	// Le terrain sort gratuitement de `here` (deja calcule par l'appelant) ; les
+	// zones cachees ne sont interrogees que si un landmark y vit — c'est ce qui
+	// rend l'appel payable dans les TIRAGES, ou RecipeDistance ne l'est pas.
+	uint32_t LandmarkRemaining(const BoardKey& here);
 	// Suivi de la meilleure approche + test de but. Rend true si `here` EST la
 	// cible ET que les minimums de resolutions sont atteints. Factorise ce que
 	// chaque strategie dupliquait. En mode anytime, l'enregistrement passe par
@@ -1985,6 +2749,15 @@ private:
 		uint8_t zone = 0;
 	};
 	std::vector<PresentInfo> recipe_present_info;
+	// Compteur d'etat des CLES de landmark, parallele a LandmarkGraph::Keys().
+	// Quelques dizaines de cases, reutilisees d'une decision a l'autre.
+	std::vector<uint32_t> lm_counts;
+	// Sonde de repetition : la reference d0 est re-prise tous les
+	// `kRepD0Period` tirages, jamais a chaque decision — sans quoi ce serait un
+	// balayage de zones par decision. Voir RepeatProbe::d0 pour la raison du
+	// re-echantillonnage (le graphe de recettes grossit pendant le run).
+	static constexpr uint64_t kRepD0Period = 2048;
+	uint64_t rep_d0_next = 0;
 	// Changements de tour vus par le dernier StepToPrompt. Le board cible est
 	// celui de la fin du tour 1 : au-dela, il est fige et tout etat explore est
 	// du temps perdu.
@@ -2034,11 +2807,47 @@ private:
 	std::vector<ArchiveEntry> archive;
 	std::unordered_map<uint64_t, size_t> archive_cells;
 	uint64_t archive_min_score = 0;
+	// Occupation par niveau de progres (cfg.archive_spread). Vide et jamais
+	// consultee quand le quota est eteint. `archive_k` etant petit (24-64), la
+	// table se recalcule integralement a chaque modification : pas de mise a
+	// jour incrementale a maintenir juste, pour un cout nul.
+	struct LevelStat { uint32_t count = 0; uint64_t min_score = ~0ull; };
+	std::unordered_map<uint32_t, LevelStat> archive_levels;
+	// Part de l'archive reservee a un niveau : les cases divisees par le nombre
+	// de niveaux PRESENTS (le niveau candidat compris s'il est neuf), au moins
+	// une. Un quota qui se recalcule ainsi n'a pas de cadran a regler : il suit
+	// la diversite que la recherche produit reellement.
+	size_t ArchiveQuota(uint32_t lvl) const {
+		size_t n = archive_levels.size();
+		if(!archive_levels.count(lvl))
+			++n;
+		if(!n)
+			n = 1;
+		const size_t q = cfg.archive_k / n;
+		return q ? q : 1;
+	}
 	// Politique finale du run NRPA (exportee pour le finisseur).
 	Policy final_policy;
 	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).
 	// Vide et jamais consulte quand le mecanisme est eteint.
 	NrpaResidual ctx_weights;
+
+	// --- BANDIT DE TETE A PERMUTATION (session 15, cfg.qhat_depth > 0) ---
+	// Tout ce bloc reste VIDE et jamais consulte quand le mecanisme est eteint.
+	PermWindow perm_win;
+	std::unordered_map<uint64_t, BanditNode> bandit;
+	// Carte engagee par un coup, pour la SONDE seulement (un plan_key ne se lit
+	// pas ; une sonde qu'on ne sait pas lire n'est pas une sonde).
+	std::unordered_map<uint64_t, uint32_t> bandit_code;
+	// Denominateur de la recompense : le materiel du board CIBLE, constante du
+	// probleme. Calcule une fois par recherche (voir RunNrpa).
+	double qhat_scale = 0.0;
+	// Tampons d'UN tirage, reutilises (une allocation par tirage serait une de
+	// trop) : noeuds traverses, coups joues, couples (noeud, coup) a
+	// retropropager, et la meilleure recompense vue le long de la ligne.
+	std::vector<uint64_t> qh_nodes, qh_moves;
+	std::vector<std::pair<uint64_t, uint64_t>> qh_back;
+	double qh_reward = 0.0;
 
 	// Minage EN LIGNE : la PROPRIETE du catalogue que ce worker lit. `cfg.options`
 	// en est toujours le `.get()`. Tant que ce shared_ptr vit, le catalogue vit —

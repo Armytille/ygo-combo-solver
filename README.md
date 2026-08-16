@@ -109,6 +109,63 @@ combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
 # POMPE A DIVERSITE (les seize workers repartent tous de la meilleure sequence
 # partagee — sans quota par worker, le corpus serait seize fois la meme ligne).
 
+# BANDIT DE TETE A STATISTIQUE DE PERMUTATION (session 15) : le mecanisme de
+# MCPS (arXiv:2510.06381), pour de vrai. Sur les `k` premieres decisions du
+# tirage, le coup n'est plus echantillonne sous la politique : il est choisi par
+# argmax de `val = (n·Q + n̂·Q̂) / (n + n̂)` — `Q`, moyenne des recompenses des
+# tirages passes par ce noeud puis par ce coup ; `Q̂`, moyenne sur TOUS les
+# tirages contenant ce coup ET tous ceux du chemin, dans n'importe quel ordre et
+# n'importe ou. Poids proportionnels aux effectifs : aucun hyperparametre de
+# biais (c'est le point du papier). Au-dela de k, NRPA echantillonne comme avant.
+# Machinerie : un bitset par code de coup sur une fenetre glissante des W
+# derniers tirages, `Q̂` par popcount sur l'intersection.
+combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
+    --no-ref --target ... --options-online 60 --qhat 6
+# La SONDE (imprimee d'office) donne `n̂` et `Q̂` par coup a la premiere
+# decision. C'est le seul instrument qui reponde a « le solveur trouve-t-il la
+# bonne ouverture tout seul ? » — la courbe d'accord du corpus en est AVEUGLE,
+# puisqu'elle mesure la reproduction d'un corpus qui ne contient que des bonnes
+# lignes alors que `Q̂` tire son signal des ECHECS. Mesure session 15 : au bout
+# de ~800 000 tirages, Lunalight Gold Leo (la bonne cible de Tenki, et une carte
+# qui ne recoit AUCUN `--hint`) sort premiere a Q̂ = 0,066 contre 0,012 pour
+# Lunalight Tiger et 0,002 pour Kaleido Chick — tous deux indices.
+# `--qhat-window` (defaut 4096), `--qhat-rho` (32), `--qhat-nodes` (65536).
+
+# SONDE DE REPETITION (session 16) : l'instrument qui separe deux pannes que le
+# score de board CONFOND. Le mur du solveur est « atteindre un sous-but consomme
+# ce dont le suivant a besoin » — mais encore faut-il savoir si le deuxieme
+# exemplaire n'est JAMAIS TENTE (le materiau etait la : panne d'echantillonnage)
+# ou TOUJOURS PERDU (la chaine etait consommee : panne de h). Deux correctifs
+# opposes. `--probe-repeat` imprime, par carte surveillee (--summon-min /
+# --resolve) et POUR CHAQUE PHASE (tirages, puis tirages enracines du
+# finisseur), l'histogramme des invocations PAR TIRAGE en compte brut.
+combosolver.exe ... --summon-min "54701958:3" --probe-repeat
+# Mesure session 16, etalon Lunalight : l'echantillonnage fabrique TROIS
+# Lunalight Masquerade dans 290 463 tirages et pas UN SEUL Liger Dancer sur
+# 930 676 — alors que le but en demande trois. Le controle est dans la meme
+# table : ce n'est pas « il ne sait pas repeter ».
+# NB : l'axe « distance de recettes » de la sonde ne rend AUCUN verdict tant que
+# les recettes lues sont amorcees par le texte (zone joker : le materiau qu'on
+# vient de consommer compte encore depuis le cimetiere). Le run le dit.
+
+# GRAPHE DE LANDMARKS APPRIS (session 16, arXiv:2508.21564) : apprend, depuis
+# des plans RESOLUS, les faits (carte, zone, COMPTE) que tout plan atteint, dans
+# quel ordre, et combien de fois — les BOUCLES DE REPETITION du papier. Sert
+# ensuite de `h` : un h qui DECROIT pendant qu'on construit, la ou le h plat ne
+# bouge pas tant qu'aucune carte cible n'est posee.
+combosolver.exe ... --landmarks corpus/ --landmark-w 60
+# Le graphe est IMPRIME avant de peser. Sur l'etalon handrip, appris depuis deux
+# lignes resolues, il sort « Fake Trap @ADV banni x3 » a l'ordre 0,54 — le
+# handrip lui-meme, en landmark COMPTE, sans qu'aucune carte soit nommee dans le
+# code (les zones de l'ADVERSAIRE sont relevees : sans elles le graphe serait
+# reste muet sur la moitie du but tout en ayant l'air de fonctionner).
+# `--landmark-w` pese dans le score des TIRAGES, `--landmark-h` dans le h du
+# FINISSEUR ; a 0, le graphe est appris et MESURE sans entrer dans aucun cout.
+# STATUT : ECRIT, INSTRUMENTE, NON DEMONTRE. L'A/B de la session 16 rend un
+# evenement rare (>=3 resolutions) non nul dans deux bras differents a deux
+# budgets differents, sur une seule graine — cela ne demontre rien (§9.23 (d)).
+# RESERVE : le mecanisme exige un plan resolu, donc il ne sert a rien A FROID.
+
 `--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
 `--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
 `--nrpa-keep`, `--nrpa-lr`, `--tt-mb`, `--finisher`, `--archive-k`,
@@ -117,7 +174,9 @@ combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
 `--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--nrpa-lr`, `--max-subsets`,
 `--recipes`, `--no-seed-recipes`, `--no-seed-quant`, `--derive-summon-min`,
 `--options`, `--options-ctx`, `--options-online`, `--finisher-options`,
-`--profile`, `--verbose`).
+`--qhat`, `--no-phase-change`, `--archive-spread`, `--canonical-zones`,
+`--novelty-rollout-cut`, `--probe-repeat`, `--landmarks`, `--landmark-w`,
+`--landmark-h`, `--profile`, `--verbose`).
 `--profile` imprime le profil du chemin chaud par phase (sondes rdtsc, temps
 exclusif, ligne « reste ») — c'est l'instrument qui a tranché que 82-86 % du
 temps part dans le core (§9.18) ; son coût mesuré est sous le bruit (< 2 %).
