@@ -11,6 +11,20 @@
 >
 > Et `--card-on-select` / `--yn-identity` ont disparu en s18ter : l'identité est
 > inconditionnelle. Le tableau §H ci-dessous ne les mentionne plus.
+>
+> **PROMUS EN DÉFAUT** (étalon B, dix runs par bras, `>=2` de 3/10 à 9/10) :
+> `--adapt-to-peak` → `--no-adapt-to-peak` · `--hindsight 0.5` →
+> `--no-hindsight`.
+>
+> **`--elide-forced` REDEVIENT NON JUGÉ**, et c'est un défaut de câblage :
+> `cfg.elide_forced` n'était assigné que dans `RunGrowthMeasurement`. Il était
+> **inerte dans toute recherche** (preuve déterministe : relevé identique à
+> l'octet avec et sans). Les « +61 % de débit, ×2,1 de boards » de §9.24 (k)
+> valent pour le chemin `--growth`, et pour lui seul. §C ci-dessous est corrigé
+> en conséquence.
+>
+> **`--backward` SORT DE §A** : le chantier 1 de la s19 lui a donné la matière
+> qui lui manquait (§9.28 (d)). La suppression proposée est **annulée**.
 
 > **ÉTAT AU TERME DE LA SESSION 18 : 122 → 115.** Dix mécanismes réfutés ont été **retirés du
 > code** (§9.26 (d)) et trois drapeaux ajoutés (`--max-rollouts`, `--max-nodes`,
@@ -57,7 +71,7 @@ un autre : **santé avant et après**, une à la fois.
 | `--nrpa-lr` | RÉFUTÉ | §9.19 |
 | `--recipe-w` | RÉFUTÉ ; cause STRUCTURELLE : la distance monte quand on consomme, donc le mécanisme punit les invocations | §9.24 (d) |
 | `--goal-bias` | RÉFUTÉ ; Liger reste à zéro ET les autres Fusions tombent (42 525 → 12 451) | §9.23 (h) |
-| `--backward` | RÉFUTÉ ; mécanisme correct, MATIÈRE absente (2 sous-produits, 0,02 fabriqué) | §9.24 (e) |
+| ~~`--backward`~~ | ⚠️ **SUPPRESSION ANNULÉE (s19).** Le diagnostic « mécanisme correct, MATIÈRE absente » était juste, et le chantier 1 a fourni la matière : la décomposition contient désormais `KALEIDO CHICK @TERRAIN` | §9.24 (e), §9.28 (d) |
 | `--canonical-digest` | RÉFUTÉ sur A (poses ÷2 et ÷12) ; cause nommée : 3 monstres Lien au deck | §9.24 (j) |
 | `--no-phase-change` | DÉPARTAGÉ NÉGATIF : allonge les tirages, ne change ni le juge ni les coupures | §9.24 (o) |
 | `--options-ctx` | RÉFUTÉ | §9.20 |
@@ -102,7 +116,7 @@ un autre : **santé avant et après**, une à la fois.
 | `--qhat` | bandit à statistique de permutation ; la SONDE répond seule à la question de l'opérateur | §9.22 |
 | `--recipes` | graphe de recettes, jugé et instrumenté | §9.16, §9.23 |
 | `--hindsight` | **le seul mécanisme de la s17 encore debout** : ×20,6 sur l'arité 3, séparation COMPLÈTE des supports sur deux graines (étalon A) | §9.24 (c), (f) |
-| `--elide-forced` | +61 % de débit, ×2,1 de boards en exhaustif, table qui fusionne enfin (×21,6-28,9) — **acquis SANS graine** | §9.24 (k) |
+| `--elide-forced` | ⚠️ **RETIRÉ DE CETTE LISTE PAR LA s19.** Les +61 % de débit et le ×2,1 de boards ont été mesurés avec `--growth`, **le seul chemin qui câblait le drapeau** ; sur la recherche il était inerte. Câblage corrigé, mécanisme **à juger** | §9.24 (k), §9.28 (f) |
 | `--adapt` | courbe d'accord 44 % → 66 % : le mécanisme MORD, mais conversions identiques. Opt-in. | §9.13 |
 | `--width`, `--growth` | instruments qui ont produit des chiffres du dossier | §9.1, §9.24 (j) |
 

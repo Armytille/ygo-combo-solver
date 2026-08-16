@@ -396,11 +396,23 @@ La règle, en trois lignes :
 3. **Un drapeau qui n'a jamais été jugé est une dette, pas une option.** Il y en
    a 27 (`docs/drapeaux.md`) ; chacun doit être jugé ou retiré.
 
-*Ce qui reste à promouvoir, et ce qui manque pour le faire* : `--elide-forced`,
-`--hindsight 0.5` et `--adapt-to-peak` sont mesurés bons sur l'étalon A et
-restent opt-in — il leur manque la mesure de l'étalon B **en proportion sur N
-runs**, que la bimodalité du juge impose désormais. C'est le premier travail de
-la session 19, et il est mécanique.
+*Fait en session 19* : `--adapt-to-peak` et `--hindsight 0.5` sont **le défaut**.
+L'étalon B, **dix runs par bras** lus en proportion, porte `>=2` de **3/10 à
+9/10**. Ils s'éteignent par `--no-adapt-to-peak` et `--no-hindsight`, pour
+rejouer l'A/B.
+
+*Ce qui NE l'est pas, et la raison est un défaut* : `--elide-forced` n'était
+câblé **que** dans `--growth`. Ni `RunSolve` ni `RunTransplantSolve` ne
+l'assignaient, donc il était **inerte dans toute recherche** — preuve
+déterministe : `3000 tirages, 149334 états, 3002 adaptations` à l'octet près avec
+et sans. Le câblage est corrigé (c'est un correctif : le drapeau prétendait
+agir) ; le mécanisme redevient **non jugé** sur ce chemin, et son défaut reste
+éteint.
+
+**La règle qui manque, et c'est la troisième fois qu'on la paie** : tout champ de
+`SearchConfig` doit être assigné depuis `Options` en **un seul point de
+câblage**. Trois `SearchConfig` sont construits dans `main.cpp`, et aucun
+contrôle ne dit lequel oublie quoi.
 
 **Et aucune mesure de l'étalon B ne vaut à UN RUN PAR BRAS.** L'audit de la
 session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la

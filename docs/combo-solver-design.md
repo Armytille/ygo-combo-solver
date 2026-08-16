@@ -6553,3 +6553,93 @@ deck, Kaleido Chick comprise. Ce qui change n'est pas la liste, c'est la **struc
 
 `--op-recipes` est un **drapeau le temps de le mesurer** (règle 2 du README) : passé sur les deux
 étalons, il devient le défaut.
+
+#### (e) LA PROMOTION EN DÉFAUT, MESURÉE SUR L'ÉTALON B EN PROPORTION
+
+Dette n°1 de la mission. `tools/s19_promotion.ps1`, **dix runs par bras**, graines
+1000-1009, `--solve-ms 60000`, un seul facteur.
+
+| étalon B, 10 runs/bras | `>=1` | `>=2` | valeurs de `>=2` |
+|---|---|---|---|
+| **nu** | 5/10 | **3/10** | 65 · 15 · 6 |
+| **`--elide-forced --hindsight 0.5 --adapt-to-peak`** | 9/10 | **9/10** | 98 · 98 · 75 · 60 · 137 · 106 · 41 · 26 · 64 |
+
+La bimodalité annoncée par §9.25 (b) est reproduite à l'identique dans le bras
+nu : cinq zéros et cinq valeurs à quatre chiffres. **La lecture en proportion
+tranche là où un run par bras n'aurait rendu que le tirage.**
+
+*Un juge écarté, et il faut le dire* : **aucun** des vingt runs n'écrit de
+solution à 60 s. « proportion de runs qui écrivent une solution » est donc
+constant, donc muet. Seul le compteur de résolutions parle.
+
+**`--adapt-to-peak` et `--hindsight 0.5` deviennent le DÉFAUT**, avec
+`--no-adapt-to-peak` et `--no-hindsight` pour rejouer l'A/B. Le troisième bras
+du tableau, lui, n'a jamais existé — voir (f).
+
+#### (f) `--elide-forced` ÉTAIT INERTE DANS TOUTE RECHERCHE, ET C'EST LA TROISIÈME FOIS
+
+En câblant la promotion, une lecture du code rend un fait brutal :
+`cfg.elide_forced` **n'était assigné qu'à un seul endroit**,
+`RunGrowthMeasurement` (`main.cpp:9244`). Ni `RunSolve` ni `RunTransplantSolve`
+ne le câblaient. **Trois sessions de bancs lui ont passé le drapeau sur le chemin
+de RECHERCHE, où il ne faisait rien.**
+
+La preuve est en mode déterministe, étalon A nu, graine 888, 3 000 tirages :
+
+| bras | tirages | états | adaptations |
+|---|---|---|---|
+| `--elide-forced` | 3 000 | **149 334** | 3 002 |
+| `--no-elide-forced` | 3 000 | **149 334** | 3 002 |
+
+**Identique à l'octet** ; les quarante lignes d'écart du relevé sont toutes des
+durées et des noms d'`--outdir`. Après câblage, le même A/B rend **186 915 états
+contre 149 334** à tirages égaux : le drapeau mord enfin.
+
+*Ce que cela retire au dossier, et il faut le retirer* : les « +61 % de débit,
+×2,1 de boards en exhaustif, table qui fusionne ×21,6-28,9 » de §9.24 (k) ont été
+mesurés avec `--growth`, **le seul chemin qui le câblait**. Ils valent pour le
+chemin exhaustif, et pour lui seul. Sur la recherche, le mécanisme est **non
+jugé** — et son défaut reste donc **éteint** : un correctif de câblage ne vaut
+pas une mesure.
+
+*Ce que cela ne retire PAS* : la promotion de (e). Puisque `--elide-forced` était
+inerte dans ce bras, l'effet mesuré (`>=2` de 3/10 à 9/10) appartient à
+`--hindsight` et `--adapt-to-peak` **seuls**. L'attribution en sort plus propre,
+pas plus faible.
+
+**C'est la TROISIÈME occurrence du même piège** — après `--assign-bias`
+(§9.26 (e)) et le `Choice::card` des prompts oui/non (§9.28 (c)). La règle qui
+manque est mécanique, et elle est plus forte que « imprimer sa vie » : **tout
+champ de `SearchConfig` doit être assigné depuis `Options` en UN SEUL point de
+câblage**, pas à trois endroits dont deux l'oublient. Trois `SearchConfig` sont
+construits dans `main.cpp` (`RunSolve`, `RunTransplantSolve`,
+`RunGrowthMeasurement`) et **aucun contrôle ne dit lequel oublie quoi**.
+
+#### (g) CHANTIER 2 — `--op-bias` : ÉCRIT, VIVANT, NON JUGÉ
+
+Le chaînage arrière devient un **biais**, et pas un élagage (règle 2). La liste
+est dérivée par un critère déclaratif d'une ligne : *une exigence NOMMÉE dont la
+zone est le TERRAIN*. Seule une arête d'acquisition en pose une — un matériau se
+prend au cimetière, à la main ou à la réserve, jamais « en jeu ». La liste désigne
+donc exactement les cartes dont la présence débloque un sous-but.
+
+**La vie du mécanisme est imprimée et non nulle** (étalon A nu, déterministe,
+4 000 tirages, `--recipes 0 --op-recipes --op-bias 3`) :
+
+```
+biais d'OPERATEUR : 1 carte(s) designee(s) par la decomposition ;
+                    704 decision(s) en offraient une, 666 l'ont prise (94,60 %)
+```
+
+La carte désignée est **Kaleido Chick**, et c'est la bonne : c'est l'entrée
+unique de la voie (§9.27 (c)). Les deux façons dont le mécanisme pourrait être
+inerte — pas de graphe, pas d'arête d'acquisition — sont testées et **dites avant
+le run**, parce que c'est la troisième fois que ce dossier paie l'inverse.
+
+**Son EFFET n'est pas jugé, et il ne le sera pas ici.** Un poids de 3 fait prendre
+l'opérateur dans 94,6 % des décisions où il est offert : c'est presque
+déterministe, donc c'est un candidat sérieux à l'effondrement de diversité, et
+`w` n'a pas été balayé. Le juge est le goulot mesuré — « Kaleido Chick,
+renommage activé : 0,14 % » — et il demande une paire de runs avec la sonde
+d'offre, à budget de production. **C'est la première tâche de la session 20**,
+et la juger sur un run serait exactement la faute que §9.25 (b) a documentée.
