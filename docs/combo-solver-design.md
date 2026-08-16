@@ -6356,3 +6356,52 @@ respectent** » — la Zone Pendule et une zone pointée par un Lien sont leurs 
 deux sont détectables depuis la base (`lscale/rscale`, `link_marker`).
 
 Écrit à l'endroit du code, pour que le prochain lecteur ne le mesure pas sans le savoir.
+
+#### (f) UN DRAPEAU N'EST JAMAIS UN CORRECTIF — la règle, et son application
+
+Recadrage de l'opérateur, et il porte sur la méthode : *« on doit être générique ; rajouter des
+drapeaux spécifiques que l'utilisateur ne saura pas utiliser est contre-productif. »*
+
+Il a raison, et c'est la maladie historique du dépôt. **Chaque amélioration mesurée a été garée
+derrière un interrupteur que personne n'allume** : `--elide-forced` (+61 % de débit, ×2,1 de
+boards), `--hindsight 0.5` (×20,6 sur l'arité 3), `--adapt-to-peak` (×2,6, deux paires) — tous
+opt-in, tous éteints. Le solveur nu ne bénéficie d'aucun d'eux. **122 drapeaux et un solveur qui ne
+trouve rien : ce n'est pas une coïncidence, c'est le même fait.**
+
+Et j'ai reproduit la faute dans cette session même, en ajoutant `--yn-identity` derrière un
+interrupteur.
+
+**LA RÈGLE, désormais au README :**
+
+1. **Un correctif de défaut n'est JAMAIS un drapeau.** Si aucun utilisateur ne voudrait le
+   comportement d'avant, il n'y a rien à choisir.
+2. **Un mécanisme est un drapeau le temps de le mesurer.** Passé sur les deux étalons, il devient
+   le défaut ; le drapeau devient négatif s'il faut encore pouvoir l'éteindre.
+3. **Un drapeau jamais jugé est une dette, pas une option.**
+
+**APPLICATION IMMÉDIATE, et elle retire DEUX drapeaux.** `--card-on-select` et `--yn-identity`
+renseignaient `Choice::card` et l'identité des prompts oui/non. Or **renseigner une identité n'est
+pas une préférence** : c'est lire une information que le message porte déjà et que l'énumérateur
+jetait. Les deux deviennent **inconditionnels**.
+
+Ce qui était réellement discutable n'a jamais été l'identité — c'est le **biais d'INDICES** qui s'y
+appliquait : sur un prompt de sous-ensemble, `card` n'est que le premier code d'une sélection, et y
+appliquer un ordre de l'opérateur est faux. **C'est donc LUI qui est gardé**, par
+`!IsSubsetPrompt(prompt_type)` aux deux sites (`search.cpp`, tirages et finisseur — le second ne
+testait même pas l'ancien garde). **C'est exactement ce que `Choice::card_lossy` devait faire en
+session 17 et n'a jamais fait, faute d'avoir été branché** (§9.25 (a)).
+
+Trois effets, tous acquis :
+
+- **les sondes fonctionnent toujours** — plus de « CHOISIE : 0 / 629, JAMAIS RETENUE » qui n'était
+  que l'absence d'instrument (d) ;
+- **le biais d'indices est enfin correct** — il n'agit plus sur une identité approximative ;
+- **115 → 114 drapeaux**, et l'utilisateur n'a rien de nouveau à savoir.
+
+Santé identique (273 digests, 210/273, 209 candidates, 16 replays).
+
+*Ce qui reste à promouvoir, et ce qui manque pour le faire* : `--elide-forced`, `--hindsight 0.5`
+et `--adapt-to-peak` sont mesurés bons sur l'étalon A et restent opt-in. Il leur manque l'étalon B
+**en proportion sur N runs**, que la bimodalité du juge (§9.25 (b)) impose désormais. C'est
+mécanique, et c'est le premier travail de la session 19 — après quoi ils deviennent le défaut et le
+solveur nu en bénéficie enfin.

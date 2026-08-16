@@ -485,12 +485,14 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 // juge ne couvrait que la phase tirages alors que la conversion se faisait dans
 // les tirages ENRACINES. Un « jamais » de la premiere table ne vaut donc que
 // pour elle.
-// `card_id` : `Choice::card` est-il renseigne sur les prompts de SELECTION
-// (`--card-on-select`) et sur les prompts OUI/NON (`--yn-identity`) ? SANS EUX,
-// LES COMPTEURS DE CHOIX SONT STRUCTURELLEMENT NULS — et « 0 / 629, JAMAIS
-// RETENUE » se lit comme un fait alors que c'est l'absence d'instrument. Le
-// defaut a failli produire une conclusion fausse en session 18ter ; il est
-// desormais dit a l'endroit ou il se lit.
+// `card_id` / `yn_id` : `Choice::card` est-il renseigne sur les prompts de
+// SELECTION et sur les prompts OUI/NON ? Ils valent desormais TOUJOURS vrai —
+// l'identite y est inconditionnelle depuis la session 18ter — mais les gardes
+// restent, et ce n'est pas de la superstition : SANS eux, les compteurs de choix
+// valent structurellement ZERO et s'impriment « JAMAIS RETENUE », ce qui se lit
+// comme un fait. Le defaut a failli produire une conclusion fausse en seance ;
+// le garde reste pour que le jour ou quelqu'un rend l'identite conditionnelle a
+// nouveau, la sonde le DISE au lieu de mentir.
 void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					  const CardDB& db, bool card_id, bool yn_id,
 					  const char* phase) {
@@ -1245,8 +1247,6 @@ struct Options {
 	uint64_t max_nodes = 0;
 	// TRONCATURE DU GRADIENT AU PIC DU SCORE. Cf. NrpaRun::peak_steps.
 	bool adapt_to_peak = false;
-	// IDENTITE DES PROMPTS OUI/NON. Cf. EnumOptions::yn_identity.
-	bool yn_identity = false;
 	// Nombre maximal de sous-ensembles emis par prompt de selection. C'est ce
 	// qui plafonne le facteur de branchement de TOUS les prompts de selection ;
 	// il etait ecrit en dur (24) a douze endroits, sans drapeau ni mesure, et
@@ -1348,11 +1348,6 @@ struct Options {
 	// que l'attribution de la cle designe : la majorite des noeuds ne sont pas
 	// des points de decision. Le finisseur le fait deja ; l'exhaustif, non.
 	bool elide_forced = false;
-	// ISOLE UN FACTEUR : --assign-bias allume card_on_select, ce qui etend AUSSI
-	// le biais d'indices (--hint, --resolve) aux prompts de SELECTION. Sur un cas
-	// qui a des --resolve (l'etalon B), l'A/B porterait donc sur DEUX facteurs.
-	// Ce drapeau permet de mesurer le second tout seul.
-	bool card_on_select = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -1608,21 +1603,6 @@ void Usage() {
 		"                     choix ; +61 %% de debit et x2,1 de boards en\n"
 		"                     exhaustif (9.24 (k)). La comptabilite d'actions, de\n"
 		"                     tours, d'invocations et de resolutions est conservee.\n"
-		"  --yn-identity      les prompts OUI/NON portent (carte, effet) au lieu\n"
-		"                     d'une arete unique. Sans lui, TOUS les « oui » de\n"
-		"                     la partie partagent UN SEUL poids de politique, et\n"
-		"                     NRPA ne peut apprendre qu'une propension globale a\n"
-		"                     dire oui. Or la decision qui debloque les materiaux\n"
-		"                     du CIMETIERE sur l'etalon A est un SelectYesNo (la\n"
-		"                     defausse facultative de Lunalight Masquerade). Le\n"
-		"                     code vient du message pour EFFECTYN et de la\n"
-		"                     description pour YESNO (convention universelle\n"
-		"                     aux.Stringid(id,n) = id*16+n) : aucune carte nommee.\n"
-		"  --card-on-select   renseigne Choice::card sur les prompts de SELECTION\n"
-		"                     (premier code du sous-ensemble — identite\n"
-		"                     APPROXIMATIVE). Etend donc le biais d'indices a ces\n"
-		"                     prompts ; la part concernee se lit dans la colonne\n"
-		"                     « sous-ens. » de la visibilite des indices.\n"
 		"  --assign-bias <f>  poids d'echantillonnage des coups qui engagent un\n"
 		"                     code que le graphe de RECETTES designe comme\n"
 		"                     MATERIAU. Allume --card-on-select. Sur l'etalon A :\n"
@@ -1989,9 +1969,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--assign",           &Options::assign },
 				{ "--backward",         &Options::backward },
 				{ "--elide-forced",     &Options::elide_forced },
-				{ "--card-on-select",   &Options::card_on_select },
 				{ "--adapt-to-peak",    &Options::adapt_to_peak },
-				{ "--yn-identity",      &Options::yn_identity },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -6613,23 +6591,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// Les chantiers 1, 3 et 4 lisent tous le graphe de recettes : sans lui ils
 	// sont vivants et inertes. L'implication est appliquee PLUS HAUT (avec celle
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
-	if(opt.card_on_select)
-		cfg.enumeration.card_on_select = true;
-	cfg.enumeration.yn_identity = opt.yn_identity;
-	if(opt.yn_identity)
-		std::printf("  --yn-identity : les prompts oui/non portent (carte, effet)"
-					" au lieu\n                  d'un poids unique partage par "
-					"TOUS les oui de la partie\n");
 	cfg.assign = opt.assign;
 	cfg.assign_bias = static_cast<float>(opt.assign_bias);
 	if(opt.assign_bias > 0.0) {
-		// Sans identite de carte sur les prompts de SELECTION, le biais ne peut
-		// pas s'y appliquer — or c'est LA qu'est le goulot mesure.
-		cfg.enumeration.card_on_select = true;
 		std::printf("  --assign-bias %.2f : les choix engageant un MATERIAU du "
 					"graphe de recettes sont favorises\n"
 					"                     (prompts de selection compris — "
-					"card_on_select allume)\n", opt.assign_bias);
+					"l'identite de carte y est inconditionnelle)\n",
+					opt.assign_bias);
 		// LE MECANISME LIT `snap_useful`, QUI VIENT DU GRAPHE. Sans graphe il ne
 		// peut rien lire et le drapeau est INERTE — il l'etait en silence
 		// jusqu'a la session 18bis, tout en imprimant la ligne ci-dessus. Le
@@ -6668,26 +6637,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					opt.hindsight, opt.hindsight_k);
 	cfg.probe_repeat = opt.probe_repeat;
 	// LE JUGE « CONVERSION OFFRE -> CHOIX » a besoin de savoir quelle carte le
-	// coup retenu engage, donc de `card_on_select` sur les prompts de selection.
-	//
-	// NEUTRALITE, verifiee et non supposee : `Choice::card` n'est lu que par le
-	// biais d'indices (`hint_cards`) et par le biais d'assignation
-	// (`assign_bias`). Quand les deux sont eteints — c'est-a-dire dans un run
-	// NU, le seul ou l'on mesure « le solveur trouve-t-il seul » — l'allumer ne
-	// change RIEN au comportement, seulement ce que la sonde sait lire. Si un
-	// biais est actif, on ne l'allume pas : la sonde perdrait sa conversion sur
-	// les prompts de selection, mais mieux vaut une sonde muette qu'un run dont
-	// le comportement a change sous elle.
-	if(cfg.probe_repeat && !cfg.probe_watch.empty()) {
-		if(cfg.hint_cards.empty() && cfg.assign_bias <= 0.0f) {
-			cfg.enumeration.card_on_select = true;
-		} else if(!cfg.enumeration.card_on_select) {
-			std::printf("  (sonde : conversion offre->choix indisponible sur les "
-						"prompts de SELECTION —\n"
-						"   un biais lit deja Choice::card, allumer "
-						"card_on_select changerait le run)\n");
-		}
-	}
+	// coup retenu engage. Il n'y a plus rien a allumer : `Choice::card` est
+	// renseigne INCONDITIONNELLEMENT, y compris sur les prompts de SELECTION
+	// (session 18ter). Ce bloc arbitrait entre « sonde muette » et « run modifie
+	// sous elle » ; l'arbitrage a disparu avec sa cause, parce que ce n'etait
+	// jamais l'identite qui changeait le run mais le BIAIS D'INDICES qui s'y
+	// appliquait — et celui-la est desormais garde par `IsSubsetPrompt`.
 	// `--watch` : observation PURE. Aucune entree dans `cons.resolve_min`,
 	// aucun `cfg.hint_cards`, aucun gradient — c'est toute la raison d'etre du
 	// drapeau. Resolu par nom ou par code, comme les autres.
@@ -7628,8 +7583,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				}
 			}
 			PrintRepeatProbe(both, nrpa.rollouts + greedy.rollouts, db,
-							 cfg.enumeration.card_on_select,
-							 cfg.enumeration.yn_identity,
+							 true, true,
 							 "phase TIRAGES");
 		}
 		// Session 6 : la borne B&B ne tourne plus en aveugle — atteintes du
@@ -8562,8 +8516,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// seconde table, un « jamais » se lirait comme un jamais du RUN.
 		if(opt.probe_repeat && fin_rollouts)
 			PrintRepeatProbe(fin_rep, fin_rollouts, db,
-							 cfg.enumeration.card_on_select,
-							 cfg.enumeration.yn_identity,
+							 true, true,
 							 "tirages ENRACINES du finisseur");
 		// Session 6 : le bilan de la borne B&B du finisseur.
 		if(opt.optimize)

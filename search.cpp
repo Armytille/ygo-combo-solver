@@ -3017,7 +3017,18 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				// agi, et la mesure qui le motivait est retiree (9.25 (a) et
 				// (b)). Ce que le biais porte sur ces prompts se lit desormais
 				// dans `hint_seen_sel`, qui le COMPTE au lieu de le supposer.
-				bool hinted = choices[i].card && !cfg.hint_cards.empty() &&
+				//
+				// LE GARDE EST ICI, ET C'EST LA SEULE CHOSE QUI AIT JAMAIS ETE
+				// DISCUTABLE (session 18ter). Sur un prompt de SOUS-ENSEMBLE,
+				// `card` n'est que le premier code d'une selection : appliquer un
+				// ordre de l'operateur (« cette carte-la, essaie-la plus souvent »)
+				// a une identite approximative est faux. C'est ce que
+				// `Choice::card_lossy` devait faire en session 17 et n'a jamais
+				// fait, faute d'avoir ete branche. L'IDENTITE, elle, est desormais
+				// inconditionnelle : elle sert aux sondes et au biais d'ASSIGNATION,
+				// qui designe un ROLE (materiau) et non une carte a jouer.
+				bool hinted = choices[i].card && !IsSubsetPrompt(prompt_type) &&
+							  !cfg.hint_cards.empty() &&
 							  std::find(cfg.hint_cards.begin(),
 										cfg.hint_cards.end(),
 										choices[i].card) != cfg.hint_cards.end();
@@ -4319,7 +4330,11 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		for(size_t i = 0; i < nc; ++i) {
 			const Choice& c = ro_choices[i];
 			const bool known = plan_index.count(c.plan_key) != 0 && !c.phase;
-			const bool hinted = c.card && !cfg.hint_cards.empty() &&
+			// Meme garde qu'au tirage : le biais d'INDICES n'agit pas sur une
+			// identite approximative (session 18ter). Ce site ne testait meme pas
+			// l'ancien `card_lossy`, ce qui en faisait un second trou.
+			const bool hinted = c.card && !IsSubsetPrompt(prompt_type) &&
+								!cfg.hint_cards.empty() &&
 								std::find(cfg.hint_cards.begin(),
 										  cfg.hint_cards.end(),
 										  c.card) != cfg.hint_cards.end();

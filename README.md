@@ -338,6 +338,37 @@ graphe de recettes n'était pris que sous `--assign` — alors que le run imprim
 mécanisme doit imprimer sa **vie** (un compteur non nul quand il agit) ; sans
 elle, un A/B mesure deux fois le témoin.
 
+## Un drapeau n'est jamais un correctif
+
+**Le solveur doit bien marcher SANS drapeau.** Un utilisateur ne peut pas savoir
+qu'il faut passer `--elide-forced --hindsight 0.5 --adapt-to-peak` pour que le
+solveur fonctionne — et si c'est le cas, le défaut est dans les défauts.
+
+C'est la maladie historique de ce dépôt : chaque amélioration mesurée a été
+garée derrière un interrupteur que personne n'allume. Le solveur nu ne bénéficie
+d'aucune d'elles. **122 drapeaux et un solveur qui ne trouve rien, ce n'est pas
+une coïncidence.**
+
+La règle, en trois lignes :
+
+1. **Un correctif de défaut n'est JAMAIS un drapeau.** Si aucun utilisateur ne
+   voudrait le comportement d'avant, il n'y a rien à choisir. Exemples appliqués
+   en session 18ter : l'identité de carte sur les prompts de sélection et
+   l'identité des prompts oui/non sont devenues **inconditionnelles**, et leurs
+   drapeaux ont disparu. Ce qui était discutable n'était pas l'identité — c'était
+   le *biais d'indices* qui s'y appliquait, et c'est **lui** qui est gardé.
+2. **Un mécanisme est un drapeau seulement le temps de le mesurer.** Une fois
+   passé sur les deux étalons, il devient le **défaut**, et le drapeau devient
+   négatif (`--no-…`) s'il faut encore pouvoir l'éteindre pour un A/B.
+3. **Un drapeau qui n'a jamais été jugé est une dette, pas une option.** Il y en
+   a 27 (`docs/drapeaux.md`) ; chacun doit être jugé ou retiré.
+
+*Ce qui reste à promouvoir, et ce qui manque pour le faire* : `--elide-forced`,
+`--hindsight 0.5` et `--adapt-to-peak` sont mesurés bons sur l'étalon A et
+restent opt-in — il leur manque la mesure de l'étalon B **en proportion sur N
+runs**, que la bimodalité du juge impose désormais. C'est le premier travail de
+la session 19, et il est mécanique.
+
 **Et aucune mesure de l'étalon B ne vaut à UN RUN PAR BRAS.** L'audit de la
 session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la
 *même* graine : le juge « résolutions atteintes par tirage » y rend

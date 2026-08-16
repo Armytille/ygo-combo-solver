@@ -128,40 +128,22 @@ struct EnumOptions {
 	// N'explore qu'une zone libre representative par type de zone. Faux par
 	// defaut : les fleches de lien et les colonnes peuvent tout changer.
 	bool canonical_zones = false;
-	// IDENTITE DE CARTE SUR LES PROMPTS DE SELECTION (session 16).
+	// L'IDENTITE DE CARTE SUR LES PROMPTS DE SELECTION EST DESORMAIS
+	// INCONDITIONNELLE (session 18ter). Elle a vecu derriere `--card-on-select`
+	// pendant trois sessions, eteinte par defaut — et son absence rendait
+	// STRUCTURELLEMENT NULS les compteurs de la sonde sur ces prompts, ce qui
+	// s'imprimait « JAMAIS RETENUE » et se lisait comme un fait.
 	//
-	// `MSG_SELECT_CARD` / `MSG_SELECT_TRIBUTE` ne renseignaient PAS `card` :
-	// leurs choix sont des SOUS-ENSEMBLES, et aucune carte ne les nommait. Or
-	// c'est exactement la ou se decide « quelle Fusion invoquer » et « avec
-	// quels materiaux » — donc le prompt le plus determinant du domaine etait
-	// invisible au biais d'echantillonnage, qui ne lit que `Choice::card`.
-	//
-	// Mesure qui l'a mis au jour (session 16, etalon Lunalight, run NU) : la
-	// frequence d'une Fusion s'effondre avec son nombre de materiaux —
-	// 42 525 tirages pour Perfume Dancer (2 materiaux), 2 073 pour Sabre
-	// Dancer (3), ZERO pour Leo Dancer et Liger Dancer (un materiau NOMME + 2
-	// ou 3). Aucun indice, aucune reference : le solveur prend toujours la
-	// Fusion la moins chere parce que rien ne relie l'enonce au coup.
-	//
-	// A vrai, le premier code du sous-ensemble devient l'identite du choix.
-	// C'est LOSSY pour k > 1 et exact pour k = 1 ; c'est assez pour qu'un
-	// biais derive de la CIBLE puisse s'y appliquer. Opt-in : cela change le
-	// comportement du biais sur tous les prompts de selection.
-	bool card_on_select = false;
-	// IDENTITE DES PROMPTS OUI/NON (session 18ter, --yn-identity).
-	//
-	// A faux, `MSG_SELECT_EFFECTYN` et `MSG_SELECT_YESNO` emettent l'arete
-	// `EdgeOf(message, {1})` / `{0}` : TOUS les « oui » de la partie partagent un
-	// seul poids de politique. Or ces messages transportent le code de la carte
-	// (EFFECTYN) et la description de l'effet (les deux) — la convention
-	// `aux.Stringid(id, n) = id * 16 + n` fait que la description porte le code
-	// meme quand le message ne le transporte pas.
-	//
-	// A vrai, l'arete devient (code, description, reponse) et `Choice::card`
-	// designe la carte dont l'effet est propose. Le prompt cesse d'etre anonyme,
-	// et les sondes de `--watch` le voient. Opt-in : cela change les cles de
-	// politique de ces prompts, donc le comportement.
-	bool yn_identity = false;
+	// CE QUI JUSTIFIE DE NE PLUS EN FAIRE UN DRAPEAU : renseigner `Choice::card`
+	// n'est PAS une preference, c'est lire une information que le message porte
+	// deja. Ce qui etait discutable n'a jamais ete l'identite, c'est le BIAIS
+	// D'INDICES qui s'y appliquait — et c'est LUI qui est desormais garde, par
+	// `IsSubsetPrompt` dans search.cpp. C'est ce que `Choice::card_lossy` devait
+	// faire en session 17 et n'a jamais fait, faute d'avoir ete branche.
+	// L'IDENTITE DES PROMPTS OUI/NON EST INCONDITIONNELLE, pour la meme raison :
+	// un prompt qui porte son code et sa description dans le message n'a aucune
+	// raison de les jeter. Sans elle, TOUS les « oui » de la partie partageaient
+	// UN SEUL poids de politique.
 	// SONDE D'OFFRE (session 17) — l'instrument qui DECOMPOSE la loi d'arite.
 	//
 	// La session 16 a mesure que la frequence d'une invocation s'effondre avec

@@ -205,8 +205,7 @@ void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 			Choice& c = out.Emit();
 			PutCardIndex(c.response, sel.data(), sel.size());
 			c.edge = edge;
-			if(opt.card_on_select)
-				c.card = codes[sel[0]];
+			c.card = codes[sel[0]];
 			if(opt.labels)
 				c.label = std::string(end ? "assign- " : "assign+ ") +
 						  std::to_string(k);
@@ -428,7 +427,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// facon d'attribuer un YESNO, et elle ne nomme aucune carte.
 		uint32_t code = 0;
 		uint64_t desc = 0;
-		if(opt.yn_identity) {
+		{
 			Reader r2(data, len);
 			r2.Get<uint8_t>();   // playerid
 			if(message == MSG_SELECT_EFFECTYN) {
@@ -447,14 +446,12 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		}
 		Choice& y = out.Emit();
 		PutInt32(y.response, 1);
-		y.edge = opt.yn_identity ? EdgeOf(message, { code, desc, 1 })
-								 : EdgeOf(message, { 1 });
+		y.edge = EdgeOf(message, { code, desc, 1 });
 		y.card = code;
 		SetLabel(y, opt, "oui", 0, false);
 		Choice& n = out.Emit();
 		PutInt32(n.response, 0);
-		n.edge = opt.yn_identity ? EdgeOf(message, { code, desc, 0 })
-								 : EdgeOf(message, { 0 });
+		n.edge = EdgeOf(message, { code, desc, 0 });
 		n.card = code;
 		SetLabel(n, opt, "non", 0, false);
 		return;
@@ -570,7 +567,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  // CIBLE puisse s'y appliquer : sans elle, « quelle
 						  // Fusion invoquer » est invisible a
 						  // l'echantillonnage (cf. EnumOptions).
-						  if(opt.card_on_select && k)
+						  if(k)
 							  c.card = codes[pool[s[0]]];
 						  if(opt.labels)
 							  c.label = "choisir " + std::to_string(k) +
