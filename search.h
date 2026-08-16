@@ -1837,6 +1837,25 @@ struct SearchConfig {
 	EnumOptions enumeration;
 	bool collect_solutions = true;
 	size_t max_solutions = 64;
+	// COMPTER LES BOARDS DISTINCTS, pas seulement les etats (session 17).
+	//
+	// LA QUESTION DE L'OPERATEUR, et elle est juste : « 99 386 etats a
+	// profondeur 20 parait absurdement grand ; combien de BOARDS differents
+	// peut-on faire, la position et l'emplacement n'ayant aucune importance ? »
+	// Le solveur comptait des ETATS (`StateDigest` : zones + charge utile du
+	// prompt, donc l'historique des effets deja utilises) et n'a JAMAIS compte
+	// les boards. Le rapport des deux dit ce que coute la finesse de la cle de
+	// transposition — et si elle explore cent fois le meme board.
+	//
+	// Trois granularites, de la plus fine a la plus grossiere, toutes deja
+	// portees par BoardKey :
+	//   `entries` : (zone, code, face, materiaux, compteurs) — position ATK/DEF
+	//               et colonne DEJA ignorees ;
+	//   `loose`   : (zone, code, face) — ni materiaux ni compteurs ;
+	//   `codes`   : les codes seuls, toutes zones confondues.
+	// Cout : une requete de zone par noeud developpe. Reserve au mode --growth,
+	// qui est un mode de DIAGNOSTIC.
+	bool count_boards = false;
 
 	// Partition du travail entre workers. Le sous-arbre ouvert par la PREMIERE
 	// deviation est independant de tous les autres, ce qui permet de partager
@@ -2597,6 +2616,18 @@ struct SearchStats {
 	// (2) hindsight : buts de substitution retenus, et adaptations qu'ils ont
 	// declenchees. A 0 buts, le mecanisme n'a rien vu passer.
 	uint64_t hindsight_goals = 0, hindsight_adapts = 0;
+	// BOARDS DISTINCTS (cfg.count_boards) : combien d'etats explores retombent
+	// sur le meme board. Le rapport etats/boards est le prix de la finesse de la
+	// cle de transposition.
+	size_t boards_entries = 0, boards_loose = 0, boards_codes = 0;
+	// Les memes, restreints aux points STABLES (prompt idle). Ailleurs on est au
+	// milieu d'une resolution : le board n'est pas encore forme, et deux etats
+	// au meme board y sont legitimement distincts (chaine en cours, pile du
+	// processeur). Sans cette restriction, le rapport etats/boards melange le
+	// prix de la finesse de la cle avec le nombre naturel d'instants
+	// intermediaires — et ne prouve rien.
+	uint64_t states_idle = 0;
+	size_t boards_idle = 0;
 	// Arithmetique cassee dans le cout sqrt-LTS. `levin_overflow` : un terme est
 	// parti a l'infini (hu/pi avec pi plancher a 1e-30, ou exp(-seg_logpi) au
 	// dela de ~709). `reroot_by_overflow` : parmi les `reroots` comptes,
@@ -3081,6 +3112,8 @@ private:
 		NrpaRun run;
 	};
 	std::unordered_map<uint32_t, HindsightGoal> hindsight;
+	// BOARDS DISTINCTS (cfg.count_boards) — vides et jamais touches sinon.
+	std::unordered_set<uint64_t> seen_boards, seen_loose, seen_codes, seen_idle;
 	// Changements de tour vus par le dernier StepToPrompt. Le board cible est
 	// celui de la fin du tour 1 : au-dela, il est fige et tout etat explore est
 	// du temps perdu.

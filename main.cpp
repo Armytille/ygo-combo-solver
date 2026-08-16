@@ -8742,8 +8742,22 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 	std::printf("  board cible : %zu cartes, empreinte %016llx\n\n",
 				target.entries.size(), (unsigned long long)target.hash);
 
-	std::printf("  %-6s %12s %12s %12s %11s %9s %8s\n", "prof.", "etats",
-				"transpos.", "impasses", "solutions", "duree", "statut");
+	// BOARDS ET NON ETATS (session 17). `etats` est ce que la transposition
+	// distingue (`StateDigest` : zones + charge utile du prompt, donc les
+	// compteurs « une fois par tour ») ; les trois colonnes suivantes comptent
+	// des BOARDS, de plus en plus grossiers, tous indifferents a la position et
+	// a la colonne :
+	//   b.exact = (zone, code, face, materiaux, compteurs)
+	//   b.lache = (zone, code, face)
+	//   b.codes = les codes seuls
+	// Le rapport etats/b.exact est le PRIX de la finesse de la cle.
+	// `et.idle` / `b.idle` : les memes, restreints aux points STABLES (prompt
+	// idle). C'est LEUR rapport qui mesure le prix de la cle de transposition —
+	// ailleurs on est au milieu d'une resolution et deux etats de meme board
+	// sont legitimement distincts.
+	std::printf("  %-6s %10s %8s %8s %8s %9s %8s %9s %7s\n", "prof.", "etats",
+				"b.exact", "b.lache", "b.codes", "et.idle", "b.idle", "duree",
+				"statut");
 	uint64_t prev = 0;
 	for(uint32_t depth = 2; depth <= opt.growth_max; depth += 2) {
 		SearchConfig cfg;
@@ -8754,6 +8768,8 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.enumeration.dedup_by_code = true;
 		cfg.enumeration.max_subsets = opt.max_subsets;
 		cfg.enumeration.subsets_ascending = opt.subsets_ascending;
+		// La question de l'operateur : combien de BOARDS, pas combien d'etats.
+		cfg.count_boards = true;
 
 		Search search(duel, arena, yrp, cfg);
 		search.Run(target);
@@ -8762,11 +8778,11 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		const SearchStats& s = search.Stats();
 		const char* status = s.hit_time_limit ? "temps"
 							 : s.hit_node_limit ? "noeuds" : "epuise";
-		std::printf("  %-6u %12llu %12llu %12llu %11zu %8.0f ms %8s",
-					depth, (unsigned long long)s.nodes,
-					(unsigned long long)s.transpositions,
-					(unsigned long long)s.dead_ends,
-					search.Solutions().size(), s.ms, status);
+		std::printf("  %-6u %10llu %8zu %8zu %8zu %9llu %8zu %6.0f ms %7s",
+					depth, (unsigned long long)s.nodes, s.boards_entries,
+					s.boards_loose, s.boards_codes,
+					(unsigned long long)s.states_idle, s.boards_idle, s.ms,
+					status);
 		if(prev)
 			std::printf("   x%.1f", double(s.nodes) / double(prev));
 		std::printf("\n");

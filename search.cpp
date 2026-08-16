@@ -577,6 +577,33 @@ void Search::Descend(uint32_t depth, uint32_t actions) {
 	}
 	bool fresh = (it == tt.end());
 	tt[key] = remaining;
+	// BOARDS DISTINCTS (session 17). Compte APRES la transposition : on ne veut
+	// pas mesurer combien de fois on repasse, mais combien de boards DIFFERENTS
+	// les etats retenus realisent. Le rapport etats/boards est le prix paye pour
+	// que la cle de transposition porte l'historique des effets (les compteurs
+	// « une fois par tour » que l'API publique n'expose pas).
+	if(cfg.count_boards) {
+		ComputeBoardKeyInto(duel, static_cast<uint8_t>(cfg.target_player),
+							board_scratch);
+		seen_boards.insert(board_scratch.hash);
+		uint64_t hl = 0, hc = 0;
+		for(uint64_t e : board_scratch.loose)
+			hl = hl * 0x100000001b3ull + e;
+		for(uint32_t c : board_scratch.codes)
+			hc = hc * 0x100000001b3ull + c;
+		seen_loose.insert(hl);
+		seen_codes.insert(hc);
+		// POINTS STABLES : le prompt idle est le seul instant ou le board est
+		// forme et ou deux etats de meme board devraient etre le meme noeud.
+		if(prompt_type == MSG_SELECT_IDLECMD) {
+			++stats.states_idle;
+			seen_idle.insert(board_scratch.hash);
+			stats.boards_idle = seen_idle.size();
+		}
+		stats.boards_entries = seen_boards.size();
+		stats.boards_loose = seen_loose.size();
+		stats.boards_codes = seen_codes.size();
+	}
 	if(fresh && depth < stats.distinct_by_depth.size())
 		++stats.distinct_by_depth[depth];
 
