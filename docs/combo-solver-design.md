@@ -6643,3 +6643,108 @@ déterministe, donc c'est un candidat sérieux à l'effondrement de diversité, 
 renommage activé : 0,14 % » — et il demande une paire de runs avec la sonde
 d'offre, à budget de production. **C'est la première tâche de la session 20**,
 et la juger sur un run serait exactement la faute que §9.25 (b) a documentée.
+
+#### (h) DOUZE ARÊTES SUR TREIZE DÉTRUISAIENT LE BUT — la consommation, en acte
+
+Question de l'opérateur, et elle vise juste : *« Chick qui devient Liger en le
+jetant de l'extra, ça compte ? »*
+
+**Non, et le core le dit.** `card::get_code()` ignore tout `EFFECT_ADD_CODE` qui
+porte une **opération** :
+
+```cpp
+for(auto it = effects.rbegin(); it != effects.rend(); ++it)
+    if(!(*it)->operation) { addcode = *it; break; }
+```
+
+Kaleido Chick pose `SetOperation(s.chngcon)`, donc son renommage n'entre jamais
+dans `get_code()` — il n'agit que par le chemin conscient du `sumtype`, celui des
+vérifications de matériau de Fusion. Un Chick renommé **n'apparaît pas** comme
+Liger au board : `QUERY_CODE` passe par `get_code()`. **Aucun faux positif sur
+`--target`**, et c'est une garantie du core, pas une supposition.
+
+**Mais la question a trouvé un défaut dans le chantier 1 lui-même.** L'arête
+était bel et bien posée :
+
+```
+Lunalight Kaleido Chick peut ACQUERIR le code de Lunalight Liger Dancer
+```
+
+Pour l'emprunter il faut **envoyer un Liger de l'EXTRA au cimetière**. Le deck en
+a trois, le but en demande trois : **l'arête décrit une route qui détruit le
+but.** Et elle ne sert à rien, puisque aucune recette du deck n'exige « Liger
+Dancer » comme matériau.
+
+Le critère correct tient en une ligne : **une arête d'acquisition ne vaut que si
+le code acquis est nommé comme MATÉRIAU par une recette déclarée.** Sur l'étalon
+A une seule recette nomme quoi que ce soit (Liger exige `24550676`), donc :
+
+| juge structurel, même binaire, mêmes défauts | témoin | `--op-recipes` |
+|---|---|---|
+| arêtes d'acquisition | — | **13 → 1** |
+| distance au départ | 13,50 | **16,50** (contre **107,00** avant le correctif) |
+| sous-produits à rebours | 2 | **4** |
+| sous-produits **fabriqués**, en absolu | 0,14 × 2 = 0,28 | **0,11 × 4 = 0,44** |
+| `KALEIDO CHICK @TERRAIN` dans la décomposition | non | **oui** |
+
+L'explosion de distance relevée en (d) — 14 → 107 — venait donc entièrement des
+douze arêtes parasites, dans un graphe déjà cyclique. Le gain du chantier 1 est
+intact, et le graphe fabrique désormais **plus** de sous-produits en absolu sur
+une décomposition deux fois plus profonde.
+
+*Ce que ce correctif N'EST PAS* : un élagage de l'espace d'actions. Rien n'est
+retiré au solveur (règle 2 du chantier 16). On retire des arêtes d'une
+**heuristique** — des routes que le graphe décrivait comme utiles et qui ne le
+sont pas.
+
+*Limite assumée, écrite à l'endroit du code* : seules les recettes **déclarées**
+(`Fusion.AddProcMix*`) comptent. Une exigence nommée qui ne viendrait que du
+TEXTE de carte n'ouvre aucune acquisition — sous-estimer est la direction sûre,
+et l'amorce par le texte reste posée de son côté.
+
+**Et c'est la leçon de §9.24 (d) qui revient par la porte** : *une heuristique
+h^add sur un graphe ET/OU n'est correcte que si la CONSOMMATION est modélisée.*
+Ici la consommation n'était pas seulement absente du coût — elle rendait douze
+arêtes sur treize **activement nuisibles**. Le chantier 3 n'est pas une
+amélioration : c'est une condition de correction.
+
+#### (i) LE MUR, RE-MESURÉ À 300 s — la cascade bouge, le mur tient
+
+Étalon A **nu**, graine 888, 300 s, seize workers, défauts de la session
+(`--hindsight 0.5` + `--adapt-to-peak`). **779 101 tirages**, débit 3 975/s
+contre 3 929/s en §9.27 (c) — comparables.
+
+*Et les deux runs sont mécaniquement comparables* : §9.27 (c) annonçait trois
+mécanismes, mais `--elide-forced` y était **inerte** (f). C'était donc
+`--hindsight 0.5` + `--adapt-to-peak`, exactement les défauts d'aujourd'hui. Seuls
+la durée et le correctif `aux.Stringid` (c) diffèrent.
+
+| étape de la cascade | §9.27 (c) — 353 642 tirages | ce run — 779 101 tirages | rapport par tirage |
+|---|---|---|---|
+| Chick — renommage activé | 519 décisions | **4 691** (3 865 tirages, 0,50 %) | **×4,1** |
+| Leo choisi quand offert | 6 / 519 = 1,16 % | 117 / 4 638 = **2,52 %** | ×2,2 |
+| **Leo atteint le cimetière** | 6 tirages (0,0017 %) | **114 tirages (0,0146 %)** | **×8,6** |
+| **Liger invoqué** | **0** | **0** | — |
+
+**Le volet OUI/NON existe enfin** : `117 offre(s), OUI retenu 56 fois (47,9 %)`
+sur Kaleido Chick, là où §9.27 (c) le trouvait vide. C'est directement le
+correctif `aux.Stringid` : `Choice::card` n'est plus à zéro sur ces prompts, donc
+la sonde les voit.
+
+*Ce que cela ne vaut PAS* : **un run, une graine**. Les compteurs sont gros (114
+contre 6) mais l'effet de graine est inconnu, et l'attribution au correctif est
+une **hypothèse**. Wolf tombe de 4,68 % à 2,10 % d'activation, dans l'autre sens
+et sans explication — cela affaiblit d'autant la lecture globale.
+
+*Un écart nommé et non élucidé* : `Lunalight Liger Dancer — ATTEINT : terrain 3`
+alors que l'histogramme d'invocations de la même phase rend `>=1 0`. Trois
+tirages où un Liger est en zone de terrain sans qu'aucune invocation soit
+comptée. Trois pistes, aucune vérifiée : la sonde lit l'octet 15 de `MSG_MOVE`
+sans le contrôleur ; `NormalizeZone` confond MZONE et SZONE ; et l'histogramme
+est **par phase** quand `ATTEINT` est cumulé.
+
+**Et l'instrument manque pour trancher** : la sonde compte des tirages, qui sont
+éphémères — *aucun replay n'est écrit* quand une carte surveillée atteint une
+zone surveillée. Le seul artefact du run est `best_approach_1of4.yrp`, et le
+rejeu montre que son `1/4` est **Bagooska**. Une sonde qui ne rend pas la pièce
+ne permet pas de vérifier son propre verdict.

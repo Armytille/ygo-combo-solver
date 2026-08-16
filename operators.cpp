@@ -1245,6 +1245,38 @@ std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
 											  const CardDB& db,
 											  const std::vector<uint32_t>& owned) {
 	std::vector<AcquirableCode> out;
+	// LES SEULS CODES QUI VAILLENT D'ETRE ACQUIS : ceux qu'une recette DECLAREE
+	// nomme comme MATERIAU.
+	//
+	// LA PREMIERE VERSION POSAIT TREIZE ARETES, ET DOUZE ETAIENT NUISIBLES.
+	// « Kaleido Chick peut acquerir le code de Liger Dancer » est vrai au sens
+	// du jeu — et pour l'emprunter il faut envoyer un Liger de l'EXTRA au
+	// cimetiere. Le deck en a trois, le but en demande trois : l'arete propose
+	// une route qui DETRUIT le but. Et elle ne sert a rien, puisque aucune
+	// recette n'exige « Liger Dancer » comme materiau.
+	//
+	// Sur l'etalon A, une seule recette nomme quoi que ce soit (Liger exige
+	// 24550676) : treize aretes deviennent UNE. C'est aussi ce qui explique la
+	// distance moyenne du graphe passant de 14 a 107 — douze aretes inutiles
+	// dans un graphe deja cyclique.
+	//
+	// CE N'EST PAS UN ELAGAGE DE L'ESPACE D'ACTIONS (regle 2 du chantier 16) :
+	// rien n'est retire au solveur. On retire des aretes d'une HEURISTIQUE,
+	// c'est-a-dire des routes que le graphe decrivait comme utiles et qui ne le
+	// sont pas.
+	//
+	// LIMITE ASSUMEE : seules les recettes DECLAREES (`Fusion.AddProcMix*`)
+	// comptent ici. Une exigence nommee qui ne viendrait que du TEXTE de carte
+	// n'ouvrirait donc aucune acquisition — sous-estimer est la direction sure,
+	// et l'amorce par le texte reste posee de son cote.
+	std::vector<uint32_t> wanted;
+	for(const auto& [c, co] : tbl.All())
+		for(const DeclaredRecipe& rc : co.recipes)
+			for(const auto& [mc, n] : rc.named)
+				wanted.push_back(db.Canonical(mc));
+	std::sort(wanted.begin(), wanted.end());
+	wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+
 	for(const auto& [c, co] : tbl.All()) {
 		for(const DeclaredEffect& g : co.grants) {
 			if(g.code_name != "EFFECT_ADD_CODE" &&
@@ -1319,6 +1351,10 @@ std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
 				// boucle sur elle-meme dans un graphe deja cyclique, et la
 				// distance la paierait a chaque niveau de recursion.
 				if(code == c)
+					continue;
+				// AUCUNE RECETTE NE DEMANDE CE CODE : l'acquisition est inutile,
+				// et son cout consomme la reserve. Voir l'en-tete.
+				if(!std::binary_search(wanted.begin(), wanted.end(), code))
 					continue;
 				AcquirableCode ac;
 				ac.code = code;
