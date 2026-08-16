@@ -113,10 +113,23 @@ la relaxation par suppression suppose qu'atteindre un sous-but ne détruit rien,
 hypothèse **exactement fausse** ici.
 
 Le graphe sait désormais dire ce qu'un opérateur **exige** ; il ne sait toujours
-pas dire ce qu'il **détruit**. La matière est là : `Duel.SetOperationInfo` porte
-la catégorie *et* la zone, et les verbes (`SendtoGrave`, `Remove`, `DiscardHand`)
-sont relevés par fonction dans `CardOperators::fn_verbs`. **Rien n'en est
-encore fait.**
+pas dire ce qu'il **détruit**. La matière est là et **elle n'est branchée sur
+rien** : 54 déclarations `Duel.SetOperationInfo` (catégorie *et* zone) et les
+verbes (`SendtoGrave`, `Remove`, `DiscardHand`) relevés par fonction dans
+`CardOperators::fn_verbs` sont extraits, imprimés, et lus par **personne**
+(`operators.cpp:1102` les compte, `:1208` les imprime).
+
+**Et ce n'est pas une amélioration, c'est une condition de correction.** §9.28 (h)
+l'a mesuré : douze arêtes d'acquisition sur treize décrivaient des routes qui
+**détruisent le but** — « Chick acquiert le code de Liger » coûte un Liger de
+l'extra, et le but en demande trois. Le critère qui les a retirées est un
+pis-aller (« le code est-il nommé comme matériau ? ») ; le vrai critère est la
+consommation.
+
+*Un fait du core à ne pas re-découvrir* : `card::get_code()` **ignore** tout
+`EFFECT_ADD_CODE` portant une **opération**. Un Chick renommé n'apparaît jamais
+comme Liger au board — aucun faux positif sur `--target`, et c'est garanti par le
+core, pas supposé.
 
 Deux gardes, écrites parce que la première version du chantier 1 les rendait
 fausses, et qui valent pour celui-ci :
@@ -172,6 +185,32 @@ et cela explique que la santé soit restée identique à travers la promotion.
 ×2,1 de boards » de §9.24 (k) ont été mesurés avec `--growth`, le seul chemin qui
 le câblait. Son défaut reste **éteint** : un correctif de câblage ne vaut pas une
 mesure. Le juger là où il agit désormais est un A/B propre et pas cher.
+
+## CHANTIER E — UNE SONDE QUI NE REND PAS LA PIÈCE
+
+Le run de 300 s (§9.28 (i)) laisse un écart **nommé et non élucidé** :
+
+```
+Lunalight Liger Dancer : >=1 0   <-- aucune invocation dans cette phase
+      ATTEINT :  terrain 3  cimetiere 380  bannie 2
+```
+
+Trois tirages où un Liger est en zone de terrain, zéro invocation comptée.
+**Trois pistes, aucune vérifiée** : la sonde lit l'octet 15 de `MSG_MOVE` **sans
+le contrôleur** (`search.cpp:322`) ; `NormalizeZone` **confond MZONE et SZONE** ;
+et l'histogramme `>=N` est **par phase** quand `ATTEINT` est **cumulé**.
+
+**Et l'instrument manque pour trancher.** La sonde compte des tirages, qui sont
+éphémères : *aucun replay n'est écrit* quand une carte surveillée atteint une
+zone surveillée. Le seul artefact du run est `best_approach_1of4.yrp`, et son
+`1/4` est **Bagooska** (vérifié par rejeu). Trois tirages sur 779 101, c'est
+peut-être le premier Liger de l'histoire du dossier — ou un défaut de compteur.
+**On ne peut pas le savoir**, et c'est exactement ce qu'un instrument doit
+empêcher.
+
+Le correctif est petit : écrire le `.yrp` du tirage qui déclenche une entrée
+`ATTEINT` sur une carte surveillée (plafonné, un par carte et par zone). Une
+sonde qui ne rend pas la pièce ne permet pas de vérifier son propre verdict.
 
 ## CE QUI RESTE OUVERT, ET QUI N'EST PAS DE CETTE SESSION
 
@@ -293,13 +332,17 @@ mesure. Le juger là où il agit désormais est un A/B propre et pas cher.
    et cela vaut plus qu'un mécanisme de plus : trois `SearchConfig` construits à
    trois endroits, dont deux oublient des champs, ont fait mesurer du vide
    pendant trois sessions.
-2. **Le verdict de `--op-bias`** : `w` balayé, puis le goulot de Kaleido Chick
-   (0,14 % → ?), puis l'étalon B en proportion. Sa vie est déjà lue.
-3. **`--elide-forced` jugé là où il agit enfin.**
-4. **La CONSOMMATION dans le graphe**, si et seulement si (2) rend un signal.
-5. La dette : `--prior` retiré, `docs/drapeaux.md` §A corrigé pour `--backward`,
+2. **La sonde rend la pièce** (chantier E). Trois tirages non élucidés valent
+   qu'on écrive un `.yrp`, et c'est vingt lignes.
+3. **Le verdict de `--op-bias`** : `w` balayé, puis le goulot de Kaleido Chick
+   (0,50 % après la s19 → ?), puis l'étalon B en proportion. Sa vie est déjà lue.
+4. **`--elide-forced` jugé là où il agit enfin.**
+5. **La CONSOMMATION dans le graphe** (chantier B) — condition de correction, pas
+   amélioration : §9.28 (h) a mesuré douze arêtes sur treize qui détruisaient le
+   but.
+6. La dette : `--prior` retiré, `docs/drapeaux.md` §A corrigé pour `--backward`,
    les jamais-jugés entamés.
-6. Ce prompt régénéré.
+7. Ce prompt régénéré.
 
 **Le harnais est la porte du modèle. Le passer coûte un run ; ne pas le passer a
 coûté trois sessions.**
