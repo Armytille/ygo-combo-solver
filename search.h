@@ -2599,6 +2599,14 @@ struct RepeatProbe {
 	//
 	// Un tirage compte UNE FOIS par zone atteinte. Index : cf. ZoneSlot.
 	uint64_t zone_rollouts[6] = { 0, 0, 0, 0, 0, 0 };
+	// CHOIX RETENUS qui engagent la carte, apparies aux offres. C'est LE juge
+	// exploitable : « Leo Dancer au cimetiere » compte ~200 evenements sur un
+	// run, donc le bruit inter-run (facteur 6 mesure a graine egale) l'ecrase ;
+	// la CONVERSION offre -> choix compte 14 433 occasions sur le meme run,
+	// c'est-a-dire le meme phenomene mesure soixante-dix fois plus finement.
+	// `taken_steps / offer_steps` est la grandeur que tout mecanisme
+	// d'orientation du choix doit deplacer.
+	uint64_t taken_steps = 0;
 	// OFFRES COMPTEES PAR TYPE DE PROMPT. Le masque seul ne suffisait pas, et la
 	// premiere lecture de la session 17 s'est trompee a cause de cela : Leo et
 	// Liger etaient « proposes dans 36 500 tirages », ce qui se lisait « le jeu
@@ -3121,6 +3129,11 @@ private:
 	// zones cachees ne sont interrogees que si un landmark y vit — c'est ce qui
 	// rend l'appel payable dans les TIRAGES, ou RecipeDistance ne l'est pas.
 	uint32_t LandmarkRemaining(const BoardKey& here);
+	// Sonde d'offre : compte les cartes surveillees proposees par le prompt qui
+	// vient d'etre enumere. Appelee aux DEUX points d'enumeration du tirage (le
+	// test d'elision et le chemin normal) — un prompt force ne redescend pas
+	// dans le corps de la boucle, et l'oublier divisait le denominateur par dix.
+	void CountOffers(uint64_t& rep_offered);
 	// --- SESSION 17 : LE CHEMIN BON MARCHE DU GRAPHE DE RECETTES -------------
 	//
 	// Rafraichit l'instantane local du graphe (copie sous verrou, tous les

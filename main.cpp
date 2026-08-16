@@ -546,6 +546,17 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					std::printf("\n");
 				}
 			}
+			// CONVERSION OFFRE -> CHOIX : le juge exploitable. Il compte des
+			// OCCASIONS (des milliers) la ou « la carte a atteint sa zone »
+			// compte des EVENEMENTS (des centaines), et c'est ce qui le rend
+			// lisible malgre le bruit inter-run.
+			if(r.offer_steps)
+				std::printf("      CHOISIE quand offerte : %llu / %llu   "
+							"conversion %.2f %%%s\n",
+							(unsigned long long)r.taken_steps,
+							(unsigned long long)r.offer_steps,
+							100.0 * double(r.taken_steps) / double(r.offer_steps),
+							r.taken_steps ? "" : "   <-- JAMAIS RETENUE");
 			std::printf("        par prompt :");
 			for(int k = 0; k < 6; ++k)
 				if(r.offer_by[k])
@@ -6661,6 +6672,27 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					"(MSG_SELECT_CARD).\n", added);
 	}
 	cfg.probe_repeat = opt.probe_repeat;
+	// LE JUGE « CONVERSION OFFRE -> CHOIX » a besoin de savoir quelle carte le
+	// coup retenu engage, donc de `card_on_select` sur les prompts de selection.
+	//
+	// NEUTRALITE, verifiee et non supposee : `Choice::card` n'est lu que par le
+	// biais d'indices (`hint_cards`) et par le biais d'assignation
+	// (`assign_bias`). Quand les deux sont eteints — c'est-a-dire dans un run
+	// NU, le seul ou l'on mesure « le solveur trouve-t-il seul » — l'allumer ne
+	// change RIEN au comportement, seulement ce que la sonde sait lire. Si un
+	// biais est actif, on ne l'allume pas : la sonde perdrait sa conversion sur
+	// les prompts de selection, mais mieux vaut une sonde muette qu'un run dont
+	// le comportement a change sous elle.
+	if(cfg.probe_repeat && !cfg.probe_watch.empty()) {
+		if(cfg.hint_cards.empty() && cfg.assign_bias <= 0.0f) {
+			cfg.enumeration.card_on_select = true;
+		} else if(!cfg.enumeration.card_on_select) {
+			std::printf("  (sonde : conversion offre->choix indisponible sur les "
+						"prompts de SELECTION —\n"
+						"   un biais lit deja Choice::card, allumer "
+						"card_on_select changerait le run)\n");
+		}
+	}
 	// `--watch` : observation PURE. Aucune entree dans `cons.resolve_min`,
 	// aucun `cfg.hint_cards`, aucun gradient — c'est toute la raison d'etre du
 	// drapeau. Resolu par nom ou par code, comme les autres.
@@ -6944,6 +6976,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					a.act_total += r.act_total;
 					for(int z = 0; z < 6; ++z)
 						a.zone_rollouts[z] += r.zone_rollouts[z];
+					a.taken_steps += r.taken_steps;
 					for(int k = 0; k < 6; ++k)
 						a.offer_by[k] += r.offer_by[k];
 					if(r.more_n) {

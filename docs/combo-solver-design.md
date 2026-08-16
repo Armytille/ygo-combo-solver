@@ -5343,10 +5343,56 @@ dossier l'avait déjà écrit — « fixer la graine ne rend pas le run reproduc
 asynchrones entre workers) : c'est un défaut du solveur, pas une propriété de l'instrument » — et
 c'est ici que ce défaut coûte. À 0,03 % d'événements, **le criblage ne peut même pas éliminer**.
 
-**Statut : `--assign-bias` est ÉCRIT et INSTRUMENTÉ, NON JUGÉ.** Le juger demande soit un budget
-beaucoup plus long, soit plusieurs graines, soit — mieux — un compteur moins rare que « Leo au
-cimetière » : par exemple *la conversion offre → choix* sur ce prompt précis, qui compte 14 433
-occasions au lieu de 200 événements.
+#### (n) LE JUGE EXPLOITABLE : conversion offre → choix — et `--assign-bias` DÉPLACE LE GOULOT
+
+Le compteur manquant : le coup **retenu** engage-t-il la carte surveillée ? Apparié à `offer_steps`,
+il compte des **occasions** (des milliers) là où « la carte a atteint sa zone » compte des
+**événements** (des dizaines) — le même phénomène mesuré soixante-dix fois plus finement.
+
+*Neutralité vérifiée, pas supposée* : le compteur exige `card_on_select`, et `Choice::card` n'est lu
+que par le biais d'indices et par `--assign-bias`. Quand les deux sont éteints — le run NU, le seul
+où l'on mesure « le solveur trouve-t-il seul » — l'allumer ne change **rien** au comportement. Si un
+biais est actif, on ne l'allume pas et la sonde le **dit** : mieux vaut une sonde muette qu'un run
+dont le comportement a changé sous elle.
+
+*Second défaut d'instrument, trouvé et corrigé en route* : `offer_steps` était compté **après** le
+`continue` de l'élision — le même oubli que pour les volets zone et activation, resté sur celui-ci.
+Effet mesuré : Leo Dancer passait de 3 334 offres à 1 381, **dénominateur divisé par plus de deux**,
+donc des taux incomparables entre bras. Un instrument dont le dénominateur bouge avec le drapeau
+qu'il juge ne juge rien. `CountOffers` est désormais appelée aux **deux** points d'énumération.
+
+**MESURE** (étalon A nu, 90 s, `--elide-forced --hindsight 0.5`) :
+
+| bias | carte | choisi / offert | conversion | **au cimetière** |
+|---|---|---|---|---|
+| 0 | **Leo Dancer** | 0 / 3 334 | **0,00 %** | **56** |
+| **3,0** | **Leo Dancer** | 1 539 / 4 637 | **33,19 %** | **1 537** |
+| 0 | Kaleido Chick | 7 474 / 593 322 | 1,26 % | 11 865 |
+| 3,0 | Kaleido Chick | 45 954 / 568 047 | 8,09 % | 13 824 |
+
+**Leo Dancer au cimetière : 56 → 1 537, ×27,4** — bien au-delà du bruit inter-run (facteur 6 mesuré
+à graine égale). Et la **chaîne causale est vérifiée, pas supposée** : `Leo choisi` 1 539 ≈
+`Leo@cimetière` 1 537. Le choix *est* ce qui l'envoie là où il sert.
+
+**Un second effet, correct et non recherché** : Liger Dancer au cimetière passe de **1 662 à 101**
+(÷16). Le biais fait envoyer **Leo** à la place de **Liger** — or Liger est la CIBLE : le jeter était
+une perte sèche, et le mécanisme l'évite sans qu'on le lui ait demandé. C'est la signature d'un biais
+dérivé des **rôles** (matériau contre produit) et non d'une liste de cartes.
+
+**CE QUI RESTE, et c'est dit sans détour : Liger n'est toujours jamais invoqué.** La sonde est
+formelle — ses 4 635 offres sont toutes sur des prompts de SÉLECTION, aucune sur `IDLECMD` ni
+`POSITION` : il n'est jamais **payable**. Il exige la conjonction de trois conditions —
+Leo disponible (0,33 % des tirages désormais), trois Lunalight disponibles, et la porte ouverte
+(Masquerade, 21 %). Le goulot s'est **déplacé** d'un cran : il n'est plus « le matériau nommé
+n'existe pas », il est « les trois conditions ne se rencontrent pas ».
+
+**L'instrument suivant est donc une sonde de CONJONCTION** — combien de tirages réunissent
+simultanément les préconditions d'une invocation — et non un mécanisme de plus. Trois sondes
+successives ont chacune déplacé le diagnostic d'un cran ; la quatrième doit mesurer la
+*simultanéité*, qui est la seule chose qu'aucune n'a regardée.
+
+*Réserve* : une graine, 90 s. Le ×27 dépasse largement le bruit connu, mais `--assign-bias` reste à
+confirmer sur plusieurs graines et sur l'étalon B.
 
 **`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
 

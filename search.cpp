@@ -1243,6 +1243,37 @@ void Search::HindsightCommit(
 	}
 }
 
+// SONDE D'OFFRE : ce prompt PROPOSAIT-IL la carte surveillee ?
+//
+// C'est la decomposition qui manquait a la session 16 — « jamais invoquee »
+// recouvre « jamais proposee » (panne d'ETAT) et « proposee, jamais prise »
+// (panne d'ECHANTILLONNAGE), et les deux appellent des chantiers opposes.
+//
+// EXTRAITE EN FONCTION parce qu'elle doit etre appelee A DEUX ENDROITS depuis
+// que l'elision existe : un prompt force ne redescend pas dans le corps de la
+// boucle, et compter plus bas perdait ses offres. Mesure de ce defaut avant
+// correctif : Leo Dancer passait de 14 433 offres a 1 381, soit un denominateur
+// divise par dix — donc un taux de conversion incomparable entre bras. Un
+// instrument dont le denominateur bouge avec le drapeau qu'il juge ne juge rien.
+void Search::CountOffers(uint64_t& rep_offered) {
+	if(!cfg.probe_repeat || !offer_this_step)
+		return;
+	for(size_t i = 0; i < ProbeCount(); ++i) {
+		if(!(offer_this_step & (1ull << i)))
+			continue;
+		++stats.rep[i].offer_steps;
+		// Le TYPE de prompt, sans quoi « proposee » est indiscernable de
+		// « listee par une revelation d'extra deck » (cf. offer_msgs).
+		stats.rep[i].offer_msgs |= 1ull << (prompt_type & 63);
+		if(const int slot = OfferSlot(prompt_type); slot >= 0)
+			++stats.rep[i].offer_by[slot];
+		if(!(rep_offered & (1ull << i))) {
+			rep_offered |= 1ull << i;
+			++stats.rep[i].offer_rollouts;
+		}
+	}
+}
+
 // LANDMARKS (chantier 18) : combien d'accomplissements restent a faire.
 //
 // LE POINT QUI REND LE MECANISME PAYABLE DANS LES TIRAGES. On ne releve pas
@@ -2634,6 +2665,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				return;
 			}
 			ro_filled = true;
+			CountOffers(rep_offered);
 			if(ro_choices.size() == 1) {
 				++stats.elided;
 				duel.SetResponse(ro_choices[0].response);
@@ -2901,27 +2933,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			++stats.dead_ends;
 			return;
 		}
-		// SONDE D'OFFRE (session 17) : ce prompt PROPOSAIT-IL la carte
-		// surveillee ? C'est la decomposition qui manquait a la session 16 —
-		// « jamais invoquee » recouvre « jamais proposee » (panne d'ETAT) et
-		// « proposee, jamais prise » (panne d'ECHANTILLONNAGE), et les deux
-		// appellent des chantiers opposes.
-		if(probe_on && offer_this_step) {
-			for(size_t i = 0; i < ProbeCount(); ++i) {
-				if(!(offer_this_step & (1ull << i)))
-					continue;
-				++stats.rep[i].offer_steps;
-				// Le TYPE de prompt, sans quoi « proposee » est indiscernable de
-				// « listee par une revelation d'extra deck » (cf. offer_msgs).
-				stats.rep[i].offer_msgs |= 1ull << (prompt_type & 63);
-				if(const int slot = OfferSlot(prompt_type); slot >= 0)
-					++stats.rep[i].offer_by[slot];
-				if(!(rep_offered & (1ull << i))) {
-					rep_offered |= 1ull << i;
-					++stats.rep[i].offer_rollouts;
-				}
-			}
-		}
+		// SONDE D'OFFRE : compte SEULEMENT si l'elision ne l'a pas deja fait,
+		// sinon les prompts non forces seraient comptes deux fois.
+		if(!ro_filled)
+			CountOffers(rep_offered);
 
 		size_t pick = 0;
 		bool scripted = false;
@@ -3281,6 +3296,13 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				qh_moves.push_back(choices[pick].plan_key);
 			++nsteps;
 		}
+		// CONVERSION OFFRE -> CHOIX (session 17). Le coup retenu engage-t-il une
+		// carte surveillee ? Apparie a `offer_steps`, cela donne le juge que la
+		// rarete de « Leo au cimetiere » rendait inutilisable.
+		if(probe_on && choices[pick].card)
+			for(size_t i = 0; i < ProbeCount(); ++i)
+				if(ProbeCode(i) == choices[pick].card)
+					++stats.rep[i].taken_steps;
 		duel.SetResponse(choices[pick].response);
 		path.push_back(choices[pick].response);
 		// UNE DECISION REELLE de plus. `depth` n'est plus l'indice de boucle :
