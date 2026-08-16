@@ -114,7 +114,27 @@ Main 2 était hors d'atteinte, et la mort se lisait comme une impasse ordinaire.
 
 Corrigé. Mesuré : **90 prompts forcés → 0, 90 impasses → 0**. Santé identique.
 **Mais ce n'était pas le mur** : Leo/Liger restent à `IDLECMD = POSITION = 0` et
-la transplantation reste à 4/6.
+la transplantation reste à 4/6. Et sa portée pratique est faible — voir le
+cadrage ci-dessous.
+
+### LE DOMAINE EST LA MAIN PHASE 1 (cadrage opérateur)
+
+**Les combos cherchés vivent en Main Phase 1**, sauf effet explicitement en End
+Phase ou en Battle Phase. Ne pas attribuer au changement de phase les échecs du
+solveur.
+
+**PIÈGE DE LECTURE, payé en s17.** Entre 55 % et 100 % des tirages finissent par
+« coupure de TOUR ». Lu comme « les tirages gaspillent en quittant la MP1 »,
+c'est un **faux diagnostic** : `--no-phase-change` laisse les coupures à 100 %.
+Le garde-fou de l'énumérateur réémet les sorties de phase quand le prompt idle
+ne propose plus rien — les tirages ne CHOISISSENT pas de sortir, ils sortent
+parce qu'ils n'ont plus rien à jouer. **« Coupure de tour » = fin NORMALE d'un
+tirage**, à relire ainsi partout dans le dossier.
+
+**`--no-phase-change` est enfin DÉPARTAGÉ, et il est NÉGATIF** (étalon A nu,
+90 s) : il allonge les tirages (486 883 → 416 074 pour le même temps) sans rien
+changer au juge POSITION ni aux coupures. Reste opt-in.
+**`--canonical-zones` reste non départagé.**
 
 ## LA MISSION — QUATRE CHANTIERS, DANS CET ORDRE
 

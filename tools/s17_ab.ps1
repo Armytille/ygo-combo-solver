@@ -67,6 +67,22 @@ $flags = @{
     #   `adapt` : releve + adaptation de politique, le mode normal.
     rec       = @('--adapt', $planA, '--adapt-passes', '0')
     adapt     = @('--adapt', $planA)
+    # --- CADRAGE DU DOMAINE PAR L'OPERATEUR (session 17) ---------------------
+    # « Les combos que nous explorons vivent en MAIN PHASE 1, sauf si specifie
+    # (effet en End Phase ou en Battle Phase). » Ce n'est pas un reglage, c'est
+    # la definition du probleme — et elle rend LISIBLE un chiffre qui trainait
+    # dans tous les bilans sans etre lu : entre 55 % et 100 % des tirages se
+    # terminent par « coupure de TOUR », c'est-a-dire apres avoir quitte la MP1.
+    # 507 318 tirages sur 521 344 dans le run temoin a 90 s. Travail
+    # integralement perdu, et perdu par DEFINITION du domaine.
+    #
+    # `--no-phase-change` existe depuis la s15 et n'a JAMAIS ete departage faute
+    # de juge valide. Il en a un : POSITION sur l'etalon A.
+    # RESERVE, dite par l'operateur lui-meme : le drapeau doit rester OPT-IN,
+    # puisque certains effets se resolvent en End Phase ou en Battle Phase.
+    nophase   = @('--no-phase-change')
+    # Combinaison declaree : ne s'interprete que contre `nophase` et `hind`.
+    nophase_hind = @('--no-phase-change', '--hindsight', '0.5')
     # Declaree comme combinaison : ne s'interprete que contre `adapt` et `hind`.
     adapt_hind = @('--adapt', $planA, '--hindsight', '0.5')
 }

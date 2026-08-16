@@ -5092,10 +5092,14 @@ code uint32 | controler uint8 | location uint8 | sequence uint8 | direct uint8  
 attaquable**, donc `r.Ok()` tombe dès qu'il y en a un, ce qui est le cas de tout board construit.
 L'énumération sort vide, `DefaultResponse` ne couvre pas ce message, et **la branche meurt**.
 
-**Conséquence, silencieuse depuis l'origine : toute ligne qui entre en Battle Phase était condamnée**
-— donc tout combo passant par la Main 2 était hors d'atteinte, et la mort se lisait comme une impasse
-ordinaire. C'est la différence entre les deux listes du *même* message qui a fait passer le défaut
-inaperçu (le comptage était juste dans l'autre).
+**Conséquence, silencieuse depuis l'origine : toute ligne qui entre en Battle Phase était condamnée**,
+et la mort se lisait comme une impasse ordinaire. C'est la différence entre les deux listes du *même*
+message qui a fait passer le défaut inaperçu (le comptage était juste dans l'autre).
+
+*Portée réelle, à ne pas surestimer* — l'opérateur a cadré le domaine après coup : **les combos
+cherchés vivent en Main Phase 1**, sauf effet explicitement en End Phase ou en Battle Phase. Une
+ligne condamnée en Battle Phase n'était donc pas, en pratique, une solution perdue. Le défaut était
+réel et il fallait le corriger ; il ne faut pas lui attribuer le mur.
 
 Corrigé. Effet mesuré, mêmes commandes et même graine : **90 prompts forcés → 0, 90 impasses → 0**,
 la Battle Phase redevient explorable. Santé identique avant et après (273 digests, 210/273, 209
@@ -5111,6 +5115,37 @@ en dépensant cinquante fois plus. Le répertoire est traité comme un ENSEMBLE 
 séquence ; avec la nouvelle main (Gold Leo directement, au lieu de Tenki → Gold Leo) les premiers
 carrefours diffèrent, et ce qui manque n'est pas dans le répertoire. **Augmenter le budget d'écarts
 au-delà de 2 est la mesure suivante, et elle n'a pas été faite.**
+
+#### (i) LE DOMAINE EST LA MAIN PHASE 1 — et `--no-phase-change` est enfin départagé (négatif)
+
+Cadrage de l'opérateur, à inscrire dans le dossier parce qu'il conditionne la lecture de plusieurs
+compteurs : **les combos cherchés vivent en Main Phase 1**, sauf effet explicitement en End Phase ou
+en Battle Phase.
+
+Ce cadrage a d'abord semblé expliquer un chiffre qui traînait dans tous les bilans sans être lu :
+**entre 55 % et 100 % des tirages se terminent par « coupure de TOUR »** (507 318 sur 521 344 au
+témoin 90 s). Lu comme « les tirages gaspillent leur travail en quittant la MP1 », c'était un
+diagnostic séduisant. **La mesure le réfute** : `--no-phase-change` laisse les coupures de tour à
+**100 %**.
+
+*Explication, et elle est dans le code* : le garde-fou de l'énumérateur réémet les sorties de phase
+quand le prompt idle ne propose plus rien (« retirer la dernière réponse légale transformerait un
+prompt en impasse, ce qui n'est pas un élagage mais une corruption de l'espace »). Les tirages ne
+choisissent donc pas de sortir de la MP1 : **ils en sortent parce qu'ils n'ont plus rien à jouer**.
+« Coupure de tour à 100 % » est la **fin normale** d'un tirage, pas une pathologie — et le compteur
+doit être relu ainsi partout dans le dossier.
+
+**`--no-phase-change` DÉPARTAGÉ, et négatif** (étalon A nu, 90 s, graine 888, juge = poses) :
+
+| bras | tirages | Perfume | Sabre | coupures de tour |
+|---|---|---|---|---|
+| témoin | 486 883 | 75 343 | 246 | 100 % |
+| `--no-phase-change` | 416 074 | 46 725 | 640 | 100 % |
+| `--no-phase-change --hindsight 0.5` | 350 814 | 56 799 | 1 810 | 100 % |
+
+Il **allonge** les tirages (moins de tirages pour le même temps) sans rien changer au juge ni aux
+coupures. Reste opt-in, et il n'y a rien à gagner de ce côté : le solveur ne perdait pas de temps en
+Battle Phase, il n'y allait qu'une fois son travail fini.
 
 **Leo et Liger restent à ZÉRO.** C'est le résultat le plus important de la session après le
 diagnostic, et il faut le dire tel quel : **`--hindsight` monte l'arité mais ne franchit pas la
