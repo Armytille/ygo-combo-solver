@@ -6186,3 +6186,173 @@ simultanément vraies : Leo au cimetière, trois Lunalight disponibles, la porte
 sondes successives ont chacune déplacé le diagnostic d'un cran ; la quatrième doit mesurer la
 **simultanéité**, la seule chose qu'aucune n'a regardée. C'est la mission de la session 19, et
 c'est un instrument, pas un mécanisme.
+
+---
+
+### 9.27 Session 18ter : le SCRIPT LUA dit le combo — et le prompt qui le décide n'avait pas d'identité
+
+Question de l'opérateur : *« le code Lua des cartes peut-il nous servir ? »* Puis, décisif :
+*« Kaleido Chick peut prendre le nom de Leo Dancer »*, et *« la ligne qui atteignait 2 Liger
+pouvait en faire un 3ᵉ si elle avait de quoi payer la défausse de Masquerade — c'est ce que
+permet la carte supplémentaire (1 Gold Leo + 3 Fake Trap) »*.
+
+Les deux ont été vérifiés dans les scripts. Ils **retirent le cadrage** que le dossier portait
+depuis §9.24 et donnent, pour la première fois, la ligne cible **en entier et en forme machine**.
+
+#### (a) CE QUE LE LUA DIT, ET QUE NI LE TEXTE NI L'OBSERVATION NE DONNAIENT
+
+```lua
+-- Liger (c54701958)
+Fusion.AddProcMixN(c,false,false,24550676,1,aux.FilterBoolFunctionEx(Card.IsSetCard,SET_LUNALIGHT),3)
+c:AddMustBeFusionSummoned()
+
+-- Leo (c24550676) : materiau NOMME 97165977 (Panther Dancer), ABSENT du deck
+Fusion.AddProcMixN(c,false,false,97165977,1,...,2)
+
+-- Kaleido Chick (c35618217) : e1, IGNITION, MZONE, une fois par tour
+--   COUT : envoyer un monstre Lunalight du DECK ou de l'EXTRA au cimetiere
+--   OPERATION : EFFECT_ADD_CODE = le code de la carte envoyee, uniquement
+--               comme MATERIAU DE FUSION, jusqu'a la End Phase
+function s.chngcon(scard,sumtype,tp) return (sumtype&MATERIAL_FUSION)~=0 end
+
+-- Wolf (c47705572) : PORTE 1 — e2, IGNITION, LOCATION_PZONE, une fois par copie
+--   matfilter = terrain bannissable ; extrafil = LOCATION_GRAVE, Fusion.BanishMaterial
+
+-- Masquerade (c2344618) : PORTE 2 — e2, TRIGGER sur EVENT_SPSUMMON_SUCCESS
+--   d'une Fusion Lunalight ; recupere Polymerization du cimetiere ; PUIS
+--   SelectYesNo -> DiscardHand(1) -> EFFECT_EXTRA_FUSION_MATERIAL(LOCATION_GRAVE)
+```
+
+**Trois corrections au dossier, toutes de fond :**
+
+1. **La « discontinuité du matériau NOMMÉ » de §9.24 n'existe pas.** L'exigence de Liger est
+   `IsCode(24550676)` **sur un matériau**, pas « la carte Leo Dancer doit être invoquée ».
+   `EFFECT_ADD_CODE` la satisfait sans que Leo soit jamais invoqué. Le coup **est** dans l'espace ;
+   il demande une préparation en deux temps.
+2. **Le graphe de recettes modélise le mauvais type de nœud.** Il range Leo comme un **produit à
+   fabriquer** — d'où `--backward` et ses « 2 sous-produits, 0,02 fabriqué » (§9.24 (e)), qui
+   essayait de construire une carte non constructible. Leo est ici une **propriété acquérable**.
+   Il manque au graphe un nœud « *code qu'une carte peut ACQUÉRIR* ».
+3. **Il y a DEUX portes indépendantes, pas une.** Wolf depuis la Zone Pendule, avec son propre
+   accès au cimetière ; et Masquerade, dont l'accès au cimetière se **paie par une défausse
+   facultative**. Le dossier les traitait comme une seule.
+
+**Et le coût de Kaleido Chick EST l'envoi de Leo au cimetière** — l'événement que le dossier
+mesure depuis la s17 sans savoir d'où il venait. Une activation produit **deux** entités de code
+24550676 : le Chick renommé, et le vrai Leo au cimetière que la porte peut bannir.
+
+*Ce que cela dit de la source* : les conventions `Fusion.AddProcMix*`, `SetCategory`, `SetRange`,
+`SetCountLimit` sont régulières sur l'ensemble des scripts, et `aux.Stringid(id, n) = id*16 + n`
+est universelle. Rien de tout cela ne nomme une carte : c'est le **vocabulaire du jeu**. Le lire
+n'est pas du réglage, c'est de la modélisation de domaine — et c'est la seule connaissance métier
+que la règle de généricité autorise.
+
+#### (b) LE PROMPT QUI DÉCIDE DU COMBO N'AVAIT PAS D'IDENTITÉ
+
+La décision qui ouvre l'accès au cimetière est un `Duel.SelectYesNo`. Voici comment l'énumérateur
+la représentait :
+
+```cpp
+case MSG_SELECT_EFFECTYN:
+case MSG_SELECT_YESNO:
+    y.edge = EdgeOf(message, { 1 });   // <- rien d'autre
+    n.edge = EdgeOf(message, { 0 });
+```
+
+**Tous les « oui » de la partie entière partageaient UN SEUL poids de politique.** NRPA ne pouvait
+apprendre qu'une propension globale à dire oui. Le plan résolu compte **6 `EFFECTYN` + 2 `YESNO`**
+sur 284 décisions : deux poids pour huit décisions, dont le pivot.
+
+C'est **mot pour mot** le défaut de §9.23 (h) — *« `MSG_SELECT_CARD` ne renseignait pas
+`Choice::card` […] le prompt le plus déterminant du domaine était invisible au biais »* — sur un
+autre message, deux sessions plus tard, jamais relevé. `MSG_SELECT_CHAIN` faisait déjà bien
+(`EdgeOf(message, {code, desc})`).
+
+**`--yn-identity`** donne au prompt son identité : `(code, description, réponse)`. Le code vient du
+message pour `EFFECTYN` ; pour `YESNO`, qui n'en transporte aucun, il vient de la **description**
+via `desc >> 4`. Aucune carte nommée.
+
+**Et le score ne voit pas non plus.** Défausser un Fake Trap fait `fodder` **+1** sur
+`common×100 + exact×10 + mzone×3 + fodder`. Le coup qui débloque les Fusions suivantes vaut **un
+point** sur une échelle où poser une carte cible en vaut **cent**.
+
+#### (c) LA CASCADE, MESURÉE — et le goulot n'est ni la porte ni le choix
+
+Étalon A **NU**, 90 s, graine 888, `--elide-forced --hindsight 0.5 --adapt-to-peak`, les deux
+instruments allumés (`--yn-identity --card-on-select`), **353 642 tirages** :
+
+| étape de la chaîne | mesure | part |
+|---|---|---|
+| **Masquerade** actif (porte 2) | 335 365 activations, 128 052 tirages | **34,7 %** |
+| **Wolf** activé (porte 1, Zone Pendule) | 18 856 activations, 16 540 tirages | **4,5 %** |
+| **Kaleido Chick — renommage activé** | **519 décisions** | **0,14 %** |
+| Leo choisi comme coût (6 / 519) | conversion **1,16 %** | — |
+| **Leo atteint le cimetière** | **6 tirages** | **0,0017 %** |
+| **Masquerade e2 (la défausse) déclenché** | **0** | **0** |
+| **Liger invoqué** | **0** | **0** |
+
+**Le goulot n'est pas la porte, et ce n'est pas le choix : c'est l'OFFRE.** Le renommage de Kaleido
+Chick — l'entrée de toute la voie — n'est activé que dans **un tirage sur sept cents**, deux cent
+cinquante fois moins souvent que la porte ne s'ouvre. Et quand il l'est, Leo n'est retenu qu'une
+fois sur quatre-vingt-six.
+
+Deux étranglements multiplicatifs : `0,0014 × 0,0116 ≈ 1,6 × 10⁻⁵`, soit ~6 tirages sur 353 642 —
+exactement ce que la ligne « cimetière 6 » mesure. Il faut ensuite la porte **après**, et trois
+corps Lunalight, et cela **trois fois** pour la cible. Le compte n'y est pas de plusieurs ordres
+de grandeur, et l'on sait désormais où.
+
+**Et la seconde porte n'est jamais atteinte** : le volet OUI/NON reste vide pour Masquerade, donc
+son e2 ne se déclenche pas une seule fois. Sa condition l'explique — `s.thtg` exige une
+**Polymerization déjà au cimetière ou bannie**, ce qui suppose une première Fusion *par
+Polymerization*. La voie « défausser pour débloquer le cimetière » n'est donc jamais même proposée
+au solveur.
+
+*Ce que cela dit du mécanisme qui visait juste* : `--assign-bias` biaise vers les codes que le
+graphe de recettes désigne comme **matériau**. Les deux étranglements sont exactement de cette
+nature — « activer le renommage » et « choisir Leo dans le pool du coût ». Mais le graphe range
+Leo comme un **produit à fabriquer** (b, correction 2) : le biais pousse sur le bon prompt avec la
+mauvaise liste. Corriger le **type de nœud** du graphe, et non le poids, est le chantier que cette
+mesure désigne.
+
+#### (d) UN QUATRIÈME FAUX VERDICT DE LA SONDE — attrapé en séance, et il a failli passer
+
+Premier relevé, bras témoin :
+
+```
+Lunalight Leo Dancer :  OFFRE 629 decision(s)
+   CHOISIE quand offerte : 0 / 629   conversion 0.00 %   <-- JAMAIS RETENUE
+   <-- JAMAIS INVOCABLE [...] La panne est dans l'ETAT
+```
+
+Lu tel quel : « le solveur ne choisit jamais Leo, sur 629 occasions ». **C'est un artefact.**
+`taken_steps` compare `choices[pick].card` au code surveillé, et `Choice::card` **n'est renseigné
+sur les prompts de SÉLECTION que sous `--card-on-select`** — éteint dans ce bras. Or les 629 offres
+de Leo sont *toutes* des `SELECT_CARD`. Le compteur valait donc zéro **par construction**.
+
+Le piège est vicieux parce que le même compteur **fonctionne** pour Wolf dans le même relevé
+(16 221 / 513 900, 3,16 %) : Wolf est offert sur `IDLECMD`, `POSITION` et `CHAIN`, où `card` est
+renseigné nativement. Un compteur qui marche pour une carte et pas pour l'autre, sans le dire.
+
+Et son verdict automatique est faux pour une raison de plus : *« les offres sont toutes sur des
+prompts de SÉLECTION → la panne est dans l'ÉTAT »* est une règle vraie pour un monstre qu'on veut
+**invoquer**, et exactement inverse pour une carte dont le rôle est d'être **envoyée en coût**. Le
+dossier le savait (§9.24 (l) : « Leo n'est pas censé être invoqué ») sans que le texte de la sonde
+soit corrigé.
+
+**Corrigé** : les deux compteurs impriment désormais `INDISPONIBLE` et disent quel drapeau ils
+exigent. Un compteur structurellement nul ne doit jamais s'imprimer comme un fait.
+
+#### (e) `--canonical-zones` CASSERAIT LE COMBO — à ne pas départager en l'état
+
+`Lunalight Wolf` n'invoque par Fusion que depuis la **Zone Pendule** (`e2:SetRange(LOCATION_PZONE)`).
+Or les Zones Pendule sont des **séquences particulières** de `LOCATION_SZONE`, et
+`--canonical-zones` ne garde qu'« une zone représentative par (propriétaire, type de zone) » : il
+confond la pose d'une échelle avec une pose de magie ordinaire et **supprime la première**.
+
+Le drapeau referme donc silencieusement une des deux portes. Il est dans les 27 jamais jugés
+(§9.25 (i)) ; le départager tel quel rendrait un verdict **faussement négatif**. La règle correcte
+n'est pas « une zone par type » mais « une zone par **classe d'équivalence que les règles
+respectent** » — la Zone Pendule et une zone pointée par un Lien sont leurs propres classes, et les
+deux sont détectables depuis la base (`lscale/rscale`, `link_marker`).
+
+Écrit à l'endroit du code, pour que le prochain lecteur ne le mesure pas sans le savoir.
