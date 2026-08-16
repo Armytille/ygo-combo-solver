@@ -4763,3 +4763,79 @@ pour la généralité : apprendre les landmarks sur A et B, les SERVIR sur C. Av
 limite du mécanisme d'aujourd'hui à corriger : il exige un plan résolu, donc il ne sert à rien à
 FROID. La voie naturelle est de le miner EN LIGNE sur les meilleures approches du run lui-même,
 exactement comme `--options-online` le fait déjà pour les macros.
+
+**(h) LA VRAIE PANNE, TROUVÉE EN FIN DE SÉANCE : ce n'est pas la RÉPÉTITION, c'est l'ARITÉ.**
+Question de l'opérateur : *« on a un solveur qui ne trouve que si on lui donne ? comment lui faire
+trouver en no-hint, no-reference ? »* La réponse a demandé quatre runs de 90 s, et elle retire le
+cadrage des sessions 15 ET 16.
+
+*Premier run — le curriculum.* Cible réduite à **UN SEUL** Liger Dancer, tout le reste inchangé :
+
+| bras (cible = 1 Liger, 90 s) | résolutions ≥1 / ≥3 | Liger invoqués | approche |
+|---|---|---|---|
+| avec `--hint` | 295 456 / 651 | **0** | **0/1** |
+| sans `--hint` | 254 039 / 1 908 | **0** | **0/1** |
+
+**Le solveur échoue à N = 1.** Le « mur des sous-buts qui se disputent les ressources » de 9.22 (h)
+et le « second exemplaire » de 9.23 (b) portaient tous deux sur une répétition que le solveur
+n'atteint même pas une fois. Et les indices ne servent à rien : sans eux, ≥3 est TROIS FOIS
+meilleur.
+
+*Deuxième objection de l'opérateur, et elle invalide l'instrument* : **`--resolve` est un indice
+déguisé** — le code lui donne `hint_bias` d'office (`cfg.hint_cards.push_back(req.code)`), plus un
+gradient de `resolve_weight` et une exigence au but. Une sonde qui, pour compter, doit aiguiller,
+ne peut pas mesurer « le solveur trouve-t-il SEUL ». D'où **`--watch`** : compter, et rien d'autre.
+Aucune contrainte, aucun gradient, aucun biais.
+
+*Run VRAIMENT nu* (aucun `--hint`, aucun `--resolve`, aucun `--summon-min`, aucune référence ;
+seule la cible et `--watch`) :
+
+| Fusion | matériaux exigés | tirages qui l'invoquent |
+|---|---|---|
+| Lunalight Perfume Dancer | 2 "Lunalight" | **42 525** |
+| Lunalight Sabre Dancer | 3 "Lunalight" | **2 073** |
+| Lunalight Leo Dancer | 1 **NOMMÉ** + 2 | **0** |
+| Lunalight Liger Dancer | 1 **NOMMÉ** + 3 | **0** |
+
+**La fréquence d'une invocation s'effondre avec son ARITÉ : ÷20 par matériau supplémentaire, puis
+zéro dès qu'un matériau est NOMMÉ.** Ce n'est pas un mur de conjonction entre sous-buts, c'est un
+effondrement exponentiel de l'échantillonnage en la longueur de la chaîne de choix. Le solveur
+prend systématiquement la Fusion la moins chère, parce que **rien ne relie l'énoncé au coup qui le
+réalise**.
+
+*Deux causes mécaniques, vérifiées dans le source :*
+
+1. **Les codes de la CIBLE n'entrent jamais dans le biais d'échantillonnage.** `cfg.hint_cards`
+   n'est alimenté que par `--hint` (écrit à la main) et par `cons.resolve_min`. Le solveur à qui
+   l'on demande trois Liger Dancer n'a donc **aucune préférence** pour le coup « invoquer Liger
+   Dancer » — et la liste `--hint` de l'étalon A ne contient même pas son code.
+2. **`MSG_SELECT_CARD` ne renseignait pas `Choice::card`.** Ses choix sont des SOUS-ENSEMBLES, et
+   aucune carte ne les nommait — or c'est exactement là que se décide *quelle* Fusion invoquer et
+   *avec quels matériaux*. **Le prompt le plus déterminant du domaine était invisible au biais**,
+   qui ne lit que `Choice::card`.
+
+*Le correctif évident a été écrit et MESURÉ — et il ÉCHOUE.* `--goal-bias` fait les deux à la fois
+(codes de la cible versés au biais ; identité de carte sur les prompts de sélection) : sur la
+cible à un Liger, **Liger reste à ZÉRO**, et le biais fait même TOMBER les autres Fusions
+(Perfume 42 525 → 12 451). Le drapeau reste implémenté et opt-in.
+
+**POURQUOI IL ÉCHOUE, et c'est la conclusion qui vaut.** Le prompt de Fusion ne liste que les
+monstres dont les matériaux sont PAYABLES à cet instant. Tant que Kaleido Chick n'a pas copié le
+nom de Leo Dancer et que trois Lunalight ne sont pas disponibles, **Liger Dancer n'est pas dans la
+liste** — biaiser un choix qui n'existe pas ne fait rien. Le problème n'est donc pas le choix, c'est
+**l'ÉTAT** : rien dans le score ne récompense le fait de s'en approcher.
+
+Et le score le confirme, ligne à ligne : `material = common×100 + exact×10 + monstres×3 +
+cimetière`, où `common` compte les cartes cibles **PRÉSENTES**. Liger n'étant jamais posé, ce terme
+vaut 0 pour toujours ; la politique optimise donc « poser des corps », et c'est très exactement ce
+qu'elle fait (4 à 6 monstres posés, 0 Liger).
+
+**LA PRESCRIPTION, désormais adossée à une mesure et non à une intuition : mettre une distance qui
+DÉCROÎT dans le score des TIRAGES.** L'objet existe depuis le chantier 16 — `RecipeDistance`
+compte les invocations restantes, matériaux intermédiaires compris, et vaut 5 pour Liger depuis
+l'état de départ. §9.16 l'a mesurée et a conclu, mot pour mot, que **« les solutions viennent d'une
+phase que `--recipes` ne touche pas »** : elle n'a jamais été évaluée ailleurs que dans le
+finisseur, où elle n'est qu'un réglage de `--levin-h` déguisé. La session 16 a construit, pour les
+landmarks, le chemin d'évaluation BON MARCHÉ dans les tirages (clés indexées, zones interrogées
+seulement si un landmark y vit). **Y porter la distance de recettes est petit, et c'est le premier
+chantier de la session 17.**

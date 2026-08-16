@@ -1137,6 +1137,23 @@ struct Options {
 	// L'implication est appliquee ET imprimee — un drapeau qui en allume un
 	// autre sans le dire est la famille de piege que ce dossier catalogue.
 	bool probe_repeat = false;
+	// Cartes OBSERVEES par la sonde, sans aucune contrainte (`--watch`).
+	// Objection de l'operateur qui les a fait ecrire : `--resolve` est un
+	// INDICE DEGUISE (biais d'indices d'office + gradient + exigence au but),
+	// donc une sonde qui ne sait compter que des `--resolve` ne peut pas
+	// mesurer « le solveur trouve-t-il SEUL ».
+	std::vector<std::string> watch_specs;
+	// BIAIS DERIVE DE LA CIBLE (session 16). Deux changements qui ne servent a
+	// rien l'un sans l'autre, d'ou un seul drapeau :
+	//   1. les codes du BOARD CIBLE entrent dans `hint_cards` — jusqu'ici seuls
+	//      `--hint` (ecrit a la main) et `--resolve` y entraient, si bien que le
+	//      solveur a qui l'on demande un Liger Dancer n'avait AUCUNE preference
+	//      pour le coup « invoquer Liger Dancer » ;
+	//   2. `MSG_SELECT_CARD` renseigne `Choice::card`, sans quoi le prompt qui
+	//      decide QUELLE Fusion invoquer reste invisible au biais.
+	// Ce n'est PAS de la connaissance metier : c'est lire l'enonce. C'est la
+	// difference avec `--hint`, qui est une bequille.
+	bool goal_bias = false;
 	// Restaure l'ordre HISTORIQUE des sous-ensembles (tailles croissantes),
 	// pour attribuer le correctif C9. Un correctif dont on ne peut pas
 	// eteindre l'effet n'est pas attribuable — il est seulement cru.
@@ -1519,6 +1536,19 @@ void Usage() {
 		"  --landmark-h <f>   poids du h de landmarks dans le FINISSEUR (meme\n"
 		"                     point d'entree que --recipes). Separe de\n"
 		"                     --landmark-w pour qu'un A/B n'en bouge qu'un.\n"
+		"  --goal-bias        BIAIS DERIVE DE LA CIBLE (session 16). Verse les\n"
+		"                     codes du board cible dans le biais\n"
+		"                     d'echantillonnage, ET renseigne l'identite de\n"
+		"                     carte sur MSG_SELECT_CARD — le prompt qui decide\n"
+		"                     QUELLE Fusion/Synchro invoquer, jusqu'ici\n"
+		"                     invisible au biais. Ce n'est pas de la\n"
+		"                     connaissance metier : c'est lire l'enonce.\n"
+		"  --watch <carte>    carte OBSERVEE par --probe-repeat, SANS aucune\n"
+		"                     contrainte, aucun gradient, aucun biais d'indice.\n"
+		"                     A utiliser des qu'on mesure « le solveur\n"
+		"                     trouve-t-il SEUL » : --resolve, lui, est un\n"
+		"                     indice deguise (il recoit hint_bias d'office).\n"
+		"                     Repetable, au plus 4.\n"
 		"  --probe-repeat     SONDE DE REPETITION (session 16) : par carte\n"
 		"                     --summon-min/--resolve, l'histogramme des\n"
 		"                     invocations PAR TIRAGE, et — a la PREMIERE — la\n"
@@ -1964,6 +1994,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --landmark-h attend un poids >= 0\n");
 				return false;
 			}
+		} else if(a == "--goal-bias") {
+			o.goal_bias = true;
+		} else if(a == "--watch") {
+			const char* v = next("--watch"); if(!v) return false;
+			o.watch_specs.emplace_back(v);
 		} else if(a == "--probe-repeat") {
 			o.probe_repeat = true;
 		} else if(a == "--subsets-ascending") {
@@ -6277,7 +6312,48 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.recipes = &recipe_graph;
 		cfg.recipe_h = static_cast<float>(opt.recipes);
 	}
+	// BIAIS DERIVE DE LA CIBLE (--goal-bias). Les codes du board cible entrent
+	// dans le biais d'echantillonnage, et les prompts de SELECTION recoivent
+	// une identite de carte pour que ce biais puisse s'y appliquer. Les deux
+	// ensemble, parce qu'aucun des deux ne sert seul.
+	if(opt.goal_bias) {
+		cfg.enumeration.card_on_select = true;
+		size_t added = 0;
+		for(uint32_t code : target.codes) {
+			const uint32_t c = db.Canonical(code);
+			if(std::find(cfg.hint_cards.begin(), cfg.hint_cards.end(), c) ==
+			   cfg.hint_cards.end()) {
+				cfg.hint_cards.push_back(c);
+				++added;
+			}
+		}
+		std::printf("  --goal-bias : %zu code(s) de la CIBLE verses au biais "
+					"d'echantillonnage, et les prompts\n              de "
+					"selection portent desormais une identite de carte "
+					"(MSG_SELECT_CARD).\n", added);
+	}
 	cfg.probe_repeat = opt.probe_repeat;
+	// `--watch` : observation PURE. Aucune entree dans `cons.resolve_min`,
+	// aucun `cfg.hint_cards`, aucun gradient — c'est toute la raison d'etre du
+	// drapeau. Resolu par nom ou par code, comme les autres.
+	for(const std::string& spec : opt.watch_specs) {
+		if(cfg.probe_watch.size() >= 4) {
+			std::printf("!! --watch : au plus 4 cartes (compteurs empaquetes) — "
+						"« %s » ignoree\n", spec.c_str());
+			continue;
+		}
+		uint32_t code = 0;
+		if(!ResolveCard(Trimmed(spec), db, "--watch", code))
+			return;
+		cfg.probe_watch.push_back(db.Canonical(code));
+	}
+	if(!cfg.probe_watch.empty()) {
+		std::printf("  --watch : %zu carte(s) OBSERVEE(S) sans contrainte ni "
+					"biais —", cfg.probe_watch.size());
+		for(uint32_t c : cfg.probe_watch)
+			std::printf(" %s;", db.Name(c).c_str());
+		std::printf("\n");
+	}
 	// LANDMARKS : le graphe voyage avec ses DEUX poids. Un poids sans graphe
 	// serait un drapeau accepte et inerte ; un graphe sans poids est le mode
 	// « appris et MESURE, n'entre pas dans le cout » — et il faut le dire, sans

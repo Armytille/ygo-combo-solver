@@ -270,6 +270,7 @@ Search::Step Search::StepToPrompt() {
 	turns_this_step = 0;
 	summons_this_step.clear();
 	resolved_this_step = 0;
+	watch_this_step = 0;
 	material_violation = false;
 	recent_materials.clear();
 	recipe_materials.clear();
@@ -317,6 +318,15 @@ Search::Step Search::StepToPrompt() {
 					uint32_t code = 0;
 					std::memcpy(&code, m.data, 4);
 					summons_this_step.push_back(code);
+					// SONDE PURE (`--watch`) : compter, et rien d'autre. Aucune
+					// contrainte, aucun gradient, aucun biais d'indice — c'est
+					// tout l'interet, cf. SearchConfig::probe_watch.
+					if(!cfg.probe_watch.empty() && code) {
+						const uint32_t wc = duel.Db().Canonical(code);
+						for(size_t i = 0; i < cfg.probe_watch.size() && i < 4; ++i)
+							if(cfg.probe_watch[i] == wc)
+								watch_this_step += 1ull << (16 * i);
+					}
 					// Invocations surveillees (--summon-min) : meme compteur
 					// packe que les resolutions.
 					if(!cfg.resolve_min.empty() && code) {
@@ -834,10 +844,10 @@ uint32_t Search::LandmarkRemaining(const BoardKey& here) {
 // produit surveille. Un balayage de zones, une fois par tirage qui y arrive.
 void Search::RepeatProbeFirst(size_t i, const BoardKey& here,
 							  uint64_t resolved, uint32_t depth) {
-	if(!cfg.recipes || i >= 4 || i >= cfg.resolve_min.size())
+	if(!cfg.recipes || i >= ProbeCount())
 		return;
 	RepeatProbe& rp = stats.rep[i];
-	const uint32_t code = cfg.resolve_min[i].code;
+	const uint32_t code = ProbeCode(i);
 	rp.code = code;
 	rp.known = cfg.recipes->Knows(code);
 	uint32_t more = 0;
@@ -1973,7 +1983,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// il y a des decisions d'apres a compter.
 	uint32_t rep_seen[4] = { 0, 0, 0, 0 };
 	bool rep_active = false;
-	const bool probe_on = cfg.probe_repeat && !cfg.resolve_min.empty();
+	const bool probe_on = cfg.probe_repeat && ProbeCount() > 0;
+	// La source du delta : `--watch` (invocations pures) quand il existe,
+	// sinon l'ancien compteur de resolutions. Les deux sont empaquetes de la
+	// meme facon, mais ils ne comptent PAS la meme chose — le premier ne
+	// compte que des invocations, le second aussi des activations.
+	const bool probe_watch = !cfg.probe_watch.empty();
 	double novel_states = 0;
 	// Decisions consecutives sans atome inedit, et le verdict differe de
 	// l'elagage par nouveaute (cfg.novelty_rollout_cut). A drapeau eteint,
@@ -2073,23 +2088,24 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			//    Sans elle, la distance mesuree plus loin est un nombre nu.
 			if(depth == 0 && stats.rollout_count >= rep_d0_next) {
 				rep_d0_next = stats.rollout_count + kRepD0Period;
-				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i) {
+				for(size_t i = 0; i < ProbeCount(); ++i) {
 					uint32_t d = 0;
-					const float r0 = RecipeDistance(
-						here, resolved, cfg.resolve_min[i].code, &d);
-					stats.rep[i].code = cfg.resolve_min[i].code;
-					stats.rep[i].known =
-						cfg.recipes->Knows(cfg.resolve_min[i].code);
+					const float r0 =
+						RecipeDistance(here, resolved, ProbeCode(i), &d);
+					stats.rep[i].code = ProbeCode(i);
+					stats.rep[i].known = cfg.recipes->Knows(ProbeCode(i));
 					stats.rep[i].d0 = d;
 					stats.rep[i].rest0 = static_cast<uint32_t>(r0);
 					++stats.rep[i].d0_samples;
 				}
 			}
 			// 2. L'HISTOGRAMME par tirage, en compte BRUT et par entree.
-			if(resolved_this_step) {
-				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i) {
+			const uint64_t probe_delta =
+				probe_watch ? watch_this_step : resolved_this_step;
+			if(probe_delta) {
+				for(size_t i = 0; i < ProbeCount(); ++i) {
 					const uint32_t d = static_cast<uint32_t>(
-						(resolved_this_step >> (16 * i)) & 0xffff);
+						(probe_delta >> (16 * i)) & 0xffff);
 					if(!d)
 						continue;
 					for(uint32_t k = rep_seen[i]; k < rep_seen[i] + d && k < 5;
@@ -2108,7 +2124,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// Decisions d'APRES : « le second n'arrive jamais » ne vaut que si le
 			// tirage avait encore des decisions devant lui.
 			if(rep_active)
-				for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i)
+				for(size_t i = 0; i < ProbeCount(); ++i)
 					if(rep_seen[i])
 						++stats.rep[i].after_sum;
 		}

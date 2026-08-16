@@ -418,6 +418,12 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  Choice& c = out.Emit();
 						  PutCardIndex(c.response, idx.data(), idx.size());
 						  c.edge = EdgeOf(message, { h, k });
+						  // L'identite du choix, pour que le biais derive de la
+						  // CIBLE puisse s'y appliquer : sans elle, « quelle
+						  // Fusion invoquer » est invisible a
+						  // l'echantillonnage (cf. EnumOptions).
+						  if(opt.card_on_select && k)
+							  c.card = codes[pool[s[0]]];
 						  if(opt.labels)
 							  c.label = "choisir " + std::to_string(k) +
 										" carte(s)";

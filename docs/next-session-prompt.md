@@ -41,32 +41,52 @@ n'avait jusqu'ici pas d'explication.
 
 ## LA MISSION — DEUX CHANTIERS, DANS CET ORDRE
 
-### 1. POURQUOI LE PREMIER LIGER N'ARRIVE JAMAIS
+### 1. LA DISTANCE DE RECETTES DANS LE SCORE DES TIRAGES
 
-> **L'échantillonnage accomplit ses trois activateurs 87 785 fois et ne fabrique
-> pas une seule Fusion cible. Trouver où la ligne meurt, et le mesurer.**
+> **§9.23 (h) : la panne n'est pas la RÉPÉTITION, c'est l'ARITÉ — et le
+> correctif est nommé, mesuré comme absent, et petit.**
 
-C'est la question que la sonde a ouverte, et elle est plus précise que tout ce
-que les sessions 8-15 ont pu poser. Trois pistes, la première étant la moins
-chère :
+Le run VRAIMENT nu (aucun `--hint`, aucun `--resolve`, aucune référence, sonde
+`--watch` qui ne biaise rien) donne une loi :
 
-- **LA LÉGALITÉ, PAS L'ÉCHANTILLONNAGE ?** Le compteur `hint_seen`/`hint_taken`
-  existe déjà et il agrège toutes les cartes indicées ensemble. Le décomposer
-  PAR CARTE dirait si l'invocation de Liger est jamais seulement PROPOSÉE par un
-  prompt. Si elle ne l'est jamais, le problème n'est pas la recherche — c'est
-  que l'état requis n'est jamais atteint, et il faut remonter d'un cran.
-  **Attention au piège mesuré en s16** : un choix qui « engage » une carte n'est
-  pas forcément une invocation de cette carte, et une Fusion passe par
-  l'activation du sort, pas par un choix portant le nom du monstre. Décomposer
-  par GROUPE de `MSG_SELECT_IDLECMD` (0 invocation, 1 inv. spéciale, 5
-  activation), pas par `Choice::card` seul.
-- **LA PROFONDEUR.** Sur l'ancien départ, après la première Liger il ne reste que
-  **10 décisions** au tirage, contre 89 après une Masquerade — alors que la
-  référence met ~16 décisions par invocation. Mesurer où meurent les tirages qui
-  ont accompli les trois activateurs : coupure de tour, impasse, plafond ?
-- **LE `h` PLAT, ENCORE.** Rien dans le score ne récompense « Leo Dancer au
-  cimetière ». C'est ce que le graphe de landmarks devait apporter, et il n'a pas
-  pu être jugé sur l'étalon A faute de plan résolu (voir ci-dessous).
+| Fusion | matériaux exigés | tirages qui l'invoquent |
+|---|---|---|
+| Perfume Dancer | 2 "Lunalight" | **42 525** |
+| Sabre Dancer | 3 "Lunalight" | **2 073** |
+| Leo Dancer | 1 **NOMMÉ** + 2 | **0** |
+| Liger Dancer | 1 **NOMMÉ** + 3 | **0** |
+
+**÷20 par matériau supplémentaire, puis zéro dès qu'un matériau est NOMMÉ.** Le
+solveur échoue à N = 1 : la cible réduite à UN Liger rend 0/1. Tout le cadrage
+« sous-buts en compétition » des sessions 15-16 portait sur une répétition qu'il
+n'atteint pas une seule fois.
+
+**Le correctif de choix a été essayé et il ÉCHOUE** — `--goal-bias` (codes de la
+cible versés au biais + identité de carte sur `MSG_SELECT_CARD`, deux vrais
+manques du moteur) laisse Liger à zéro. Raison, et c'est la conclusion : le
+prompt de Fusion ne liste que les monstres **payables à cet instant**, donc
+biaiser un choix qui n'existe pas ne fait rien. **Le problème est l'ÉTAT, et rien
+dans le score ne récompense le fait de s'en approcher** : `material = common×100
++ exact×10 + monstres×3 + cimetière`, où `common` compte les cartes cibles
+PRÉSENTES — terme nul pour toujours tant qu'aucun Liger n'est posé.
+
+**Le chantier** : porter `RecipeDistance` (chantier 16 : nombre d'invocations
+restantes, matériaux intermédiaires compris — elle vaut **5** pour Liger depuis
+l'état de départ) dans le **score des TIRAGES**. §9.16 l'a mesurée et a conclu
+mot pour mot que « **les solutions viennent d'une phase que `--recipes` ne touche
+pas** » : elle n'a jamais été évaluée ailleurs que dans le finisseur, où elle
+n'est qu'un `--levin-h` déguisé. La session 16 a construit pour les landmarks le
+chemin d'évaluation BON MARCHÉ dans les tirages (`Search::LandmarkRemaining` :
+clés indexées, une zone interrogée seulement si un landmark y vit) — **c'est ce
+chemin qu'il faut réutiliser**.
+
+*Juge* : la sonde `--watch` sur Liger/Leo/Perfume/Sabre, sur le run NU. Le
+critère est binaire et il ne dépend d'aucune graine : **Liger passe-t-il de 0 à
+non nul ?** Puis la loi d'arité doit s'aplatir.
+
+*Piège à éviter* : le coût. `RecipeDistance` fait cinq requêtes de zone, un tri
+et ~80 recherches de base — impayable par décision. Le porter veut dire le
+RÉÉCRIRE sur le modèle de `LandmarkRemaining`, pas l'appeler tel quel.
 
 ### 2. LE TROISIÈME DECK — la seule mesure de généralité qui existe
 

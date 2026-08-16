@@ -2053,6 +2053,20 @@ struct SearchConfig {
 	// invocation (jamais par decision). Exige `recipes` — sans graphe la sonde
 	// n'aurait que l'histogramme, et le dire vaut mieux qu'un chiffre muet.
 	bool probe_repeat = false;
+	// CARTES OBSERVEES PAR LA SONDE, sans aucune contrainte (`--watch`).
+	//
+	// POURQUOI ELLES EXISTENT, et c'est une objection de l'operateur qui les a
+	// fait ecrire : la sonde ne savait compter que les cartes de `--resolve` /
+	// `--summon-min` — or `--resolve` EST UN INDICE DEGUISE. Le code lui donne
+	// le biais d'indices D'OFFICE (`cfg.hint_cards.push_back(req.code)`), en
+	// plus d'un gradient de +resolve_weight et d'une exigence au but. Mesurer
+	// « le solveur trouve-t-il seul ? » avec un compteur qui, pour exister,
+	// aiguille vers la reponse, n'a aucun sens.
+	//
+	// `--watch` ne fait RIEN d'autre que compter : aucune contrainte, aucun
+	// gradient, aucun biais. C'est la condition pour qu'un run NU soit
+	// mesurable. Au plus 4 (compteurs empaquetes 16 bits x 4).
+	std::vector<uint32_t> probe_watch;
 
 	// --- GRAPHE DE LANDMARKS APPRIS (chantier 18, session 16) ---------------
 	// Appris hors ligne depuis les plans resolus, partage en LECTURE SEULE par
@@ -2678,6 +2692,19 @@ private:
 	// zones cachees ne sont interrogees que si un landmark y vit — c'est ce qui
 	// rend l'appel payable dans les TIRAGES, ou RecipeDistance ne l'est pas.
 	uint32_t LandmarkRemaining(const BoardKey& here);
+	// Liste des cartes que la SONDE observe. `--watch` quand il est donne (pur
+	// comptage, aucun biais) ; a defaut les entrees --resolve/--summon-min,
+	// pour ne pas casser les mesures anterieures — mais celles-la BIAISENT
+	// l'echantillonnage, et une lecture « sans indice » ne peut pas s'y fier.
+	size_t ProbeCount() const {
+		return cfg.probe_watch.empty()
+				   ? (std::min)(cfg.resolve_min.size(), size_t(4))
+				   : (std::min)(cfg.probe_watch.size(), size_t(4));
+	}
+	uint32_t ProbeCode(size_t i) const {
+		return cfg.probe_watch.empty() ? cfg.resolve_min[i].code
+									   : cfg.probe_watch[i];
+	}
 	// Suivi de la meilleure approche + test de but. Rend true si `here` EST la
 	// cible ET que les minimums de resolutions sont atteints. Factorise ce que
 	// chaque strategie dupliquait. En mode anytime, l'enregistrement passe par
@@ -2723,6 +2750,9 @@ private:
 	// Cartes invoquees (normal + special) par le dernier StepToPrompt, dans
 	// l'ordre. Codes bruts du message ; 0 = invoquee face verso (inconnue).
 	std::vector<uint32_t> summons_this_step;
+	// Invocations des cartes `--watch` vues par le dernier StepToPrompt,
+	// empaquetees 16 bits par entree. Strictement observationnel.
+	uint64_t watch_this_step = 0;
 	// Resolutions (activations) de cartes SURVEILLEES par le dernier
 	// StepToPrompt, empaquetees : 16 bits par entree de cfg.resolve_min.
 	uint64_t resolved_this_step = 0;

@@ -112,6 +112,26 @@ struct EnumOptions {
 	bool canonical_zones = false;
 	// Explorer le passage en Battle Phase / End Phase depuis l'idle command.
 	bool allow_phase_change = true;
+	// IDENTITE DE CARTE SUR LES PROMPTS DE SELECTION (session 16).
+	//
+	// `MSG_SELECT_CARD` / `MSG_SELECT_TRIBUTE` ne renseignaient PAS `card` :
+	// leurs choix sont des SOUS-ENSEMBLES, et aucune carte ne les nommait. Or
+	// c'est exactement la ou se decide « quelle Fusion invoquer » et « avec
+	// quels materiaux » — donc le prompt le plus determinant du domaine etait
+	// invisible au biais d'echantillonnage, qui ne lit que `Choice::card`.
+	//
+	// Mesure qui l'a mis au jour (session 16, etalon Lunalight, run NU) : la
+	// frequence d'une Fusion s'effondre avec son nombre de materiaux —
+	// 42 525 tirages pour Perfume Dancer (2 materiaux), 2 073 pour Sabre
+	// Dancer (3), ZERO pour Leo Dancer et Liger Dancer (un materiau NOMME + 2
+	// ou 3). Aucun indice, aucune reference : le solveur prend toujours la
+	// Fusion la moins chere parce que rien ne relie l'enonce au coup.
+	//
+	// A vrai, le premier code du sous-ensemble devient l'identite du choix.
+	// C'est LOSSY pour k > 1 et exact pour k = 1 ; c'est assez pour qu'un
+	// biais derive de la CIBLE puisse s'y appliquer. Opt-in : cela change le
+	// comportement du biais sur tous les prompts de selection.
+	bool card_on_select = false;
 	// Construire les labels humains. Les chemins chauds (tirages, LDS) n'en
 	// ont pas besoin : chaque label est une allocation de chaine par choix.
 	bool labels = false;
