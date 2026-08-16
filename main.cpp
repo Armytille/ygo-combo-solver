@@ -28,6 +28,7 @@
 #include "assets.h"
 #include "duel.h"
 #include "enumerate.h"
+#include "operators.h"
 #include "prompt.h"
 #include "replay.h"
 #include "search.h"
@@ -1296,6 +1297,20 @@ struct Options {
 	// L'implication est appliquee ET imprimee — un drapeau qui en allume un
 	// autre sans le dire est la famille de piege que ce dossier catalogue.
 	bool probe_repeat = false;
+	// HARNAIS D'OPERATEURS DECLARES (session 19, chantier 0). INSTRUMENT, pas
+	// mecanisme : il extrait des scripts Lua du deck la table des operateurs
+	// (preconditions, produit, etat accorde, consommation), l'imprime, puis
+	// CONFRONTE cette table au plan rejoue — chaque activation correspond-elle a
+	// un operateur declare, et la sequence est-elle valide sous les
+	// preconditions extraites ?
+	//
+	// POURQUOI IL PASSE AVANT TOUT LE RESTE. Trois sessions ont bati sur un
+	// graphe dont personne n'avait verifie qu'il decrivait le jeu : recettes
+	// (s16), landmarks (s16), `--backward` (s17), tous nourris par l'OBSERVATION
+	// — ce que le solveur a deja reussi — au lieu de la DECLARATION. Le harnais
+	// est falsifiable et coute un run ; s'il echoue, le planificateur est sans
+	// objet, et c'est ce qu'on veut savoir en premier.
+	bool operators = false;
 	// Cartes OBSERVEES par la sonde, sans aucune contrainte (`--watch`).
 	// Objection de l'operateur qui les a fait ecrire : `--resolve` est un
 	// INDICE DEGUISE (biais d'indices d'office + gradient + exigence au but),
@@ -1789,6 +1804,19 @@ void Usage() {
 		"                     materiau etait la — panne d'echantillonnage) du 2e\n"
 		"                     TOUJOURS PERDU (la chaine etait consommee — panne\n"
 		"                     de h). Implique --recipes 0.\n"
+		"  --operators        HARNAIS D'OPERATEURS DECLARES (session 19) :\n"
+		"                     extrait des SCRIPTS LUA du deck la table des\n"
+		"                     operateurs — preconditions (SetRange,\n"
+		"                     SetCountLimit), produit (SetOperationInfo :\n"
+		"                     categorie ET zone), ETAT ACCORDE (EFFECT_ADD_CODE,\n"
+		"                     EFFECT_EXTRA_FUSION_MATERIAL...), recettes\n"
+		"                     (Fusion.AddProcMix*) —, l'imprime, puis la\n"
+		"                     CONFRONTE au plan rejoue : chaque activation\n"
+		"                     correspond-elle a un operateur declare, et la\n"
+		"                     sequence est-elle valide sous les preconditions ?\n"
+		"                     Les constantes viennent du `constant.lua` du jeu :\n"
+		"                     aucune carte n'est nommee dans le code. Instrument,\n"
+		"                     pas mecanisme — il ne change pas la recherche.\n"
 		"  --no-seed-recipes  n'amorce PAS le graphe avec le texte de carte : le\n"
 		"                     graphe n'apprend plus que des invocations reussies.\n"
 		"  --no-seed-quant    amorce les seuls materiaux NOMMES, sans les\n"
@@ -1970,6 +1998,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--backward",         &Options::backward },
 				{ "--elide-forced",     &Options::elide_forced },
 				{ "--adapt-to-peak",    &Options::adapt_to_peak },
+				{ "--operators",        &Options::operators },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -2880,6 +2909,9 @@ struct LineResult {
 	std::vector<size_t> dirty_per_decision;
 	double ms_write_watch = 0;   // cout cumule des appels GetWriteWatch
 	size_t write_watch_calls = 0;
+	// Activations relevees dans la ligne (--operators). Vide autrement : le
+	// harnais ne doit rien couter au rejeu ordinaire.
+	std::vector<ObservedActivation> activations;
 };
 
 // Deroule les reponses enregistrees. `instrument` active la collecte complete ;
@@ -2892,14 +2924,18 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 	Arena* arena = duel.GetArena();
 	uint32_t phase = 0;
 	bool first_idle_seen = false;
-	// Suivi du prompt courant, seulement si des contraintes sont a juger.
+	// Suivi du prompt courant, seulement si des contraintes sont a juger — ou si
+	// le harnais d'operateurs releve les activations (session 19).
 	const bool track = cons && cons->Any();
+	const bool need_prompt = track || opt.operators;
 	uint8_t ptype = 0;
 	int pplayer = -1;
 	std::vector<uint8_t> ppayload;
 	EnumOptions peo;
-	if(track) {
-		peo.no_activate = cons->no_activate.empty() ? nullptr : &cons->no_activate;
+	if(need_prompt) {
+		if(track)
+			peo.no_activate =
+				cons->no_activate.empty() ? nullptr : &cons->no_activate;
 		peo.db = &duel.Db();
 	}
 
@@ -2997,7 +3033,7 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 			default: break;
 			}
 
-			if(track && IsPrompt(m.type)) {
+			if(need_prompt && IsPrompt(m.type)) {
 				ptype = m.type;
 				pplayer = m.size ? m.data[0] : -1;
 				ppayload.assign(m.data, m.data + m.size);
@@ -3088,6 +3124,26 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 			}
 			if(r.responses_used >= yrp.responses.size())
 				break;   // fin de l'enregistrement : le joueur a quitte
+			// HARNAIS D'OPERATEURS : ce que la reponse ENREGISTREE active.
+			// Seules les decisions du joueur cible comptent — un operateur de
+			// l'adversaire ne serait pas dans la table (elle est batie sur NOTRE
+			// deck) et compterait a tort en « non appariee ».
+			if(opt.operators && pplayer == opt.target_player) {
+				ActivationRead ar;
+				if(DecodeActivation(ptype, ppayload.data(),
+									static_cast<uint32_t>(ppayload.size()),
+									yrp.responses[r.responses_used], peo, ar)) {
+					ObservedActivation oa;
+					oa.at = r.responses_used;
+					oa.message = ptype;
+					oa.code = ar.code;
+					oa.desc = ar.desc;
+					oa.location = ar.has_zone ? ar.location : uint8_t(0);
+					oa.sequence = ar.sequence;
+					oa.turn = r.turns;
+					r.activations.push_back(oa);
+				}
+			}
 			duel.SetResponse(yrp.responses[r.responses_used]);
 			++r.responses_used;
 		} else if(status == OCG_DUEL_STATUS_END) {
@@ -9225,6 +9281,46 @@ int main(int argc, char** argv) {
 
 		LineResult first = RunLine(duel, *yrp, opt, true, &cons);
 		ReportLine(first, *yrp, db, opt);
+
+		// --- CHANTIER 0 : LE HARNAIS DE VALIDATION (session 19) --------------
+		//
+		// L'ordre est le livrable : extraire, IMPRIMER, puis confronter au plan
+		// que le core vient de rejouer. Une table qui n'explique pas une ligne
+		// dont on sait qu'elle est valide (0 MSG_RETRY) est une table fausse, et
+		// tout ce qu'on batirait dessus le serait aussi.
+		if(opt.operators) {
+			ConstantTable kt;
+			const size_t nconst = kt.Load(scripts);
+			if(!nconst) {
+				std::printf("\n!! --operators : aucune constante lue. Les "
+							"fichiers `constant.lua` du jeu ne sont pas dans "
+							"les --scriptdir : la table serait vide et le "
+							"harnais rendrait un faux verdict.\n");
+			} else {
+				std::vector<uint32_t> codes;
+				const size_t dk = static_cast<size_t>(opt.target_player);
+				if(dk < yrp->decks.size()) {
+					for(uint32_t c : yrp->decks[dk].main) codes.push_back(c);
+					for(uint32_t c : yrp->decks[dk].extra) codes.push_back(c);
+				}
+				// Le board cible peut nommer des cartes hors decklist (mode
+				// --target) : les lire aussi, sans quoi une activation de la
+				// ligne tomberait en « carte hors table » pour une raison qui
+				// n'a rien a voir avec l'extraction.
+				for(const auto& [c, pos] : cons.board_add)
+					codes.push_back(c);
+				for(const ResolveReq& rq : cons.resolve_min)
+					codes.push_back(rq.code);
+				OperatorTable tbl;
+				const size_t nread = tbl.Build(db, scripts, kt, codes);
+				tbl.Print(db, kt);
+				tbl.PrintGrants(db, kt);
+				std::printf("\n  (%zu script(s) lu(s), %zu introuvable(s))\n",
+							nread, tbl.Missing());
+				HarnessVerdict hv = ConfrontPlan(tbl, db, kt, first.activations);
+				PrintVerdict(hv);
+			}
+		}
 
 		// Verdict des contraintes sur CE replay, meme sans recherche : l'outil
 		// sert aussi de JUGE — un replay produit hier (ou joue a la main) se

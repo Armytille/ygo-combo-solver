@@ -251,4 +251,32 @@ bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 // run doit etre jete. Imprime au bilan.
 uint64_t UndecodableResponses();
 
+// --- CE QU'UNE REPONSE ENREGISTREE ACTIVE (session 19, harnais d'operateurs) --
+//
+// Le harnais de validation confronte la TABLE D'OPERATEURS extraite des scripts
+// a un plan RESOLU : chaque activation de la ligne correspond-elle a un
+// operateur declare, et sous quelle zone ? La paire (code, description) est
+// l'identite dont la session 18ter a dote les prompts ; ici on la relit depuis
+// la reponse ENREGISTREE, ce que `Enumerate` ne fait pas (il enumere ce qui est
+// possible, pas ce qui a ete joue).
+//
+// La zone est la piece qui manquait : `SetRange` declare ou l'effet est
+// utilisable, et le message porte la zone PHYSIQUE d'ou la carte s'active.
+// Les confronter est la seule precondition qu'une analyse statique puisse
+// verifier sans evaluer une fermeture.
+struct ActivationRead {
+	uint32_t code = 0;
+	uint64_t desc = 0;
+	uint8_t location = 0;    // 0 = le message ne porte pas de zone
+	uint32_t sequence = 0;
+	bool has_zone = false;
+};
+
+// Rend faux si la reponse n'active rien (invocation, changement de phase, « ne
+// pas chainer », prompt de selection) OU si le message ne se decode pas. Les
+// deux cas se distinguent par `UndecodableResponses()`, qui compte le second.
+bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
+					  const std::vector<uint8_t>& response,
+					  const EnumOptions& opt, ActivationRead& out);
+
 } // namespace solver

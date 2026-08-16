@@ -51,6 +51,40 @@ uint64_t Mix(uint64_t h, uint64_t v) {
 	return h;
 }
 
+// LE CODE QUE PORTE UNE DESCRIPTION, et le decalage n'est PAS celui que le
+// dossier croyait.
+//
+// `MSG_SELECT_YESNO` ne transporte aucun code : la description le porte pour
+// lui. La session 18ter (9.27 (b)) a ecrit cette recuperation en `desc >> 4`,
+// d'apres la convention « aux.Stringid(id, n) = id * 16 + n ». C'EST FAUX pour
+// le core contemporain : `utility.lua:834` fait `(n & 0xfffff) | code << 20`.
+// Le harnais d'operateurs de la session 19 l'a montre en une mesure — les
+// descriptions relevees sur le plan resolu valent `code << 20`, et pas une
+// seule ne s'appariait.
+//
+// Ce n'etait pas visible sans instrument : `Find()` echouait sur le code faux,
+// le code restait a ZERO, et le prompt gardait une identite (l'arete porte
+// `desc`) tout en perdant sa CARTE — donc le biais d'indices et les sondes
+// d'offre etaient aveugles au pivot du combo, en silence.
+//
+// LES DEUX FORMATS SONT ESSAYES, le large d'abord, et un candidat n'est retenu
+// que si la BASE le connait : un decalage faux fabriquerait sinon un code
+// plausible, c'est-a-dire une identite fausse creditee a une autre carte.
+uint32_t CodeFromDesc(uint64_t desc, const CardDB* db) {
+	if(!db || !desc)
+		return 0;
+	const uint32_t wide = static_cast<uint32_t>(desc >> 20);
+	if(wide && db->Find(wide))
+		return wide;
+	// Ancien format 32 bits : n'a de sens que si la description y tient.
+	if(desc < (1ull << 32)) {
+		const uint32_t narrow = static_cast<uint32_t>(desc >> 4);
+		if(narrow && db->Find(narrow))
+			return narrow;
+	}
+	return 0;
+}
+
 uint64_t EdgeOf(uint8_t message, std::initializer_list<uint64_t> parts) {
 	uint64_t h = message * 0x100000001b3ull;
 	for(uint64_t p : parts)
@@ -439,9 +473,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 				code = 0;
 				desc = 0;
 			} else if(!code && desc) {
-				const uint32_t from_desc = static_cast<uint32_t>(desc >> 4);
-				if(opt.db && opt.db->Find(from_desc))
-					code = canon(from_desc);
+				code = canon(CodeFromDesc(desc, opt.db));
 			}
 		}
 		Choice& y = out.Emit();
@@ -999,6 +1031,138 @@ bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
 
 uint64_t UndecodableResponses() {
 	return g_undecodable.load(std::memory_order_relaxed);
+}
+
+bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
+					  const std::vector<uint8_t>& response,
+					  const EnumOptions& opt, ActivationRead& out) {
+	out = ActivationRead{};
+	auto canon = [&](uint32_t c) {
+		return opt.db ? opt.db->Canonical(c) : c;
+	};
+	auto undecodable = [] {
+		g_undecodable.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	};
+
+	switch(message) {
+	case MSG_SELECT_IDLECMD: {
+		if(response.size() != 4)
+			return false;
+		int32_t v = 0;
+		std::memcpy(&v, response.data(), 4);
+		const uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
+		const uint32_t s = static_cast<uint32_t>(v) >> 16;
+		if(t != 5)
+			return false;   // invoquer / poser / changer de phase : pas une activation
+		Reader r(data, len);
+		r.Get<uint8_t>();
+		const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
+		for(uint32_t g = 0; g < 5; ++g) {
+			uint32_t n = r.Get<uint32_t>();
+			for(uint32_t i = 0; i < n && r.Ok(); ++i)
+				r.Skip(strides[g]);
+		}
+		uint32_t n_act = r.Get<uint32_t>();
+		if(!r.Ok() || s >= n_act)
+			return undecodable();
+		// L'entree activable : code u32 | controleur u8 | zone u8 | sequence u32
+		//                      | description u64 | mode client u8
+		for(uint32_t i = 0; i < s; ++i)
+			r.Skip(4 + 1 + 1 + 4 + 8 + 1);
+		out.code = canon(r.Get<uint32_t>());
+		r.Skip(1);
+		out.location = r.Get<uint8_t>();
+		out.sequence = r.Get<uint32_t>();
+		out.desc = r.Get<uint64_t>();
+		if(!r.Ok())
+			return undecodable();
+		out.has_zone = true;
+		return true;
+	}
+	case MSG_SELECT_BATTLECMD: {
+		if(response.size() != 4)
+			return false;
+		int32_t v = 0;
+		std::memcpy(&v, response.data(), 4);
+		const uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
+		const uint32_t s = static_cast<uint32_t>(v) >> 16;
+		if(t != 0)
+			return false;   // attaquer / changer de phase
+		Reader r(data, len);
+		r.Get<uint8_t>();
+		uint32_t n_act = r.Get<uint32_t>();
+		if(!r.Ok() || s >= n_act)
+			return undecodable();
+		for(uint32_t i = 0; i < s; ++i)
+			r.Skip(4 + 1 + 1 + 4 + 8 + 1);
+		out.code = canon(r.Get<uint32_t>());
+		r.Skip(1);
+		out.location = r.Get<uint8_t>();
+		out.sequence = r.Get<uint32_t>();
+		out.desc = r.Get<uint64_t>();
+		if(!r.Ok())
+			return undecodable();
+		out.has_zone = true;
+		return true;
+	}
+	case MSG_SELECT_CHAIN: {
+		if(response.size() != 4)
+			return false;
+		int32_t v = 0;
+		std::memcpy(&v, response.data(), 4);
+		if(v < 0)
+			return false;   // « ne pas chainer »
+		Reader r(data, len);
+		r.Get<uint8_t>();
+		r.Get<uint8_t>();
+		r.Get<uint8_t>();          // forced
+		r.Get<uint32_t>(); r.Get<uint32_t>();
+		uint32_t n = r.Get<uint32_t>();
+		if(!r.Ok() || static_cast<uint32_t>(v) >= n)
+			return undecodable();
+		for(int32_t i = 0; i < v; ++i)
+			r.Skip(4 + kLocInfo + 8 + 1);
+		out.code = canon(r.Get<uint32_t>());
+		r.Skip(1);
+		out.location = r.Get<uint8_t>();
+		out.sequence = r.Get<uint32_t>();
+		r.Skip(4);                 // position
+		out.desc = r.Get<uint64_t>();
+		if(!r.Ok())
+			return undecodable();
+		out.has_zone = true;
+		return true;
+	}
+	case MSG_SELECT_EFFECTYN:
+	case MSG_SELECT_YESNO: {
+		if(response.size() != 4)
+			return false;
+		int32_t v = 0;
+		std::memcpy(&v, response.data(), 4);
+		if(v != 1)
+			return false;   // un « non » n'emploie aucun operateur
+		Reader r(data, len);
+		r.Get<uint8_t>();
+		if(message == MSG_SELECT_EFFECTYN) {
+			out.code = canon(r.Get<uint32_t>());
+			r.Get<uint8_t>();          // controleur
+			out.location = r.Get<uint8_t>();
+			out.sequence = r.Get<uint32_t>();
+			r.Skip(4);                 // position
+			out.has_zone = true;
+		}
+		out.desc = r.Get<uint64_t>();
+		if(!r.Ok())
+			return undecodable();
+		// Le YESNO ne porte AUCUN code : la description le porte pour lui.
+		if(!out.code && out.desc)
+			out.code = canon(CodeFromDesc(out.desc, opt.db));
+		return true;
+	}
+	default:
+		return false;
+	}
 }
 
 } // namespace solver
