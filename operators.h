@@ -298,6 +298,37 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 						  const ConstantTable& kt,
 						  const std::string& init_fn = "initial_effect");
 
+// --- LE TYPE DE NŒUD MANQUANT (chantier 1, session 19) -----------------------
+//
+// Le graphe de recettes range `Lunalight Leo Dancer` comme un PRODUIT A
+// FABRIQUER — d'ou `--backward` et ses « 2 sous-produits, 0,02 fabrique »
+// (9.24 (e)) : il essayait de construire une carte non constructible, puisque
+// son materiau nomme est absent du deck.
+//
+// Or Leo n'est pas ici un produit : c'est une PROPRIETE ACQUERABLE. `Kaleido
+// Chick` accorde `EFFECT_ADD_CODE` — le code de la carte qu'elle envoie au
+// cimetiere, valable comme MATERIAU DE FUSION. Le coup EST dans l'espace ; il
+// demande une preparation en deux temps, et rien dans le graphe ne pouvait
+// l'exprimer.
+//
+// Une arete d'acquisition, c'est donc : « ce CODE s'obtient si l'HOTE est dans
+// sa zone et si une SOURCE portant ce code est dans la zone que l'operateur
+// atteint ». Deux exigences, aucune fabrication.
+struct AcquirableCode {
+	uint32_t code = 0;         // le code acquis
+	uint32_t host = 0;         // la carte qui porte l'operateur
+	uint64_t host_range = 0;   // ou elle doit etre (LOCATION_*, deja normalise)
+	uint64_t source_zone = 0;  // ou la source doit etre
+	std::string grant;         // EFFECT_ADD_CODE / EFFECT_CHANGE_CODE
+};
+
+// `owned` : les cartes que le deck possede (main + extra). L'arete n'est posee
+// que vers des codes REELLEMENT disponibles — une acquisition vers un code
+// absent serait une route morte, exactement le piege 63 du graphe de recettes.
+std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
+											  const CardDB& db,
+											  const std::vector<uint32_t>& owned);
+
 // --- LE HARNAIS : CONFRONTER LA TABLE AU PLAN RESOLU -------------------------
 //
 // Une activation relevee dans le rejeu. Le decodeur des messages la rend ;

@@ -1311,6 +1311,21 @@ struct Options {
 	// est falsifiable et coute un run ; s'il echoue, le planificateur est sans
 	// objet, et c'est ce qu'on veut savoir en premier.
 	bool operators = false;
+	// CHANTIER 1 (session 19) : ENSEMENCER LE GRAPHE DE RECETTES DEPUIS LES
+	// OPERATEURS DECLARES, au lieu du seul TEXTE de carte.
+	//
+	// Deux apports, et le second est le type de nœud qui manquait :
+	//   - les recettes viennent de `Fusion.AddProcMix*` — des CODES, pas une
+	//     phrase anglaise a re-resoudre ;
+	//   - une arete « ce CODE peut etre ACQUIS » pour chaque `EFFECT_ADD_CODE` /
+	//     `EFFECT_CHANGE_CODE` du deck. Le graphe rangeait Leo comme un produit
+	//     a FABRIQUER — d'ou les « 2 sous-produits, 0,02 fabrique » de
+	//     `--backward` (9.24 (e)) : il essayait de construire une carte non
+	//     constructible.
+	//
+	// DRAPEAU LE TEMPS DE LE MESURER (regle 2 du README), pas plus : passe sur
+	// les deux etalons, il devient le defaut et le drapeau devient negatif.
+	bool op_recipes = false;
 	// Cartes OBSERVEES par la sonde, sans aucune contrainte (`--watch`).
 	// Objection de l'operateur qui les a fait ecrire : `--resolve` est un
 	// INDICE DEGUISE (biais d'indices d'office + gradient + exigence au but),
@@ -1817,6 +1832,16 @@ void Usage() {
 		"                     Les constantes viennent du `constant.lua` du jeu :\n"
 		"                     aucune carte n'est nommee dans le code. Instrument,\n"
 		"                     pas mecanisme — il ne change pas la recherche.\n"
+		"  --op-recipes       amorce le graphe de recettes depuis les OPERATEURS\n"
+		"                     DECLARES (session 19, chantier 1) au lieu du seul\n"
+		"                     texte anglais : recettes en CODES\n"
+		"                     (Fusion.AddProcMix*), et surtout le type de nœud\n"
+		"                     qui manquait — « ce CODE peut etre ACQUIS », pour\n"
+		"                     chaque EFFECT_ADD_CODE / EFFECT_CHANGE_CODE du\n"
+		"                     deck. Le graphe rangeait la carte a code emprunte\n"
+		"                     comme un PRODUIT A FABRIQUER, d'ou l'echec de\n"
+		"                     --backward (9.24 (e)). Les aretes posees sont\n"
+		"                     IMPRIMEES une par une. Exige --recipes.\n"
 		"  --no-seed-recipes  n'amorce PAS le graphe avec le texte de carte : le\n"
 		"                     graphe n'apprend plus que des invocations reussies.\n"
 		"  --no-seed-quant    amorce les seuls materiaux NOMMES, sans les\n"
@@ -1999,6 +2024,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--elide-forced",     &Options::elide_forced },
 				{ "--adapt-to-peak",    &Options::adapt_to_peak },
 				{ "--operators",        &Options::operators },
+				{ "--op-recipes",       &Options::op_recipes },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -6424,6 +6450,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					opt.recipes == 0.0
 						? "  (alimente et MESURE, n'entre pas dans le cout)"
 						: "  (la distance de recettes pese dans h)");
+		std::vector<uint32_t> watched;
+		for(const ResolveReq& rq : cons.resolve_min)
+			watched.push_back(rq.code);
 		// AMORCE PAR LE TEXTE, sans quoi la carte jamais posee n'a aucune
 		// recette et sa distance retombe au plancher — c'est-a-dire au `h`
 		// plat.
@@ -6431,14 +6460,144 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			const Deck& sd = start_yrp.decks[
 				opt.target_player < static_cast<int>(start_yrp.decks.size())
 					? opt.target_player : 0];
-			std::vector<uint32_t> watched;
-			for(const ResolveReq& rq : cons.resolve_min)
-				watched.push_back(rq.code);
 			const size_t n = SeedRecipesFromText(db, sd, target, recipe_graph,
 												 opt.seed_cardinal, watched);
 			std::printf("  amorce par le texte : %zu recette(s) posee(s), "
 						"%zu produit(s) connus\n", n, recipe_graph.Products());
 			ReportSeededDistances(target, recipe_graph, db, watched);
+		}
+		// CHANTIER 1 : L'AMORCE PAR LES OPERATEURS DECLARES.
+		if(opt.op_recipes && !start_yrp.decks.empty()) {
+			const Deck& sd = start_yrp.decks[
+				opt.target_player < static_cast<int>(start_yrp.decks.size())
+					? opt.target_player : 0];
+			std::vector<uint32_t> codes;
+			for(const auto* l : { &sd.main, &sd.extra })
+				for(uint32_t c : *l)
+					codes.push_back(c);
+			for(uint32_t c : target.codes)
+				codes.push_back(c);
+			ConstantTable kt;
+			if(!kt.Load(scripts)) {
+				std::printf("!! --op-recipes : aucune constante lue (constant.lua "
+							"absent des --scriptdir). L'amorce serait VIDE : elle "
+							"est sautee plutot que de se declarer active.\n");
+			} else {
+				OperatorTable tbl;
+				tbl.Build(db, scripts, kt, codes);
+				// (a) LES RECETTES DECLAREES. `Fusion.AddProcMixN(c,...,24550676,
+				//     1, IsSetCard(SET_LUNALIGHT), 3)` porte des CODES : plus de
+				//     nom anglais a re-resoudre, plus de « route morte » deduite
+				//     d'une phrase.
+				std::vector<uint32_t> owned;
+				for(const auto* l : { &sd.main, &sd.extra })
+					for(uint32_t c : *l)
+						owned.push_back(db.Canonical(c));
+				std::sort(owned.begin(), owned.end());
+				owned.erase(std::unique(owned.begin(), owned.end()), owned.end());
+				size_t nrec = 0, dead = 0;
+				for(const auto& [c, co] : tbl.All()) {
+					for(const DeclaredRecipe& rc : co.recipes) {
+						if(rc.named.empty() && rc.setcode.empty())
+							continue;
+						std::vector<Requirement> mats;
+						bool route_morte = false;
+						for(const auto& [mc, n] : rc.named) {
+							if(!std::binary_search(owned.begin(), owned.end(),
+												   db.Canonical(mc))) {
+								route_morte = true;   // piege 63, inchange
+								break;
+							}
+							for(uint32_t k = 0; k < n; ++k)
+								mats.push_back(Requirement{ db.Canonical(mc),
+															kZoneAny, kReqCard, 1 });
+						}
+						if(route_morte) { ++dead; continue; }
+						if(opt.seed_cardinal)
+							for(const auto& [sc, n] : rc.setcode)
+								mats.push_back(Requirement{
+									static_cast<uint32_t>(sc), kZoneAny,
+									kReqSetcode, static_cast<uint8_t>(n) });
+						if(mats.empty())
+							continue;
+						recipe_graph.Observe(c, mats, /*primed=*/true);
+						++nrec;
+					}
+				}
+				// (b) LE TYPE DE NŒUD MANQUANT : un CODE qu'on ACQUIERT.
+				const std::vector<AcquirableCode> acq =
+					AcquirableCodesOf(tbl, db, owned);
+				// LA ZONE DE LA SOURCE EST CELLE OU LA CARTE SE TROUVE.
+				// `Requirement::zone` est UN seau normalise : il ne sait pas
+				// dire « DECK ou EXTRA ». Or l'operateur balaye les deux, et
+				// collapser le masque en aveugle (NormalizeZone rend EXTRA pour
+				// DECK|EXTRA) exigerait toutes les sources dans l'extra —
+				// l'exigence deviendrait fausse pour les quatorze quinziemes
+				// d'entre elles, en silence. On tranche par le DECK, qu'on a
+				// sous la main : c'est un fait, pas une convention.
+				auto in_list = [&db](const std::vector<uint32_t>& l, uint32_t c2) {
+					for(uint32_t x : l)
+						if(db.Canonical(x) == c2)
+							return true;
+					return false;
+				};
+				for(const AcquirableCode& a : acq) {
+					uint8_t src = NormalizeZone(static_cast<uint8_t>(a.source_zone));
+					if(in_list(sd.extra, a.code) && (a.source_zone & LOCATION_EXTRA))
+						src = NormalizeZone(LOCATION_EXTRA);
+					else if(in_list(sd.main, a.code) && (a.source_zone & LOCATION_DECK))
+						src = NormalizeZone(LOCATION_DECK);
+					std::vector<Requirement> mats;
+					mats.push_back(Requirement{ a.host,
+						NormalizeZone(static_cast<uint8_t>(a.host_range
+														   ? a.host_range : 0x0c)),
+						kReqCard, 1 });
+					mats.push_back(Requirement{ a.code, src, kReqCard, 1 });
+					recipe_graph.Observe(a.code, mats, /*primed=*/true);
+				}
+				std::printf("  amorce par les OPERATEURS : %zu recette(s) "
+							"declaree(s) (%zu route(s) morte(s)), %zu arete(s) "
+							"d'ACQUISITION de code, %zu produit(s) connus\n",
+							nrec, dead, acq.size(), recipe_graph.Products());
+				// La VIE du mecanisme, et elle est nominative : sans elle, une
+				// amorce a zero arete se lirait comme une amorce active
+				// (piege 42, deux sessions payees pour --assign-bias).
+				for(const AcquirableCode& a : acq)
+					std::printf("      %s peut ACQUERIR le code de %s  (%s, hote "
+								"@%s, source @%s)\n", db.Name(a.host).c_str(),
+								db.Name(a.code).c_str(), a.grant.c_str(),
+								ZoneMaskName(static_cast<uint32_t>(a.host_range)).c_str(),
+								ZoneMaskName(static_cast<uint32_t>(a.source_zone)).c_str());
+				if(acq.empty())
+					std::printf("      (aucune arete d'acquisition : aucune carte "
+								"du deck n'accorde EFFECT_ADD_CODE)\n");
+				ReportSeededDistances(target, recipe_graph, db, watched);
+			}
+		}
+		// LA DECOMPOSITION A REBOURS, IMPRIMEE. C'est le juge du chantier 1, et
+		// il est STRUCTUREL : sans graine, sans budget, sans tirage. Le dossier
+		// ne lisait jusqu'ici que le NOMBRE de sous-produits (`snap_backward`),
+		// et un nombre ne dit pas si l'operateur qu'on cherche y est.
+		{
+			std::vector<uint32_t> roots = target.codes;
+			std::sort(roots.begin(), roots.end());
+			roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+			std::vector<Requirement> reqs;
+			std::vector<uint32_t> prods;
+			recipe_graph.Expand(roots, 3, reqs, prods);
+			std::printf("  decomposition a rebours (ordre de FABRICATION, "
+						"%zu sous-produit(s)) :\n", prods.size());
+			for(uint32_t p : prods)
+				std::printf("      %s\n", db.Name(p).c_str());
+			std::printf("  exigences rencontrees : %zu\n", reqs.size());
+			for(const Requirement& q : reqs)
+				if(q.kind == kReqCard)
+					std::printf("      NOMMEE   %s @%s\n", db.Name(q.code).c_str(),
+								q.zone ? ZoneMaskName(q.zone).c_str() : "toute zone jouable");
+				else
+					std::printf("      CARDINAL %s 0x%x x%u\n",
+								q.kind == kReqLevel ? "niveau" : "archetype",
+								q.code, q.count);
 		}
 	}
 

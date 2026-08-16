@@ -1239,6 +1239,109 @@ void OperatorTable::PrintGrants(const CardDB& db, const ConstantTable& kt) const
 				rows.size(), cards.size());
 }
 
+// --- LE TYPE DE NŒUD MANQUANT ------------------------------------------------
+
+std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
+											  const CardDB& db,
+											  const std::vector<uint32_t>& owned) {
+	std::vector<AcquirableCode> out;
+	for(const auto& [c, co] : tbl.All()) {
+		for(const DeclaredEffect& g : co.grants) {
+			if(g.code_name != "EFFECT_ADD_CODE" &&
+			   g.code_name != "EFFECT_CHANGE_CODE")
+				continue;
+			// L'OPERATEUR QUI POSE CET ETAT. Le lien est le nom de fonction :
+			// l'etat est cree dans `s.operation`, et l'operateur declare
+			// `SetOperation(s.operation)`. Aucune autre attache n'existe, et
+			// c'est celle que les scripts ecrivent.
+			const DeclaredEffect* host = nullptr;
+			for(const DeclaredEffect& e : co.operators) {
+				for(const std::string* fn : { &e.fn_operation, &e.fn_cost,
+											  &e.fn_target }) {
+					std::string base = *fn;
+					if(base.compare(0, 2, "s.") == 0)
+						base = base.substr(2);
+					if(!base.empty() && base == g.in_function) {
+						host = &e;
+						break;
+					}
+				}
+				if(host)
+					break;
+			}
+			if(!host)
+				continue;
+			// LES ZONES QUE L'OPERATEUR ATTEINT, lues dans ses fonctions. Pour
+			// `Kaleido Chick`, le cout balaye `LOCATION_DECK|LOCATION_EXTRA` —
+			// et c'est de la que le code vient.
+			uint64_t zones = 0;
+			for(const std::string* fn : { &host->fn_cost, &host->fn_operation,
+										  &host->fn_target }) {
+				std::string base = *fn;
+				if(base.compare(0, 2, "s.") == 0)
+					base = base.substr(2);
+				auto it = co.fn_locations.find(base);
+				if(it != co.fn_locations.end())
+					zones |= it->second;
+			}
+			if(!zones)
+				continue;
+			// LES CODES ATTEIGNABLES. `s.listed_series` est la DECLARATION que
+			// la carte fait de l'archetype qu'elle manipule : s'en servir n'est
+			// pas du reglage, c'est lire ce que le script annonce au moteur.
+			// Sans declaration, on ne restreint pas — sous-estimer est la
+			// direction sure (regle 2), inventer un filtre ne l'est pas.
+			for(uint32_t oc : owned) {
+				const uint32_t code = db.Canonical(oc);
+				const CardRow* row = db.Find(code);
+				if(!row || !(row->type & 0x1u))   // TYPE_MONSTER
+					continue;
+				if(!co.listed_series.empty()) {
+					bool hit = false;
+					for(uint64_t want : co.listed_series) {
+						for(uint16_t sc : row->setcodes) {
+							if(!sc)
+								continue;
+							const uint16_t w = static_cast<uint16_t>(want);
+							if((sc & 0x0fffu) == (w & 0x0fffu) &&
+							   (sc & w & 0xf000u) == (w & 0xf000u)) {
+								hit = true;
+								break;
+							}
+						}
+						if(hit)
+							break;
+					}
+					if(!hit)
+						continue;
+				}
+				// ACQUERIR SON PROPRE NOM NE PRODUIT RIEN. L'arete serait une
+				// boucle sur elle-meme dans un graphe deja cyclique, et la
+				// distance la paierait a chaque niveau de recursion.
+				if(code == c)
+					continue;
+				AcquirableCode ac;
+				ac.code = code;
+				ac.host = c;
+				ac.host_range = NormalizeRange(host->range);
+				ac.source_zone = zones;
+				ac.grant = g.code_name;
+				out.push_back(ac);
+			}
+		}
+	}
+	std::sort(out.begin(), out.end(), [](const AcquirableCode& a,
+										 const AcquirableCode& b) {
+		if(a.code != b.code) return a.code < b.code;
+		return a.host < b.host;
+	});
+	out.erase(std::unique(out.begin(), out.end(),
+						  [](const AcquirableCode& a, const AcquirableCode& b) {
+							  return a.code == b.code && a.host == b.host;
+						  }), out.end());
+	return out;
+}
+
 // --- LE HARNAIS --------------------------------------------------------------
 
 HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,
