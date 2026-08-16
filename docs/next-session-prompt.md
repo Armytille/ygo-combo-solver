@@ -1,213 +1,145 @@
-# Session 18 — AUDIT : POURQUOI CE SOLVEUR NE TROUVE RIEN
+# Session 19 — RÉPARER LE JUGE, PUIS LE CRÉDIT, PUIS COUPER LE GRAS
 
 Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`).
 
-**CE N'EST PAS UNE SESSION DE MÉCANISME.** Aucun drapeau de plus. Le livrable est
-un **rapport d'audit** : ce qui est faux, ce qui est mort, ce qui est du réglage
-déguisé, et ce qui devrait être jeté. Écrire du code n'est autorisé que pour
-**instrumenter une hypothèse d'audit** ou **supprimer**.
+**CE N'EST PAS UNE SESSION DE MÉCANISME.** Aucun drapeau de recherche de plus.
+La session 18 a audité le solveur et a trouvé que **l'instrument qui devait juger
+les mécanismes rend cinq valeurs différentes pour la même commande**. Tant que
+ce n'est pas réparé, tout mécanisme ajouté sera jugé à pile ou face.
 
-Lis `README.md`, puis `docs/combo-solver-design.md` **§9.24** (session 17) en
-entier, puis §9.23. La bibliographie est faite (§9.22 (h), §9.23 (c), §9.24) : ne
-la refais pas.
+Lis `README.md` (section « La règle de mesure »), puis
+`docs/combo-solver-design.md` **§9.25** en entier, puis `docs/drapeaux.md`. La
+bibliographie est faite (§9.22 (h), §9.23 (c), §9.24) : ne la refais pas.
 
-## LE CONSTAT
+## CE QUE LA SESSION 18 A ÉTABLI
 
-Dix-sept sessions. **Zéro solution but-seul écrite sur l'étalon A.** Le solveur
-n'a jamais posé un seul Lunalight Liger Dancer en run nu, sur des dizaines de
-millions de tirages.
-
-Ce qui marche : le rejeu fidèle, l'arène, la réparation à écarts bornés, la
-transplantation partielle (4/6). Ce qui ne marche pas : **trouver**.
-
-La session 17 a produit quatre diagnostics utiles et **zéro conversion** :
-
-| fait mesuré | valeur |
+| fait | valeur |
 |---|---|
-| nœuds développés n'offrant **aucun choix** | **74,6 %** |
-| clé de transposition, rapport aux **boards** distincts | **×138 à ×284** |
-| tirages où la porte (`Masquerade`) s'ouvre | **21,4 %** |
-| tirages où le matériau (`Leo Dancer`) atteint sa zone | **0,035 %** |
-| variance inter-run **à graine fixée** | **×6** |
+| étalon B, **même commande, même graine**, `≥1` sur 5 runs | **0 · 0 · 0 · 89 · 2 239** |
+| `--threads 1`, même graine, tirages sur 2 runs | **41 232 · 42 179** |
+| coût mesuré du mono-worker | ÷5,1 à ÷5,9 (et non ÷16) |
+| drapeaux à supprimer (réfutés / départagés négatifs) | **17** sur 122 |
+| drapeaux jamais jugés | **27** |
+| constantes du score qui sont des **paris non mesurés** | **11** sur 22, dont les quatre du cœur (100, 10, 3, 1) |
+| `Choice::card_lossy` | déclaré, remis à zéro, lu — **jamais assigné `true`** |
 
-## LA DETTE, CHIFFRÉE
-
-| | |
-|---|---|
-| drapeaux CLI | **122** |
-| lignes (`main.cpp` / `search.cpp` / `search.h`) | 9 386 / 5 273 / 3 285 |
-| champs de `SearchConfig` | **81** |
-| mécanismes **réfutés** encore présents dans le code | au moins 12 |
-
-**Un solveur qui ne trouve rien avec 122 cadrans n'a pas un problème de
-cadran.**
+**Le couplage fantôme n'existe pas.** Sous `--hint-bias 0`, `--card-on-select`
+est sémantiquement inerte (le seul canal de lecture de `Choice::card` est annulé)
+— et les deux bras tombent quand même dans des états opposés. §9.24 (o) est
+retiré : ni `--assign-bias` ni `--card-on-select` n'ont été réfutés sur B, et
+`--elide-forced --hindsight` n'y a rien confirmé.
 
 ---
 
-## AXE 1 — LE COUPLAGE FANTÔME (le fil le plus chaud, commencer par là)
+## CHANTIER 1 — LE BUDGET EN TIRAGES (la porte de tout le reste)
 
-`--card-on-select` **seul** fait passer l'étalon B de **2 239 résolutions à
-ZÉRO** et l'approche écrite de 7/8 à 3/8. Reproductible : trois runs.
+Le non-déterminisme n'est **pas** l'échange entre workers : c'est que le budget
+est du **temps de mur**. Deux runs `--threads 1` à la même graine ne font pas le
+même nombre de tirages, donc ne s'arrêtent pas au même point de la trajectoire.
 
-Or ce drapeau ne fait qu'une chose — renseigner `Choice::card` sur les prompts de
-sélection. Et depuis le correctif de la s17, `hinted` **rejette** ces identités
-(`Choice::card_lossy`). Avec `--assign-bias` à zéro, **plus rien ne lit ce
-champ** : ce bras devrait être identique au témoin, bit pour bit.
+*À faire* : un budget en **tirages** (ou en nœuds — `max_nodes` existe déjà dans
+`SearchConfig`, `search.h`, et **n'est exposé par aucun drapeau**). Avec
+`--threads 1`, les deux ensemble doivent donner un run **identique à l'octet
+près**, diff de relevés à l'appui (hors durées).
 
-**Il ne l'est pas. Trouve pourquoi.** Tout dépend de cette réponse : si un champ
-« inerte » peut détruire un cas, alors aucune mesure du dossier n'est fiable.
+*Le contrôle* : `Compare-Object` sur deux relevés complets. La session 18 a
+mesuré 38 lignes de différence sur 392 ; l'objectif est **zéro**, hors lignes de
+durée.
 
-*Où chercher* : tous les lecteurs de `Choice::card` (`grep -n "\.card"`), y
-compris `bandit_code`, la sonde, `EmitAssignExtremes` ; l'ordre d'application des
-options dans `main.cpp` (le bloc `card_on_select` est-il lu par TOUS les
-`EnumOptions` du run, dont ceux du relevé de plan et du finisseur ?) ; et
-`ChoiceList::Emit()`, où un champ non remis à zéro **fuite d'un prompt à
-l'autre** — bug déjà trouvé une fois en s17 (641 → 0).
+*Ce que cela coûte, et il faut le mesurer* : le débit par run et le temps de
+mur pour un budget donné. Un mode déterministe lent reste utile — c'est le seul
+mode où un A/B fin veut dire quelque chose.
 
-## AXE 2 — LE DÉCODEUR BINAIRE EST-IL JUSTE ?
+*Réserve à écrire d'avance* : un run mono-worker déterministe **n'est pas le run
+de production**. Il sert d'instrument d'attribution ; les mesures de performance
+restent à seize workers, et se lisent en proportion.
 
-`MSG_SELECT_BATTLECMD` était **faux depuis l'origine** : `sequence` est un
-`uint8` dans la liste attaquable et un `uint32` dans la liste activable du *même*
-message ; le décodeur sautait 11 octets au lieu de 8. Conséquence silencieuse :
-toute branche entrant en Battle Phase mourait, et la mort se lisait comme une
-impasse ordinaire.
+## CHANTIER 2 — LE CRÉDIT : TRONQUER `run.steps` À L'ARGMAX
 
-**Un défaut de ce type ne se voit dans aucune mesure de recherche.** Il faut
-auditer **champ par champ, message par message**, `enumerate.cpp` et
-`prompt.cpp` contre `deps/ocgcore/playerop.cpp` et `processor.cpp`.
+Le défaut est en deux lignes, et il explique le régime d'échec :
 
-*Livrable* : un tableau « message → disposition attendue → disposition décodée →
-verdict », pour les 19 types de `PromptName`. Les `ANNOUNCE_*`, `SELECT_COUNTER`
-et `SORT_CARD` tombent sur `DefaultResponse` — **combien de fois en pratique, et
-quelles branches cela tue-t-il ?** (`forced_default_prompts` existe et est
-imprimé.)
+- `search.cpp:2912` — `if(sc > run.score) run.score = sc;` : le score du tirage
+  est le **MAX** le long de la ligne ;
+- `search.cpp:3422` — `for(const PolicyStep& s : run.steps)` : `AdaptRun`
+  parcourt **tous** les pas, **sans troncature**.
 
-## AXE 3 — L'ÉTAT, LA CLÉ, ET CE QU'ELLE DISTINGUE
+Une ligne qui culmine à 7/8 au pas 200 puis erre 230 pas voit ses 430 pas
+récompensés à `+alpha`. La politique apprend l'effondrement aussi fort que la
+montée. Signature dans les relevés : le régime d'échec de l'étalon B écrit une
+approche de **434 décisions** (le plafond est 435) à 3/8, contre 189-258
+décisions à 7/8.
 
-La clé de transposition prend **138 à 284 valeurs par board distinct**, et le
-rapport **croît** avec la profondeur. Attribution s17 : ce n'est ni le
-`ProcessorState` (×1,00 aux points stables), ni la charge utile (×1,42), c'est
-l'état de jeu lui-même — dont la **colonne** (×37 aux points idle, mais ×1,67
-seulement sur l'ensemble des nœuds).
+*À faire* : retenir l'indice du maximum pendant le tirage, tronquer `run.steps`
+à cet indice avant `AdaptRun`. Un drapeau d'A/B (`--adapt-to-peak`, éteint par
+défaut), et **une mesure au chantier 1**, c'est-à-dire en mode déterministe.
 
-*Questions à trancher* :
-- `StateDigest` hache les **deux joueurs**. En solitaire, l'adversaire ne joue
-  pas — que coûte-t-il dans la clé, et pourquoi n'a-t-on jamais mesuré ?
-- `ProcessorState()` : quelle est sa **taille** et sa **variabilité** ? Il a été
-  ajouté par « le patch C1 » pour distinguer deux instants d'une chaîne — cette
-  distinction est-elle encore nécessaire maintenant que 74,6 % des prompts sont
-  élidables ?
-- La transposition stocke `remaining` (budget restant) : combien d'états sont
-  **ré-explorés** faute de budget suffisant, et ce mécanisme paie-t-il ?
+*Le juge* : sur l'étalon A, les poses de Sabre Dancer (arité 3) et les
+invocations, qui ne dépendent pas du juge de B. Sur l'étalon B, N runs et la
+proportion de réussites.
 
-## AXE 4 — LE SCORE, ET D'OÙ SORTENT SES NOMBRES
+*Piège à éviter* : le bandit `Q̂` a déjà sa propre récompense (`qh_reward`,
+`search.cpp:2918`) et `AdaptRun` saute déjà les pas `bandit`. Ne pas tronquer
+avant ce filtre.
 
-```
-Heuristic = common×100 + exact×10 + mzone_count×3 + fodder
-material  = Heuristic + resolve_weight(250) × ResolveProgress
-score     = material×1000 + novel_states
-but       = 1e12 − burned×1e9 − actions×1e5 − depth
-```
+## CHANTIER 3 — SUPPRIMER LES 17
 
-**Aucune de ces constantes n'a de justification écrite reliée à une mesure.**
-`common` compte les cartes cibles **présentes** — terme nul sur toute la montée,
-et c'est la cause mécanique nommée en §9.23 (h).
+`docs/drapeaux.md` liste les 17, avec le verdict écrit et sa référence. **Un
+drapeau à la fois, santé avant et après.** Supprimer un mécanisme réfuté n'est
+pas une perte : c'est retirer une branche morte que chaque lecture future devra
+sinon ré-évaluer.
 
-*À faire* : pour chaque constante, retrouver la session qui l'a posée et le
-raisonnement. Celles qui n'en ont pas sont des paris. Mesurer la **sensibilité**
-du solveur à chacune (une décade autour) : celles auxquelles il est insensible
-sont du bruit, celles auxquelles il est très sensible sont du **réglage sur nos
-deux decks** — et c'est exactement ce que l'opérateur veut voir disparaître.
+Commencer par ceux dont le retrait simplifie le plus : `--recipe-w` (un terme du
+score des tirages), `--backward` (une partition ×64 de la table de nouveauté),
+`--canonical-digest` (un second chemin dans `StateDigest`), `--archive-spread`
+(un quota par niveau dans l'archive), `--mcps` (le conditionnement par le
+chemin).
 
-## AXE 5 — L'ALGORITHME EST-IL LE BON ?
+Et **`Choice::card_lossy`** : code mort, à supprimer avec son commentaire, qui
+décrit un comportement qui n'existe pas (`search.cpp:3028`).
 
-Question de fond, jamais posée dans le dossier.
+## CHANTIER 4 — LES DEUX INSTRUMENTS QUI MENTENT ENCORE
 
-**NRPA est un algorithme d'OPTIMISATION DE SÉQUENCE** (Morpion Solitaire,
-crossword) : il cherche la *meilleure* ligne dans un espace où presque toute
-ligne est valide. Notre problème est un problème **d'ATTEIGNABILITÉ** : presque
-aucune ligne n'est valide, et toutes les valides se valent.
+1. **`hint_seen` (« visibilité des indices »)** a trois causes à la fois : le
+   drapeau `--card-on-select`, la qualité du run, et le volume de travail. Il
+   rend 4 avec le drapeau à un worker et 64 617 sans le drapeau à seize. **Le
+   ventiler par TYPE de prompt** — le même correctif que la sonde d'offre a reçu
+   en §9.24 (a), sur le même défaut, deux sessions plus tard.
+2. **`forced_default`** est incrémenté (`search.cpp:507`) **avant** d'essayer
+   `DefaultResponse` ; quand celui-ci échoue la branche meurt et compte **aussi**
+   en `dead_ends`. Le texte imprimé — « réduits à LA réponse par défaut » — est
+   faux pour les trois `ANNOUNCE_*`, où la branche est **supprimée**. Séparer les
+   deux compteurs.
 
-*Symptômes cohérents avec un mauvais choix d'algorithme, tous déjà mesurés* :
-- le score du tirage est un **MAX le long de la ligne** — donc une ligne qui
-  approche puis s'écrase bat une ligne qui progresse ;
-- la politique converge vers **la Fusion la moins chère** (÷20 par matériau) ;
-- l'archive Go-Explore s'épuise en **0 à 13 expansions** par racine ;
-- 100 % des tirages finissent par « coupure de tour », c'est-à-dire **par
-  épuisement**, pas par un but.
+Et poser le compteur **manquant** nommé en §9.25 (d) : combien d'états la
+transposition **ré-explore** faute d'un budget suffisant à la première visite
+(`search.cpp:2170-2177` stocke `disc + 1`). `stats.transpositions` ne compte que
+la coupure ; on ne sait pas si le mécanisme paie.
 
-*À trancher* : le finisseur LTS (`RunLevin`), lui, est un algorithme
-d'atteignabilité **complet**. A-t-il jamais été jugé **seul**, sans phase NRPA ?
-Si oui où, si non pourquoi ? Et l'exhaustif atteint **145 boards distincts** à
-budget égal sous `--elide-forced` : que donne-t-il si on lui donne tout le
-budget, sans NRPA du tout ?
+---
 
-## AXE 6 — LE FINE-TUNING DÉGUISÉ (exigence explicite de l'opérateur)
+## CE QUI RESTE OUVERT, ET QUI N'EST PAS DE CETTE SESSION
 
-> « Il est important de ne pas fine-tuner le solveur pour répondre au cas
-> Lunalight, il doit être générique et fonctionner quel que soit le deck. »
-
-Le moteur ne compile aucun nom de carte — c'est vrai et vérifiable. **Ce n'est
-pas suffisant** : la s17 l'a prouvé en mesure. `--assign-bias`, dont la liste
-sort du graphe de recettes sans aucune carte compilée, gagne ×27 sur Lunalight
-et **détruit Synchron** (2 239 → 0).
-
-*À inventorier, sans complaisance* :
-- toute constante réglée en regardant un de nos deux étalons ;
-- toute liste `--hint` écrite à la main dans `tools/*.ps1` — **combien de
-  mesures du dossier en dépendent ?** ;
-- `--resolve`, qui est un **indice déguisé** (biais d'office + gradient +
-  exigence au but) et qui est présent dans presque toutes les commandes de
-  l'étalon B — **quelles conclusions du dossier s'effondrent si on le retire ?** ;
-- tout mécanisme validé sur **un seul** étalon.
-
-*Règle à instaurer, et à écrire dans le README* : **aucun mécanisme n'est retenu
-sans avoir passé les DEUX étalons.** La s17 montre que le deuxième deck suffit à
-réfuter ; le troisième n'était pas nécessaire.
-
-## AXE 7 — LE GRAS
-
-**122 drapeaux.** Pour chacun, trois questions : *(a)* a-t-il été jugé ?
-*(b)* quel est son verdict écrit ? *(c)* le code serait-il plus simple sans lui ?
-
-Candidats à la suppression, déjà réfutés ou jamais jugés :
-`--mcps` (réfuté deux fois), `--nrpa-lr` (réfuté), `--recipe-w` (réfuté, cause
-structurelle), `--assign` / `--assign-bias` (réfuté sur B), `--goal-bias`
-(réfuté), `--canonical-digest` (réfuté sur A), `--no-phase-change` (départagé,
-négatif), `--options-ctx` (réfuté), `--subsets-ascending` (A/B d'attribution
-terminé), `--finisher-options` (**écrit, jamais jugé**), `--canonical-zones`
-(**jamais départagé**), `--archive-spread` (départagé, neutre).
-
-**Supprimer un mécanisme réfuté n'est pas une perte : c'est retirer une branche
-morte que chaque lecture future devra sinon ré-évaluer.** Le dossier garde la
-trace ; le code n'a pas à la porter.
-
-## AXE 8 — LES INSTRUMENTS MENTENT
-
-Trois faux verdicts en une seule session :
-1. le contrôle de couverture comparait `Fingerprint` (état exact) au lieu du
-   **board** → « trois trous dans l'espace » alors qu'il couvre **100 %** ;
-2. la sonde d'offre comptait « présente dans un pool » comme « invocable » →
-   verdict **inverse** du vrai ;
-3. `offer_steps` était compté après le `continue` de l'élision → dénominateur
-   divisé par deux, taux **incomparables entre bras**.
-
-*À faire* : passer en revue **chaque compteur imprimé** et répondre à « que
-mesure-t-il exactement, et sous quels drapeaux cesse-t-il d'être valide ? ». Un
-compteur dont la définition change avec un drapeau ne peut pas juger ce drapeau.
-
-## AXE 9 — LE NON-DÉTERMINISME
-
-Deux runs de **configuration identique et de même graine** donnent 202 et 33 sur
-le même compteur : **facteur 6**. Cause connue et écrite : échanges asynchrones
-entre workers (`NrpaShared`, `OnlineOptions`, `SharedTT`).
-
-**C'est un défaut du solveur, pas une propriété de l'instrument** — et il rend
-non concluante toute mesure d'un effet inférieur à ×6.
-
-*À trancher* : un mode **strictement déterministe** (un worker, aucun partage)
-est-il réalisable ? À quel coût en débit ? Sans lui, aucun A/B fin n'est possible
-et toute la discipline de mesure du dossier repose sur du sable.
+- **`ProcessorState` est-il encore nécessaire ?** §9.24 (j) le mesure à ×1,00 aux
+  points idle et dominant aux prompts intermédiaires — or `--elide-forced` retire
+  74,6 % de ces prompts de la table. La justification du patch C1 n'a pas été
+  re-mesurée depuis. Une mesure d'un bras, quand le juge sera réparé.
+- **L'adversaire dans la clé.** `StateDigest` (`search.cpp:619`) boucle sur les
+  deux joueurs : douze `Query` et deux `Count`, dont la moitié sur un adversaire
+  qui ne joue pas. En solitaire, sa contribution est une **constante** — zéro
+  entropie, la moitié du coût. C'est une question de **débit**, pas de clé.
+- **Le finisseur seul n'a jamais été jugé.** `--no-nrpa` ne le fait pas (il
+  remplace NRPA par du glouton, `main.cpp:7074`). La mesure existe sans code :
+  `--finisher-min` proche de `--solve-ms` affame les tirages (`main.cpp:6917`).
+- **La sensibilité des 11 paris** (100, 10, 3, 1, `hint_bias` 2,0,
+  `resolve_weight` 250, ×0,7 et ×0,8 des budgets, `qhat_*`, `hindsight_k`).
+  **Suspendue jusqu'à la réparation du juge** : un balayage sur un instrument à
+  événement rare produirait une carte de bruit qu'on prendrait pour une carte de
+  réglage.
+- **L'étalon B n'a aucun run nu.** `--resolve` est un indice déguisé — biais
+  d'office, gradient de 250, exigence au but — et il **est** l'énoncé du but sur
+  B. La question « le solveur trouve-t-il seul ? » n'y a jamais été posée. C'est
+  un trou de dispositif, pas un réglage.
+- **Un troisième deck** reste le seul juge de généralité, et il n'existe pas.
 
 ---
 
@@ -217,46 +149,51 @@ et toute la discipline de mesure du dossier repose sur du sable.
   ```powershell
   .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
       --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000 `
-      --outdir s18_sante --no-chain Zalen --no-chain "Crystal Wing"
+      --outdir s19_sante --no-chain Zalen --no-chain "Crystal Wing"
   # 273 digests, 210/273, 209 candidates, 16 replays.
   ```
 - **Supprimer un drapeau est un changement comme un autre** : santé avant/après.
 - Une mesure en cours **verrouille le binaire** (`LNK1104`) : c'est voulu.
 - Logs PS en **UTF-16** : `Select-String`, jamais `grep`. Runs séquentiels, un
   `--outdir` par run.
+- **Sur l'étalon B : N runs par bras, lecture en PROPORTION.** Un run par bras ne
+  mesure que le tirage (§9.25 (b)).
 - **CODES et jamais NOMS** : `8379983` Gold Leo · `3027001` Fake Trap ·
   `54701958` Liger · `24550676` Leo · `88753594` Sabre · `81196066` Perfume ·
   `35618217` Kaleido Chick · `2344618` Masquerade · `47705572` Wolf ·
   `90590304` Bagooska.
 - **Le premier plan résolu de l'étalon A existe** :
   `D:\ProjectIgnis\replay\2026-08-16 13-19-12.yrpX` (283/283, 0 MSG_RETRY, 2
-  Liger). C'est un **corpus et un objet d'étude**, pas une solution de la cible
-  (2 Liger sur 3, pas de Bagooska, ancienne main).
+  Liger). C'est un **corpus et un objet d'étude**, pas une solution de la cible.
+- Bancs de la session 18 : `tools/s18_axe1.ps1` (attribution du couplage),
+  `tools/s18_axe9.ps1` (recensement + déterminisme). Les rejouer coûte ~16 min.
 
 ## CE QU'IL NE FAUT PAS REFAIRE
 
+- Chercher le « couplage fantôme » de `--card-on-select` : **il n'existe pas**,
+  et la démonstration est en §9.25 (a).
+- Re-mesurer §9.24 (o) tel quel : un run par bras sur l'étalon B ne rend rien.
 - La bibliographie (§9.22 (h), §9.23 (c), §9.24).
-- Les réfutations listées à l'axe 7.
-- « `--max-subsets` explique les trous de couverture » : mesuré, faux (24 et 256
-  identiques).
-- « le changement de phase gaspille les tirages » : mesuré, faux
-  (`--no-phase-change` laisse les coupures de tour à 100 % ; c'est la fin
-  **normale** d'un tirage).
+- Les réfutations de `docs/drapeaux.md` §A.
+- « `--max-subsets` explique les trous de couverture » : mesuré, faux.
+- « le changement de phase gaspille les tirages » : mesuré, faux — la coupure de
+  tour à 100 % est la fin **normale** d'un tirage.
 - « la ligne est hors de l'espace d'actions » : mesuré, faux (couverture **100 %
   au board**).
+- « le décodeur binaire est faux » : audité champ par champ contre
+  `playerop.cpp`, **19 messages sur 19 justes** (§9.25 (c)). Les trois
+  `ANNOUNCE_*` tuent la branche, mais `forced_default` vaut **zéro** sur les deux
+  étalons : c'est un risque latent, pas le mur.
 
 ## LIVRABLE ATTENDU
 
-1. **§9.25 — rapport d'audit**, un verdict par axe, chiffré.
-2. **La réponse de l'axe 1** — le couplage fantôme identifié, ou la démonstration
-   écrite qu'il n'existe pas.
-3. **Un tableau des 122 drapeaux** : jugé / réfuté / jamais jugé, avec la
-   proposition de suppression.
-4. **Une liste des constantes** avec, pour chacune, sa justification ou la
-   mention « pari non mesuré ».
-5. **Le verdict de l'axe 5** : NRPA est-il le bon algorithme pour un problème
-   d'atteignabilité, ou faut-il basculer le budget vers le finisseur complet ?
-6. Ce prompt régénéré.
+1. **§9.26** — un mode déterministe, son coût mesuré, et le diff à zéro.
+2. **L'A/B de la troncature à l'argmax**, mené en mode déterministe.
+3. **Les 17 suppressions**, avec la santé de chacune.
+4. Les deux instruments corrigés, et le compteur de ré-exploration posé.
+5. Ce prompt régénéré.
 
-**Ne pas ajouter de mécanisme. Si l'audit désigne un chantier, il sera la mission
-de la session 19 — pas de celle-ci.**
+**Ne pas ajouter de mécanisme de recherche.** Les chantiers 1 et 4 sont des
+instruments, le 2 est un correctif de crédit, le 3 est du retrait. Si l'audit
+d'une session ultérieure désigne un mécanisme, il aura un juge pour le mesurer —
+et c'est tout l'objet de celle-ci.

@@ -5467,3 +5467,516 @@ un seul est attaqué :
 C'est la même chose que la sonde d'offre a mesurée en (a) : `IDLECMD = 0`, `POSITION = 0`. Le
 levier qui reste est donc bien la **construction dirigée de la carte nommée** — c'est-à-dire la
 recherche à rebours du chantier 4, mais alimentée par un graphe qui a de quoi décomposer.
+
+---
+
+### 9.25 Session 18 : AUDIT — l'instrument de mesure du dossier est bimodal, et le couplage fantôme n'existe pas
+
+Mission : aucun mécanisme. Un rapport, un verdict par axe, chiffré. Code autorisé pour
+**instrumenter une hypothèse** ou **supprimer** — rien d'autre. Santé au repère avant et après
+(273 digests, 210/273, 209 candidates, 16 replays).
+
+Le résultat central n'était dans aucun des neuf axes tels que posés. Il est que **le juge principal
+de l'étalon B a un support allant de zéro à des milliers à configuration et graine identiques**, et
+que par conséquent une partie des verdicts du dossier — dont l'intégralité de §9.24 (o) — ne repose
+sur rien. Le reste de l'audit doit se lire à travers ce fait.
+
+---
+
+#### (a) AXE 1 — LE COUPLAGE FANTÔME N'EXISTE PAS, et la démonstration tient en un bras
+
+**Ce que l'attribution statique donne d'abord.** `Choice::card` est lu en huit points ; sous un run
+NU (`--assign-bias 0`, sans `--qhat`, sans `--fire`) six sont observationnels
+(`search.cpp:2189` compteur `hint_seen`, `3166` `bandit_code`, `3308` sonde, `main.cpp:5594` test
+adverse, `5805` labels du rapport) et **deux sont comportementaux** :
+
+| site | rôle | garde |
+|---|---|---|
+| `search.cpp:3032` | `hinted` des TIRAGES | `!cfg.hint_cards.empty()`, poids `cfg.hint_bias` |
+| `search.cpp:4316` | `hinted` du FINISSEUR (`RunLevin`) | idem — **et sans aucun test de `card_lossy`** |
+
+La prémisse de la mission — « avec `--assign-bias` à zéro, plus rien ne lit ce champ » — **est
+fausse**, et le dossier la portait déjà : §9.24 (n) écrit « quand les deux sont éteints […]
+l'allumer ne change rien », ce qui ne vaut que si `hint_cards` est **vide**. Or sur l'étalon B
+`hint_cards` n'est jamais vide : les deux `--resolve` y versent Omega et Trishula d'office
+(`main.cpp:6763`). Toute commande de l'étalon B porte donc le canal ouvert.
+
+**Et le correctif de la s17 n'a jamais été branché.** `Choice::card_lossy` est déclaré
+(`enumerate.h:53`), remis à zéro dans `Emit()` (`enumerate.h:82`) et lu une fois
+(`search.cpp:3032`). Il n'est **assigné `true` nulle part** — la recherche exhaustive sur les
+quatre fichiers sources ne rend que ces trois occurrences. Le garde est inerte ; le commentaire de
+`search.cpp:3028` décrit un comportement qui n'existe pas. C'est pourquoi la s17 a re-mesuré zéro
+et conclu « le couplage est ailleurs » : le correctif n'agissait pas.
+
+**LA MESURE, ET ELLE NE TOUCHE PAS AU CODE.** `--hint-bias 0` annule le seul canal comportemental
+sans rien recompiler. Sous ce drapeau, `--card-on-select` est **sémantiquement inerte** : il ne peut
+plus modifier un seul logit. Étalon B optimisé, 90 s, graine 888, quatre bras
+(`tools/s18_axe1.ps1`) :
+
+| bras | visibilité des indices | ≥1 | ≥2 | ≥3 | crête | approche écrite |
+|---|---|---|---|---|---|---|
+| témoin | 53 états | **0** | 0 | 0 | 0/8 | **3/8** (434 déc.) |
+| `--card-on-select` | 48 871 | **2 413** | 312 | **2** | **5/8** | **7/8** (231 déc.) |
+| `--hint-bias 0` | 36 789 | **2 172** | 171 | 0 | 0/8 | **7/8** (189 déc.) |
+| `--card-on-select --hint-bias 0` | 35 | **0** | 0 | 0 | 0/8 | **3/8** (434 déc.) |
+
+Les deux derniers bras ne diffèrent que par un drapeau **qui ne peut rien changer**, et ils tombent
+dans des états opposés. **Le drapeau n'est donc pas la cause** — ni dans ce bras, ni dans les
+autres. C'est la démonstration demandée.
+
+**RETRAIT.** La ligne de §9.24 (o) « `--card-on-select` seul : 2 239 → 0 » **n'est pas
+reproductible** : la même commande rend ici 0 → 2 413, c'est-à-dire le signe opposé. Elle est
+retirée du dossier. Avec elle tombent les deux affirmations qu'elle portait : que le drapeau
+détruise l'étalon B, et qu'un « couplage non identifié » reste à trouver.
+
+*Ce qui reste vrai et doit être corrigé un jour* : `card_lossy` est du code mort, et
+`search.cpp:4316` ne teste même pas le champ. Ce n'est plus un chantier de correction — c'est un
+chantier de **suppression** (axe 7).
+
+---
+
+#### (b) AXE 9 — LA VRAIE CAUSE : LE JUGE EST UN ÉVÉNEMENT RARE, PAS UNE MESURE BRUYANTE
+
+Le dossier écrit depuis la session 6 que « fixer la graine ne rend pas le run reproductible
+(échanges asynchrones entre workers) », et la s17 a chiffré cette variance à **×6**. **C'est une
+sous-estimation de nature, pas de facteur.**
+
+**RECENSEMENT DU TÉMOIN — configuration IDENTIQUE, graine IDENTIQUE (888), 90 s, cinq runs**
+(`s17B_temoin`, `s18a_temoin_888`, `s18n_m1/m2/m3`, `tools/s18_axe9.ps1`) :
+
+| run | `≥1` | approche écrite | décisions | ligne NRPA du bilan |
+|---|---|---|---|---|
+| `s17B_temoin` | **2 239** | 7/8 | 249 | best 7/8 |
+| `s18n_m1` | **89** | 6/8 | 202 | best 4/8 |
+| `s18a_temoin` | **0** | 3/8 | **434** | best 3/8 |
+| `s18n_m2` | **0** | 3/8 | **434** | best 3/8 |
+| `s18n_m3` | **0** | 3/8 | **434** | best 3/8 |
+
+**Cinq runs de la même commande : 0, 0, 0, 89, 2 239.** Médiane zéro, maximum deux mille. Ce n'est
+pas une mesure entachée d'un facteur 6 : c'est un **événement rare**, dont la moitié des tirages
+rendent zéro. Et le régime d'échec a une signature structurelle nette : la ligne court jusqu'au
+**plafond de décisions** (434 sur 435) sans jamais dépasser 3/8.
+
+Le départage se fait **avant le finisseur** — la ligne de bilan des tirages dit déjà 3/8 ou 7/8.
+Ce n'est pas un aléa de fin de course, c'est la phase NRPA elle-même.
+
+**AUCUN DRAPEAU NE PRÉDIT LE RÉSULTAT.** Runs de la s17 et de cette session réunis :
+
+| drapeaux | runs | résultats |
+|---|---|---|
+| aucun (témoin) | 5 | 2 239 · 89 · 0 · 0 · 0 |
+| `--card-on-select` | 4 | 2 413 · 0 · 0 · 0 |
+| `--hint-bias 0` | 1 | 2 172 |
+| `--card-on-select --hint-bias 0` | 1 | 0 |
+| « tout » | 2 | 641 · 0 |
+
+Le témoin nu rend les deux extrêmes ; `--card-on-select` aussi ; « tout » aussi. **À un tirage par
+bras et un taux de base de 2/5, aucune de ces lignes ne distingue quoi que ce soit.**
+
+**LA CAUSE MÉCANIQUE, et elle explique pourquoi un drapeau inerte suffit.** Un drapeau inerte
+*sémantiquement* ne l'est pas *temporellement* : allumer `card_on_select` rend `Choice::card` non
+nul sur tous les prompts de sélection, ce qui fait exécuter au compteur `hint_seen`
+(`search.cpp:2187-2195`) un `std::find` de plus par choix. Quelques nanosecondes. Or le run est
+décidé par le **temps** : les seize workers échangent leur meilleure séquence par `NrpaShared`
+(`search.cpp:3677`, `3709`), et le premier qui publie capture les quinze autres. C'est une
+dynamique du **vainqueur emporte tout** : une ouverture publiée tôt fixe le bassin pour tout le
+run. Le budget de 90 s ne laisse pas le temps d'en sortir.
+
+**CE QUE CELA RETIRE DU DOSSIER, et il faut l'écrire sans le tourner.** Tout A/B de l'étalon B à
+**un tirage par bras** ne mesure que le tirage. Cela vise nommément :
+
+- **§9.24 (o) en entier** : la réfutation de `--assign-bias` sur B (0 contre 2 239) est un tirage
+  modal contre un tirage de queue ; la « survie » du couple `--elide-forced --hindsight` (1 594) est
+  un tirage de queue ; le « découplage » (964) aussi. **Le second deck n'a rien réfuté et rien
+  confirmé.**
+- **§9.23 (d)** : `≥3` y valait « 0 dans quatre runs sur six », lecture déjà prudente — elle
+  devient une lecture de modes, et la prudence était justifiée pour la mauvaise raison.
+- Toute mesure de §9.22 (i) et suivantes lue sur `≥1` de l'étalon B à un run par bras.
+
+Ce qui **survit** : les mesures **sans graine** et à sortie structurelle — les 74,6 % de nœuds
+forcés, le ×2,1 de boards en exhaustif sous `--elide-forced`, le ×1,67 de `--canonical-digest`, les
+rapports états/boards de §9.24 (j), la couverture 100 % au board, la santé. Ce sont des faits de
+structure, pas des tirages.
+
+**LE MODE DÉTERMINISTE EST-IL ATTEIGNABLE ? NON — ET LA CAUSE N'EST PAS CELLE QU'ON CROYAIT.**
+`--threads 1` retire tout ce que le dossier accusait : l'échange asynchrone (`NrpaShared` n'a plus
+qu'un producteur), la table partagée (`main.cpp:3978` et `8695` exigent `n > 1`), la course du
+corpus vivant. Deux runs `--threads 1` à la même graine, mêmes octets de commande :
+
+| | tirages | états | adaptations | approche |
+|---|---|---|---|---|
+| `t1a` | 41 232 | 1 713 549 | 40 821 | 3/8, 434 déc. |
+| `t1b` | **42 179** | **1 753 144** | **41 758** | 3/8, 434 déc. |
+| `t1cos` (+ `--card-on-select`) | 41 655 | 1 732 458 | 41 240 | 3/8, 434 déc. |
+
+**`t1a` et `t1b` diffèrent — de 2,3 % sur le nombre de tirages.** Diff complet des deux relevés :
+38 lignes sur 392, toutes des durées ou des grandeurs qui en dépendent. La sortie structurelle,
+elle, est identique (3/8, 434 décisions), et le bras `t1cos` tombe **entre les deux témoins** :
+à un worker, le drapeau ne se distingue plus du bruit d'exécution.
+
+**LA CAUSE EST QUE LE BUDGET EST DU TEMPS DE MUR** (`--solve-ms`, `wcfg.time_limit_ms`), pas un
+compte d'itérations. Un worker unique fait un nombre de tirages différent à chaque exécution selon
+ce que fait la machine, donc s'arrête à un autre point de la trajectoire NRPA. Le nombre de threads
+n'y est pour rien : c'est l'unité du budget.
+
+**Ce qu'il faudrait, et c'est petit** : un budget en **tirages** (ou en nœuds — `max_nodes` existe
+déjà dans `SearchConfig` mais **n'est exposé par aucun drapeau**), plus `--threads 1`. Les deux
+ensemble donnent un run reproductible à l'octet près. Coût mesuré du mono-worker : 41 232 tirages
+contre 209 434 – 243 372 à seize, soit **÷5,1 à ÷5,9** — et non ÷16, parce qu'à seize un worker sur
+huit est glouton et que la contention coûte.
+
+C'est le chantier n°1 de la session 19, et il ne demande aucun mécanisme : un drapeau de budget.
+
+---
+
+#### (c) AXE 2 — LE DÉCODEUR BINAIRE EST JUSTE, ET TROIS PROMPTS TUENT LA BRANCHE
+
+Audit champ par champ de `enumerate.cpp` et `prompt.cpp` contre `deps/ocgcore/playerop.cpp`, pour
+les 19 types de `PromptName`. `loc_info` (`card.h:26`) vaut `controler u8 | location u8 |
+sequence u32 | position u32` = **10 octets**, et `kLocInfo` (`enumerate.cpp:144`) vaut bien 10.
+
+| message | disposition attendue (playerop.cpp) | décodée | verdict |
+|---|---|---|---|
+| `SELECT_BATTLECMD` | activable 4+1+1+**4**+8+1 = 19 ; attaquable 4+1+1+**1**+1 = 8 ; m2 u8, ep u8 | idem (`enum.cpp:331`) | **JUSTE** (correctif s17 vérifié) |
+| `SELECT_IDLECMD` | 5 listes, sauts 10/10/**7**/10/10 ; activation 19 ; **trois** drapeaux de fin | idem (`enum.cpp:247`) | **JUSTE** — réserve ci-dessous |
+| `SELECT_EFFECTYN` | playerid, code, loc_info, desc | non décodé (oui/non émis) | **JUSTE** (rien à lire) |
+| `SELECT_YESNO` | playerid, desc | non décodé | **JUSTE** |
+| `SELECT_OPTION` | playerid u8, **count u8**, count × u64 | idem (`enum.cpp:419`) | **JUSTE** |
+| `SELECT_CARD` | pid, cancel, min u32, max u32, n u32, (code + loc_info) | saut 10 | **JUSTE** |
+| `SELECT_CHAIN` | pid, spe u8, forced u8, 2 × u32, n u32, (code + loc_info + desc + mode) | idem | **JUSTE** |
+| `SELECT_PLACE` / `DISFIELD` | pid, count u8, flag u32 ; réponse 3 octets par pose | idem | **JUSTE** |
+| `SELECT_POSITION` | pid, code u32, positions u8 | idem | **JUSTE** |
+| `SELECT_TRIBUTE` | (code + 1 + 1 + **4** + release u8) → saut **7** | saut 7 | **JUSTE** |
+| `SELECT_COUNTER` | pid, type u16, count u16, n u32, (code + 1 + 1 + 1 + u16) | défaut, saut 4+1+1+1 puis u16 | **JUSTE** |
+| `SELECT_SUM` | pid, mode, acc, min, max, n_must, (code + loc_info + param) ×, n, idem × | sauts 18 et 18 | **JUSTE** |
+| `SELECT_UNSELECT_CARD` | pid, finishable, cancelable, min, max, n, (code+loc_info), n_un, … ; réponse `[1][index]` | idem | **JUSTE** |
+| `SORT_CARD` | pid, n u32, (code + ctrl u8 + **loc u32** + seq u32) | défaut : permutation identité, entrées non lues | **JUSTE** |
+| `ANNOUNCE_RACE` | pid, count u8, available u64 | **`DefaultResponse` rend `false`** | **BRANCHE TUÉE** |
+| `ANNOUNCE_ATTRIB` | pid, count u8, available u32 | **`false`** | **BRANCHE TUÉE** |
+| `ANNOUNCE_CARD` | pid, count u8, count × u64 (opcodes) | **`default: false`** | **BRANCHE TUÉE** |
+| `ANNOUNCE_NUMBER` | pid, count u8, count × u64 | index 0 | **JUSTE** |
+| `SELECT_DISFIELD` | = `SELECT_PLACE` | idem | **JUSTE** |
+
+**Aucun défaut de décalage ne subsiste.** Le défaut de §9.24 (h) était le seul, et il est corrigé.
+
+**Combien de fois en pratique ?** Zéro. Le compteur `forced_default` n'est imprimé que s'il est non
+nul (`main.cpp:881`) et il est **absent des deux relevés de cette session** (santé étalon A, run nu
+étalon B). Après le correctif BATTLECMD, aucun prompt n'est réduit ni tué sur nos deux decks. Les
+trois `ANNOUNCE_*` sont un **risque latent**, pas une perte mesurée — et il faut le dire ainsi
+plutôt que de leur imputer le mur.
+
+**RÉSERVE (`SELECT_IDLECMD`)** : le core accepte `t = 8` (mélanger la main,
+`playerop.cpp:153`) ; l'énumérateur lit le troisième drapeau de fin et ne l'émet jamais
+(`enumerate.cpp:304`, « sans effet sur le board »). C'est une réponse légale que le solveur ne joue
+pas. Le raisonnement tient tant qu'aucune pioche ne suit ; il ne tient pas si un effet lit l'ordre
+de la main. Non mesuré, faible.
+
+**DÉFAUT D'INSTRUMENT TROUVÉ ICI, et il fausse un chiffre du dossier.** `search.cpp:507` incrémente
+`stats.forced_default` **avant** d'essayer `DefaultResponse` ; quand celui-ci échoue, `out.Clear()`
+et la branche meurt, comptée **aussi** en `dead_ends`. Le texte imprimé — « N prompt(s) réduits à
+LA réponse par défaut » — est donc faux pour les `ANNOUNCE_*`, où la branche n'est pas réduite mais
+**supprimée**, et le même événement est compté deux fois. Le « 90 prompts forcés et 90 impasses »
+de §9.24 (h) n'est pas deux faits concordants : c'est **un fait compté deux fois**.
+
+---
+
+#### (d) AXE 3 — L'ÉTAT, LA CLÉ, ET CE QU'ELLE DISTINGUE
+
+**L'adversaire dans la clé.** `StateDigest` (`search.cpp:619`) boucle `for con = 0; con < 2` : douze
+`Query` et deux `Count` par digest, dont **la moitié sur l'adversaire**. En solitaire l'adversaire
+ne joue pas : ses zones sont invariantes sur tout le run, donc leur contribution au hachage est une
+**constante**. Réponse à la question de l'axe : l'adversaire coûte **zéro entropie de clé** et
+**la moitié des requêtes au core**. Ce n'est pas une question de clé, c'est une question de
+**débit**, et c'est pour cela qu'aucune mesure ne l'a jamais vue — le juge employé (états distincts)
+y est par construction aveugle. L'exception est l'étalon B, où le handrip fait partie du but : là,
+les zones adverses sont légitimes. Un digest à un joueur devrait donc être conditionné à
+« aucune exigence ne mentionne l'adversaire », ce que `RecipeGraph::ZoneMask` sait déjà exprimer.
+
+**`ProcessorState`.** Justification d'origine (patch C1) : distinguer deux instants d'une même
+résolution de chaîne. §9.24 (j) mesure ×1,00 aux points idle (pile vide) et une domination aux
+prompts intermédiaires (698 → 1 220 valeurs). **Or c'est exactement ce que `--elide-forced`
+retire** : 74,6 % des nœuds n'entrent plus dans la table. La justification de C1 ne porte donc plus
+que sur les 14,8 % de nœuds « autres » (sélections, chaînes) — et l'argument « la branche du combo
+est élaguée dès le début » n'a jamais été re-mesuré depuis. **À trancher en s19, et c'est une
+mesure d'un bras** : `--elide-forced` avec et sans la composante d'état de processeur. Le compteur
+qui rendrait la panne lisible existe déjà (`Duel::EmptyProcessorStates`, `duel.cpp:233`).
+
+**Le budget dans la table.** La transposition stocke `disc + 1` et ne coupe que si l'entrée
+existante vaut `>= disc + 1` (`search.cpp:2170-2177`). Un état revu avec **plus** de budget est
+donc ré-exploré — c'est voulu, mais **rien ne le compte** : `stats.transpositions` ne compte que la
+coupure. Le rapport ne peut pas dire si le mécanisme paie. **Instrument manquant, nommé.**
+
+**DÉFAUT D'INSTRUMENT, et il est silencieux.** `stats.distinct_by_depth` n'est incrémenté que sur
+le chemin de la table **privée** (`search.cpp:1853`, `1983`, `2175`). Or `tt_mb` vaut **64 par
+défaut** (`main.cpp:985`) et la table partagée est créée dès que `n > 1`. **Dans tout run
+multi-worker, ce compteur reste à zéro.** §9.24 (j) y échappe (`--growth` mène sa propre recherche),
+mais toute autre lecture d'« états distincts par profondeur » sur un run normal lit un zéro
+structurel et non une mesure.
+
+---
+
+#### (e) AXE 4 — LES CONSTANTES : CE QUI EST DÉRIVÉ, CE QUI EST UN PARI
+
+```
+Heuristic = common×100 + exact×10 + mzone_count×3 + fodder      (search.cpp:1392)
+material  = Heuristic + resolve_weight(250) × ResolveProgress   (search.cpp:2864)
+score     = material×1000 + novel_states                        (search.cpp:2867)
+but       = 1e12 − burned×1e9 − actions×1e5 − depth             (search.cpp:2757)
+```
+
+| constante | valeur | site | statut |
+|---|---|---|---|
+| `common` | ×100 | `search.cpp:1392` | **PARI**. Et terme nul sur toute la montée — cause mécanique nommée en §9.23 (h). |
+| `exact` | ×10 | idem | **PARI**. Départage deux boards de mêmes codes ; rapport à `common` jamais mesuré. |
+| `mzone_count` | ×3 | idem | **PARI**. « poids faible devant les cartes cibles » — le commentaire donne l'intention, pas la mesure. |
+| `fodder` (cimetière) | ×1 | idem | **PARI**, implicite : c'est l'unité. |
+| `material` | ×1000 | `search.cpp:2867` | **DÉRIVÉ par construction** — sépare les unités de `novel_states` ; correct tant que `novel_states < 1000`, jamais vérifié. |
+| `resolve_weight` | 250 | `search.h:2372` | **DÉRIVÉ d'une intention mesurée** (§9.11 : « les lignes 8/8 sans rip gagnaient la course ») ; la VALEUR reste un pari. |
+| `landmark_weight` ×1000, `recipe_weight` ×1000 | `search.cpp:2889`, `2910` | **DÉRIVÉ** : même échelle que `material`, explicitement. |
+| but : `burned` ×1e9, `actions` ×1e5, `depth` ×1 | `search.cpp:2757` | **DÉRIVÉ** : lexicographique, unités disjointes vérifiées en commentaire (`brûlées ≤ ~55`). |
+| hindsight : `depth` ×1e5, `steps` ×1 | `search.cpp:1225` | **DÉRIVÉ**, même schéma. |
+| `hint_bias` | 2.0 | `search.h:2000` | **PARI**. Et l'axe 1 montre qu'il porte un effet de premier ordre sur l'étalon B. |
+| `nrpa_bias_known` | 1.5 | `search.h:1999` | **DÉRIVÉ d'un raisonnement** écrit en `search.cpp:3018` (« avec +1,5 un prompt idle à ~10 choix terminerait le tour une fois sur trois ») — mais c'est le raisonnement qui a fait **retirer** le biais des changements de phase, pas qui a **posé** 1,5. |
+| `burn_slack` | 6 | `search.h` | **DÉRIVÉ d'une mesure** (pic de brûlées réel, marge 4). §9.12 : la borne ne coupe jamais — la constante est sans effet. |
+| `novelty_patience` | calibrée `--width` | | **DÉRIVÉ d'une mesure** (plus longue série muette : 17-18). Le seul cas exemplaire du dossier. |
+| `max_subsets` | 64 | `enumerate.h:118` | **DÉPARTAGÉ** : 24 et 256 donnent les mêmes trous (§9.24 (g)). |
+| budget tirages | ×0,7 du restant | `main.cpp:6913` | **PARI NON MESURÉ.** |
+| budget finisseur | ×0,8 du restant | `main.cpp:8558` | **PARI NON MESURÉ.** |
+| seuil `nrpa_level` | 180 s | `main.cpp:7105` | **DÉRIVÉ d'un défaut trouvé** (C15 : variable cachée dans plusieurs A/B). Rendu explicite ; la valeur reste un pari. |
+| part gloutonne | `id % 8 != 1` | `main.cpp:7074` | **DÉRIVÉ d'une mesure** (§9.10, crête 2/8 contre 7-8/8). |
+| `recipe_snap_period` | 2048 | `search.h` | **PARI**, mais c'est un compromis de coût, pas de recherche. |
+| `qhat_window` 4096, `qhat_rho` 32, `qhat_nodes` 65536 | `search.h` | **PARIS**, jamais balayés. |
+| `hindsight_k` | 16 | `search.h` | **PARI**, jamais balayé (drapeau `--hindsight-k` : zéro mention au dossier). |
+| `archive_k` | 0 / 16 / 24 | | **DÉPARTAGÉ** en s4 et s9. |
+
+**Bilan : sur vingt-deux constantes, cinq sont dérivées d'une mesure, six sont dérivées d'un
+raisonnement d'échelle, onze sont des paris.** Et les quatre du cœur du score — 100, 10, 3, 1 —
+sont toutes des paris, ce qui est exactement l'endroit où il ne fallait pas.
+
+**La sensibilité n'a PAS été balayée**, et c'est la mesure que cet audit ne fait pas : la
+bimodalité de (b) rend un balayage à un run par point sans valeur. **Le balayage de sensibilité est
+suspendu jusqu'à ce que le juge soit réparé.** C'est le bon ordre : mesurer la sensibilité sur un
+instrument bimodal produirait une carte de bruit qu'on prendrait pour une carte de réglage.
+
+---
+
+#### (f) AXE 5 — NRPA EST-IL LE BON ALGORITHME ? LA QUESTION EST MAL POSÉE, ET LE VRAI DÉFAUT EST À CÔTÉ
+
+Le diagnostic de la mission est juste sur le fond : NRPA optimise une séquence dans un espace où
+presque toute ligne est valide ; notre problème est l'atteignabilité. Mais **avant de changer de
+famille d'algorithme, il y a un défaut de crédit qui invalide la mise en œuvre actuelle**, et il
+est visible en deux lignes.
+
+**LE SCORE EST UN MAX SUR LES PRÉFIXES ; LE GRADIENT S'APPLIQUE À TOUTE LA LIGNE.**
+
+- `search.cpp:2912` : `if(sc > run.score) run.score = sc;` — le score du tirage est le maximum
+  atteint le long de la ligne, initialisé à 0 (`search.cpp:2452`).
+- `search.cpp:3422` : `for(const PolicyStep& s : run.steps)` — `AdaptRun` parcourt **tous** les
+  pas, sans troncature.
+
+Conséquence : une ligne qui culmine à 7/8 au pas 200 puis s'effondre pendant 230 pas voit ses
+**430** pas récompensés à `+alpha`, y compris les 230 qui ont détruit le board. La politique
+apprend l'effondrement avec la même force que la montée. C'est cohérent avec tous les symptômes
+listés :
+
+- convergence vers la Fusion la moins chère (les pas « poser un corps » sont sur-représentés dans
+  la queue des lignes) ;
+- l'approche du mode BAS fait **434 décisions** contre 189-258 au mode HAUT : le mode BAS est
+  précisément le régime où la ligne erre après son pic ;
+- 100 % de coupures de tour, c'est-à-dire des lignes qui vont jusqu'à épuisement.
+
+**Ce défaut se corrige en une ligne** (tronquer `run.steps` à l'indice du maximum avant
+adaptation) **et il est A/B-able**. C'est le chantier de la session 19, et il est plus petit et
+mieux fondé qu'un changement de famille d'algorithme.
+
+**LE FINISSEUR SEUL N'A JAMAIS ÉTÉ JUGÉ.** Vérifié : `--no-nrpa` ne donne pas le budget au
+finisseur, il remplace `RunNrpa` par `RunRollouts` glouton sur tous les workers
+(`main.cpp:7074`, `7159-7162`). Aucun drapeau n'existe pour « finisseur seul ». **Mais la mesure
+est possible sans code** : `--finisher-min` proche de `--solve-ms` affame les tirages
+(`main.cpp:6917` : `budget = min(0,7 × restant, solve_ms − spent − finisher_min)`). Elle n'a pas été
+faite ici, pour la raison de (b) : sur l'étalon B elle serait un tirage à pile ou face, et sur
+l'étalon A le juge (`POSITION`, invocations) reste à zéro pour Leo et Liger quel que soit le bras.
+
+**VERDICT DE L'AXE, sans complaisance.** Rien de ce qui est mesuré ne justifie de basculer le
+budget vers le finisseur — mais rien ne justifie non plus de le garder chez NRPA, **parce que la
+mesure n'existe pas**. Ce que l'audit peut dire, lui, c'est que le premier reproche à faire à NRPA
+n'est pas d'être NRPA : c'est d'être appliqué avec une récompense en MAX et un gradient sur la
+ligne entière. **Réparer le crédit avant de changer d'algorithme** — sinon on comparera le
+finisseur à un NRPA cassé, et on conclura en faveur du finisseur pour une raison qui n'est pas la
+bonne.
+
+---
+
+#### (g) AXE 6 — LE RÉGLAGE DÉGUISÉ : L'ÉTALON B N'A PAS DE RUN NU
+
+Le moteur ne compile aucun nom de carte : re-vérifié, et cela reste vrai. Ce n'est pas la question.
+
+**`--resolve` est un indice déguisé, et le dossier le savait à moitié.** §9.23 (h) l'avait noté
+(« `cfg.hint_cards.push_back(req.code)` »). L'audit ajoute la portée : `--resolve` verse au biais
+d'indices (`main.cpp:6763`), pose un gradient de `resolve_weight = 250` dans le score des tirages
+(`search.cpp:2864`) **et** une exigence au but. Trois mécanismes en un drapeau.
+
+**Conséquence, et c'est la plus lourde de l'axe : l'étalon B n'a AUCUN run nu.** Ses 47 scripts de
+banc sur 73 portent `--resolve`, et il ne peut pas en être autrement — sur B, `--resolve` **est**
+l'énoncé du but (le handrip). Toute mesure de l'étalon B est donc mesurée sous un triple indice, et
+la question « le solveur trouve-t-il seul ? » n'y a jamais été posée. L'étalon A a `--watch` pour
+cela ; l'étalon B n'a pas d'équivalent, parce que son but n'est pas un board mais des résolutions.
+**C'est un trou de dispositif, pas un réglage** — mais il rend le mot « générique » invérifiable
+sur celui des deux étalons où une solution existe.
+
+**Ce qui est réglé en regardant nos étalons** : les onze paris de (e) ; les 20 scripts de `tools/`
+sur 73 qui portent une liste `--hint` écrite à la main ; les 12 codes de cartes en dur dans
+`tools/`. Les bancs ne sont pas le produit — mais **toute conclusion tirée d'un banc indicé hérite
+de l'indice**, et §9.22 (c) a déjà mesuré que les cartes indicées classent **plus mal** que Gold Leo
+non indicée.
+
+**Mécanismes validés sur un seul étalon**, aujourd'hui : `--hindsight` (A seul — sa mesure sur B
+tombe avec (b)), `--elide-forced` (exhaustif : A seul ; tirages : A seul après (b)),
+`--canonical-digest` (A, réfuté), `--assign-bias` (A, et sa réfutation sur B tombe avec (b)).
+**Après cet audit, aucun mécanisme du solveur n'a passé les deux étalons.** C'est le prix de la
+bimodalité, et il faut l'écrire tel quel.
+
+**RÈGLE À INSTAURER, et elle est portée au README** :
+
+> Aucun mécanisme n'est retenu sans avoir passé les DEUX étalons, **et aucune mesure d'étalon B ne
+> vaut à un run par bras** tant que la bimodalité de §9.25 (b) n'est pas levée. Un A/B sur B se fait
+> à N runs par bras, et se lit sur la **proportion de modes**, pas sur la valeur du compteur.
+
+---
+
+#### (h) AXE 8 — LES INSTRUMENTS : UN QUATRIÈME FAUX VERDICT, ATTRAPÉ EN SÉANCE
+
+La s17 en avait trouvé trois. En voici un quatrième, et il a failli produire une conclusion fausse
+**dans cet audit même** — c'est pourquoi il est écrit en détail.
+
+**`hint_seen` (« visibilité des indices ») ne mesure pas ce que son nom dit.** Il compte les états
+où un choix porte un `Choice::card` présent dans `hint_cards` (`search.cpp:2187-2195` et `3261`).
+Il est donc sensible à **trois** choses à la fois : à `--card-on-select` (qui rend `card` non nul
+partout), **à la qualité du run** (une ligne qui atteint des états où Omega est invocable le voit
+souvent) et **au volume de travail** (il compte des états, pas des occasions). Relevés :
+
+| run | `card_on_select` | workers | issue | `hint_seen` |
+|---|---|---|---|---|
+| `s18a_temoin` | non | 16 | échec | 53 |
+| `s17B_temoin` | non | 16 | réussite | 29 452 |
+| `s17B_elhind` | non | 16 | réussite | 64 617 |
+| `s17B_cardsel` | **oui** | 16 | échec | 223 |
+| `s17B_assign3` | **oui** | 16 | échec | 529 376 |
+| `s18a_cos` | **oui** | 16 | réussite | 48 871 |
+| `s18n_t1cos` | **oui** | **1** | échec | **4** |
+
+J'ai d'abord lu ce compteur comme un témoin du drapeau, et conclu — en séance — que les bras de
+§9.24 (o) étaient **permutés**. C'était faux, et deux relevés le réfutent : `s17B_elhind` (sans le
+drapeau, run réussi) rend 64 617, donc la qualité seule suffit à produire des dizaines de milliers ;
+et `s18n_t1cos` (**avec** le drapeau, un seul worker) rend **4**, donc le drapeau seul ne garantit
+rien. **Un compteur à trois causes ne peut juger aucune des trois**, et celui-ci est en plus la
+seule sonde disponible pour vérifier qu'un bras porte bien son drapeau — ce qui en fait un contrôle
+d'étiquetage qui ne contrôle rien.
+
+*Ce qui l'aurait rendu utile* : le ventiler par TYPE de prompt, exactement comme la sonde d'offre a
+dû l'être en §9.24 (a). Le même correctif, sur le même défaut, deux sessions plus tard.
+
+**Revue des autres compteurs imprimés — sous quel drapeau cessent-ils d'être valides :**
+
+| compteur | mesure exactement | invalide sous |
+|---|---|---|
+| `hint_seen` | états où un choix porte un code indicé | `--card-on-select` (change la définition) **et** la qualité du run |
+| `forced_default` | prompts non énumérables — **avant** de savoir s'il existe un défaut | rien, mais **il surcompte** : les branches tuées y sont, et aussi dans `dead_ends` |
+| `distinct_by_depth` | états distincts par profondeur | **`--tt-mb` > 0 avec `n > 1`, c'est-à-dire le défaut** — reste à zéro |
+| `novel_states` (dans le score) | faits nouveaux le long du tirage | `--elide-forced` (÷~4, hypothèse s17 non vérifiée) |
+| `offer_steps` / POSITION | offres par type de prompt | `--elide-forced` pour POSITION (corrigé s17) |
+| `resolve_reached` | tirages atteignant ≥k résolutions | valide, mais **bimodal** — cf. (b) |
+| `transpositions` | coupures de la table | ne distingue pas la ré-exploration par budget |
+| `>=1/>=2/>=3` de l'étalon B | idem `resolve_reached` | **bimodal : ne juge rien à un run par bras** |
+| approche écrite k/8 | sortie structurelle | valide, et c'est le meilleur des deux — il sépare les modes sans compteur |
+
+---
+
+#### (i) AXE 7 — LES 122 DRAPEAUX
+
+Inventaire complet (`grep -oE '"--[a-z0-9-]+"' main.cpp`) : **122**, exactement le compte de la
+mission. Le tableau détaillé, drapeau par drapeau, est `docs/drapeaux.md`. Répartition :
+
+| catégorie | n | |
+|---|---|---|
+| **À SUPPRIMER** (réfuté, départagé négatif, ou A/B terminé) | **17** | **supprimer** |
+| à re-déclarer NON JUGÉS (verdict d'étalon B retiré par (b)) | 2 | requalifier |
+| JUGÉ ET RETENU | 14 | garder |
+| ÉNONCÉ DU CAS (entrée de ligne de commande) | 27 | garder |
+| INFRASTRUCTURE | 17 | garder |
+| INSTRUMENT (mesure, n'agit pas) | 8 | garder |
+| RÉGLAGE d'un mécanisme retenu | 13 | garder |
+| **JAMAIS JUGÉ** | **27** | trancher |
+
+**8 drapeaux sont parsés et ABSENTS de `--help`** : `--assign-bias`, `--canonical-digest`,
+`--card-on-select`, `--dive-full`, `--elide-forced`, `--max-decisions`, `--merged-pop`,
+`--subsets-ascending`. Dont `--elide-forced`, qui était jusqu'à cet audit le seul mécanisme
+présumé général de la s17.
+
+**17 drapeaux n'ont AUCUNE mention dans les 5 469 lignes du dossier** : `--arena-mb`, `--ctx-max`,
+`--fire-ms`, `--growth-max`, `--growth-ms`, `--hindsight-k`, `--keep-gc`, `--merged-pop`,
+`--no-arena`, `--no-qhat-probe`, `--no-seed-quant`, `--options-window`, `--qhat-nodes`,
+`--qhat-rho`, `--subsets-ascending`, `--target-subset`, `--verbose`. Sept sont de
+l'infrastructure ; **dix sont des mécanismes ou des réglages de mécanisme sur lesquels rien n'est
+écrit**.
+
+**PROPOSITION DE SUPPRESSION — 17 drapeaux, santé avant et après chacun :**
+
+| drapeau | verdict écrit | où |
+|---|---|---|
+| `--mcps` | RÉFUTÉ deux fois, effondrement total à k=6 | 9.19 (k), 9.21 |
+| `--nrpa-lr` | RÉFUTÉ | 9.19 |
+| `--recipe-w` | RÉFUTÉ, cause structurelle nommée (punit les invocations) | 9.24 (d) |
+| `--goal-bias` | RÉFUTÉ (Liger reste à zéro, fait tomber les autres Fusions) | 9.23 (h) |
+| `--canonical-digest` | RÉFUTÉ sur A (poses ÷2 et ÷12), cause : 3 Liens au deck | 9.24 (j) |
+| `--no-phase-change` | DÉPARTAGÉ NÉGATIF (allonge, ne change rien) | 9.24 (o) |
+| `--options-ctx` | RÉFUTÉ | 9.20 |
+| `--novelty-rollout-cut` | RÉFUTÉ | 9.22 |
+| `--archive-spread` | DÉPARTAGÉ : critère interne ×10, juges de recherche neutres à négatifs | 9.23 (e) |
+| `--backward` | RÉFUTÉ : mécanisme correct, MATIÈRE absente | 9.24 (e) |
+| `--options-len` / `--options-pool` / `--options-window` | RÉFUTÉS | 9.23 (g), 9.19 (g) |
+| `--subsets-ascending` | A/B d'attribution TERMINÉ (C9), zéro mention au dossier | — |
+| `--prior` / `--prior-weight` | mesure NEUTRE sur les deux étalons | 9.12 |
+| `--phs-canonical` | départagé, jamais retenu | 9.19 |
+
+**Ce qui ne peut PAS être supprimé alors qu'on le croyait tranché** — conséquence directe de (b) :
+`--assign-bias` et `--card-on-select` n'ont **pas** été réfutés sur B ; leur réfutation était une
+lecture de mode. Ils restent opt-in, **non jugés**, et c'est un statut plus honnête que « réfuté ».
+
+**Les 30 jamais jugés**, dont les plus lourds : `--finisher-options` (écrit, jamais jugé — §9.24 le
+dit lui-même), `--canonical-zones` (jamais départagé, signalé depuis la s15), `--hindsight-k`,
+`--options-window`, `--target-subset`, `--qhat-rho`, `--qhat-nodes`, `--ctx-max`, `--merged-pop`,
+`--dive-full` / `--no-dive-full`, `--lifo-ties`, `--finisher-post-goal`, `--fire-open`,
+`--fire-bake`, `--no-seed-quant`, `--derive-summon-min`, `--material`, `--growth-max`,
+`--growth-ms`, `--fire-ms`, `--no-merged-pop`, `--adapt-passes`, `--no-burn-share`,
+`--burn-limit`, `--options-support`, `--target-exact`, `--board-add`, `--board-remove`,
+`--guard-off`, `--no-qhat-probe`.
+
+**Supprimer un mécanisme réfuté n'est pas une perte.** Le dossier garde la trace ; le code n'a pas
+à la porter. Aucune suppression n'est faite dans cette session : la mission interdit d'y toucher
+autrement que pour supprimer, et **supprimer avant que le juge de santé soit fiable serait
+prématuré** — c'est le premier travail mécanique de la s19, un drapeau à la fois, santé avant et
+après.
+
+---
+
+#### (j) CE QUE CET AUDIT LAISSE, DANS L'ORDRE
+
+1. **Réparer le juge.** Sans mode reproductible, aucun A/B fin n'est possible et toute la
+   discipline de mesure du dossier repose sur du sable — la mission le disait, et la mesure le
+   confirme au-delà de ce qu'elle craignait (bimodal, pas ×6). Deux voies, dans cet ordre :
+   *(i)* un mode strictement déterministe et son coût en débit ; *(ii)* à défaut, **N runs par
+   bras et lecture en proportion de modes**.
+2. **Tronquer `run.steps` à l'argmax du score avant `AdaptRun`.** Un défaut de crédit, une ligne,
+   A/B-able, et il explique le régime à 434 décisions.
+3. **Supprimer les 13 drapeaux réfutés**, santé entre chacun.
+4. **Ventiler `hint_seen` par type de prompt**, et corriger le double comptage de `forced_default`.
+5. Seulement ensuite : la sensibilité des onze paris, et la question de l'axe 5 (finisseur seul,
+   par `--finisher-min`).
+
+**Ce que l'audit NE dit pas, et qu'il serait tentant de lui faire dire** : il ne dit pas que les
+mécanismes de la s17 sont mauvais. Il dit qu'**on ne sait pas**, parce que l'instrument qui devait
+les juger rend deux valeurs à configuration identique. `--elide-forced` garde ses acquis sans
+graine (+61 % de débit, ×2,1 de boards en exhaustif) ; `--hindsight` garde sa séparation de
+supports sur l'étalon A à deux graines. Ce sont les deux seuls résultats de la s17 que le juge de
+l'étalon B n'atteint pas.

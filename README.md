@@ -310,5 +310,36 @@ branche du combo est élaguée dès le début.
   long de la ligne de référence, qui sont deux à deux distinctes par
   construction.
 
+## La règle de mesure (session 18)
+
+**Aucun mécanisme n'est retenu sans avoir passé les DEUX étalons.** La session 17
+l'a établi par l'exemple : `--assign-bias` gagne ×27 sur Lunalight avec une
+chaîne causale vérifiée, et un second deck a suffi à le remettre en cause. Un
+mécanisme validé sur un seul étalon est une hypothèse, pas un résultat.
+
+**Et aucune mesure de l'étalon B ne vaut à UN RUN PAR BRAS.** L'audit de la
+session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la
+*même* graine : le juge « résolutions atteintes par tirage » y rend
+**0, 0, 0, 89, 2 239**. Médiane zéro, maximum deux mille. Ce n'est pas une mesure
+bruyante, c'est un **événement rare** — un A/B à un tirage par bras ne mesure que
+le tirage.
+
+La cause n'est pas le nombre de workers : deux runs `--threads 1` à la même
+graine font 41 232 et 42 179 tirages, parce que **le budget est du temps de mur**
+(`--solve-ms`) et non un compte d'itérations. Tant qu'un budget en tirages ou en
+nœuds n'existe pas, aucun run n'est reproductible.
+
+Conséquence pratique, à appliquer sans exception :
+
+- sur l'étalon B, **N runs par bras**, et la lecture porte sur la **proportion**
+  d'exécutions qui aboutissent, jamais sur la valeur d'un compteur ;
+- les faits **sans graine** (couverture, boards distincts en exhaustif, facteurs
+  de fusion de table, santé) restent les juges les plus sûrs du dossier ;
+- la sortie **structurelle** (l'approche écrite `k/8` et son nombre de décisions)
+  sépare les régimes sans passer par un compteur — la préférer.
+
+`docs/drapeaux.md` tient l'inventaire des 122 drapeaux : jugé, réfuté, jamais
+jugé, et la proposition de suppression.
+
 `docs/combo-solver-design.md` détaille les arbitrages, les mesures et les
 impasses — y compris celles qui ont été abandonnées, et pourquoi.
