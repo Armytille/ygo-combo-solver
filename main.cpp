@@ -1363,6 +1363,9 @@ struct Options {
 	// PHASE 1 — l'entree en Battle Phase (donc la Main 2) est retiree de
 	// l'enumeration, « -> End Phase » reste.
 	bool mp1_only = false;
+	// Le domaine en TOURS (--turns, s22quater) : 0/1 = un tour (historique),
+	// 2 = la ligne traverse le tour adverse (fenetres rapides seulement).
+	uint64_t turns = 0;
 	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3) : re-serialisation depuis la
 	// meilleure cellule-frontiere quand sp_max stagne depuis N tirages
 	// mesures. 0 = eteint — un mecanisme est un drapeau le temps de le
@@ -2159,6 +2162,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--max-rollouts", &Options::max_rollouts },
 				{ "--max-nodes",    &Options::max_nodes },
 				{ "--refine-after", &Options::refine_after },
+				{ "--turns",        &Options::turns },
 			};
 			bool matched = false;
 			for(const auto& f : kU64Flags)
@@ -3629,6 +3633,9 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	cfg.max_rollouts = opt.max_rollouts;
 	if(opt.max_nodes)
 		cfg.max_nodes = opt.max_nodes;
+	// Le domaine en TOURS (s22quater) : --turns 2 laisse la ligne traverser
+	// le tour adverse (le 2e rip d'Omega y vit). 0 = defaut = 1 tour.
+	cfg.max_turns = opt.turns ? static_cast<uint32_t>(opt.turns) : 1u;
 
 	// Les quatre leviers de la session 17 et leurs suites. Tous sont LUS sous
 	// garde de `cfg.recipes` (search.cpp:2556) : les cabler sans graphe est sur

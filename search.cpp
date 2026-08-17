@@ -2014,7 +2014,13 @@ bool Search::DescendGuided(uint32_t depth, uint32_t actions, uint32_t turns,
 	}
 	// Le board cible est celui de la fin du tour 1 : passe ce point, le board
 	// du joueur est fige et toute la descente en dessous est du temps perdu.
-	if(total_turns >= 2) {
+	// `max_turns` (s22quater) : le 2e rip d'Omega de la reference VIT dans le
+	// tour ADVERSE (Omega se bannit au 1er rip, revient a la standby d'en
+	// face) — `--resolve Omega:2` etait structurellement hors du domaine, et
+	// aucun budget ne pouvait le franchir. `--turns 2` laisse la ligne
+	// traverser le tour adverse, ou nos seules decisions sont les fenetres
+	// rapides (rip, garde) ; defaut 1 = comportement historique a l'octet.
+	if(total_turns >= cfg.max_turns + 1) {
 		++stats.turn_cuts;
 		return false;
 	}
@@ -2130,7 +2136,7 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 		// est moins chere. C'est la classe de lignes que l'arret au but
 		// rendait structurellement introuvable.
 	}
-	if(total_turns >= 2) {
+	if(total_turns >= cfg.max_turns + 1) {
 		++stats.turn_cuts;
 		return false;
 	}
@@ -2334,7 +2340,7 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 		// est moins chere. C'est la classe de lignes que l'arret au but
 		// rendait structurellement introuvable.
 	}
-	if(total_turns >= 2) {
+	if(total_turns >= cfg.max_turns + 1) {
 		++stats.turn_cuts;
 		return false;
 	}

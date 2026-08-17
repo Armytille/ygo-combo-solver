@@ -2105,6 +2105,12 @@ struct SearchConfig {
 	// quotas FRAIS (4 bits du score, eviction et tournoi de re-entree). Faux
 	// par defaut : cable en un seul point avec quota_hosts.
 	bool quota_fresh_pref = false;
+	// s22quater — LE DOMAINE EN TOURS (--turns, defaut 1 = l'historique a
+	// l'octet). A 2, la ligne traverse le tour ADVERSE : nos seules decisions
+	// y sont les fenetres rapides (le 2e rip d'Omega, la garde), l'adversaire
+	// passe tout. Necessaire des qu'un --resolve exige une resolution qui vit
+	// dans le tour d'en face — la reference de l'etalon B le fait.
+	uint32_t max_turns = 1;
 	// LA DISCIPLINE « PAS DE NEGATION SUR SES PROPRES CARTES » (s22ter,
 	// demande operateur — meme famille que --no-activate/--no-chain : une
 	// CONTRAINTE de ligne choisie, pas un elagage de qualite, la regle 2 est
