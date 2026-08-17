@@ -540,6 +540,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			// indices — les invocations etaient biaisees, jamais les
 			// activations en chaine.
 			c.card = code;
+			// L'effet engage (s22ter) : la precision de --no-self-negate.
+			c.desc = desc;
 			SetLabel(c, opt, "chainer ", code);
 		}
 		if(!r.Ok()) {

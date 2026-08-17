@@ -215,6 +215,38 @@ uint32_t Duel::Count(uint8_t team, uint32_t loc) {
 	return OCG_DuelQueryCount(handle, team, loc);
 }
 
+bool Duel::LastChainLink(uint8_t* trigger_player) {
+	const std::vector<uint8_t>& b = ProcessorState();
+	// Layout : voir le patch OCG_DuelQueryProcessorState (ocgapi.cpp), la
+	// source de verite. phase u16, turn i16, turn_player u8, puis par joueur
+	// (lp i32, summon_count i32, used_location u32, extra_p_count u32), puis
+	// unites (u32 n + 3n octets), sous-unites (idem), puis la chaine
+	// (u32 n + 11n octets : chain_id u16, joueur u8, event u32, flag u32).
+	size_t off = 2 + 2 + 1 + 2 * 16;
+	auto take_u32 = [&](uint32_t& v) {
+		if(off + 4 > b.size())
+			return false;
+		std::memcpy(&v, b.data() + off, 4);
+		off += 4;
+		return true;
+	};
+	uint32_t n = 0;
+	if(!take_u32(n) || off + 3ull * n > b.size())
+		return false;
+	off += 3ull * n;   // unites
+	if(!take_u32(n) || off + 3ull * n > b.size())
+		return false;
+	off += 3ull * n;   // sous-unites
+	if(!take_u32(n) || n == 0 || off + 11ull * n > b.size())
+		return false;
+	off += 11ull * (n - 1) + 2;   // dernier maillon, apres son chain_id
+	if(off >= b.size())
+		return false;
+	if(trigger_player)
+		*trigger_player = b[off];
+	return true;
+}
+
 const std::vector<uint8_t>& Duel::ProcessorState() {
 	prof::Scope ps(prof::kProcState);
 	uint32_t len = 0;

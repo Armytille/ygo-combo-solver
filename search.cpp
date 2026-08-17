@@ -55,7 +55,26 @@ uint64_t MatScore(double score) {
 }
 
 constexpr uint32_t kBoardFlags = QUERY_CODE | QUERY_ALIAS | QUERY_POSITION |
-								 QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LINK;
+								 QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LINK |
+								 QUERY_LEVEL | QUERY_STATUS;
+
+// LE MASQUE DE STATUT QUI COMPTE POUR LES REGLES (s22ter, audit de
+// transposition). Le mot de statut du core porte surtout des drapeaux de
+// MOTEUR (SUMMONING, BATTLE_RESULT, INITIALIZING...) dont le hachage
+// eclaterait la table pour rien — le SUR-hachage perd des fusions, l'autre
+// panne. On ne garde que ce qui change la LEGALITE d'un coup FUTUR :
+//   DISABLED       la carte est negatee (Imperm...) : ses effets n'existent
+//                  plus — fusionner « negatee » et « active » faisait
+//                  disparaitre des lignes sans le signaler ;
+//   PROC_COMPLETE  invocation EN REGLE : decide si un ReviveLimit la laisse
+//                  ranimer — la legalite exacte que le modele s22 approxime ;
+//   FORBIDDEN      inactivable ;
+//   SET_TURN       posee CE tour (un piege pose ce tour ne s'active pas) ;
+//   *_SUMMON_TURN  invoquee/flip ce tour (tributs, restrictions de tour).
+constexpr uint32_t kDigestStatusMask =
+	STATUS_DISABLED | STATUS_PROC_COMPLETE | STATUS_FORBIDDEN |
+	STATUS_SET_TURN | STATUS_SUMMON_TURN | STATUS_SPSUMMON_TURN |
+	STATUS_FLIP_SUMMON_TURN;
 
 // Zones CACHEES (main, cimetiere, banni, extra) : materiaux, compteurs et
 // fleches de lien n'y existent pas — les cartes y ont perdu leurs overlays en
@@ -89,6 +108,17 @@ uint64_t EntryOf(uint32_t loc_kind, const QueriedCard& c, const CardDB& db,
 	h = Mix(h, goal_view ? ((c.position & POS_FACEUP) ? POS_FACEUP
 													  : POS_FACEDOWN)
 						 : c.position);
+	// s22ter — DEUX SOUS-HACHAGES CORRIGES, jamais dans la vue de BUT (une
+	// cible posee a la main est un code et une face, pas un niveau du
+	// moment) : le NIVEAU courant (les modificateurs de niveau changent la
+	// legalite d'une Synchro/Xyz — deux etats qui n'en different que par lui
+	// n'ont pas les memes coups) et le STATUT filtre par le masque ci-dessus.
+	// Les zones cachees ne demandent pas ces champs (kHiddenFlags) : ils y
+	// valent zero, melange constant, valeur inchangee entre elles.
+	if(!goal_view) {
+		h = Mix(h, c.level * 7ull);
+		h = Mix(h, (c.status & kDigestStatusMask) * 11ull);
+	}
 	// Les materiaux comptent, leur ordre non.
 	std::vector<uint32_t> ov;
 	ov.reserve(c.overlay.size());
@@ -524,6 +554,35 @@ bool Search::FillChoices(ChoiceList& out) {
 	// et des questions oui/non.
 	if(prompt_player != cfg.target_player)
 		out.KeepOnlyLast();
+	// LA DISCIPLINE --no-self-negate (s22ter). Fenetre de chaine du joueur,
+	// NON forcee (la derniere option est le declin : reponse -1 — une fenetre
+	// forcee n'en emet pas, et une obligation de regle ne se filtre pas), et
+	// le dernier maillon de la chaine est A NOUS : les effets de NEGATION
+	// declares (paires (code, desc) de la table, desc 0 = toute la carte) ne
+	// sont pas proposes. Le declin reste toujours.
+	if(cfg.self_negate && !cfg.self_negate->empty() &&
+	   prompt_type == MSG_SELECT_CHAIN && prompt_player == cfg.target_player &&
+	   out.size() > 1) {
+		const Choice& last = out[out.size() - 1];
+		const bool declinable =
+			last.response.size() == 4 && last.response[0] == 0xff &&
+			last.response[1] == 0xff && last.response[2] == 0xff &&
+			last.response[3] == 0xff;
+		uint8_t link_player = 255;
+		if(declinable && duel.LastChainLink(&link_player) &&
+		   link_player == cfg.target_player) {
+			for(size_t i = out.size() - 1; i-- > 0;) {
+				bool banned = false;
+				for(const auto& [bc, bd] : *cfg.self_negate)
+					banned = banned || (out[i].card == bc &&
+										(bd == 0 || out[i].desc == bd));
+				if(banned) {
+					out.RemoveAt(i);
+					++stats.self_negate_cuts;
+				}
+			}
+		}
+	}
 	if(out.empty()) {
 		// Prompt non enumerable : on tente la reponse par defaut plutot que de
 		// laisser la branche mourir. C'est une REDUCTION A UNE BRANCHE, et elle
@@ -616,6 +675,21 @@ DigestParts StateDigestParts(Duel& d, uint8_t prompt_type,
 		}
 		h = Mix(h, d.Count(con, LOCATION_DECK));
 		hs = Mix(hs, d.Count(con, LOCATION_DECK));
+		// s22ter — L'ORDRE DU DECK EST UN ETAT DE JEU : pioches, excavations
+		// et retournements le lisent, et deux chemins qui laissent le meme
+		// etat VISIBLE peuvent laisser des ordres differents (un melange de
+		// recherche consomme le RNG). Le fusionner faisait disparaitre des
+		// lignes sans le signaler — la famille du sous-hachage (README).
+		// Hache TEL QUEL, jamais trie : l'ordre est precisement l'etat.
+		// (Deux etats au meme ordre mais a position RNG differente restent
+		// fusionnes : un melange est ALEATOIRE au sens des regles, toute
+		// permutation legale se vaut — equivalence choisie et ecrite.)
+		static thread_local std::vector<uint32_t> deck_codes;
+		d.QueryCodes(con, LOCATION_DECK, deck_codes);
+		for(uint32_t dc : deck_codes) {
+			h = Mix(h, dc * 13ull);
+			hs = Mix(hs, dc * 13ull);
+		}
 	}
 	out.zones = h;
 	out.zones_sorted = hs;
@@ -676,6 +750,12 @@ uint64_t StateDigest(Duel& d, uint8_t prompt_type,
 				h = Mix(h, e);
 		}
 		h = Mix(h, d.Count(con, LOCATION_DECK));
+		// s22ter : l'ordre du deck, meme raison et meme forme que dans
+		// StateDigestParts — les deux copies DOIVENT rester synchrones.
+		static thread_local std::vector<uint32_t> deck_codes;
+		d.QueryCodes(con, LOCATION_DECK, deck_codes);
+		for(uint32_t dc : deck_codes)
+			h = Mix(h, dc * 13ull);
 	}
 	h = Mix(h, prompt_type);
 	h = MixBytes(h, prompt_payload.data(), prompt_payload.size());

@@ -56,7 +56,7 @@ double MsSince(Clock::time_point t0) {
 // SUPPRIME — c'est la distinction que la session 8 n'avait pas.
 struct CutCounts {
 	uint64_t constraint = 0, guard = 0, turn = 0, bound = 0, claim = 0,
-			 subsets = 0;
+			 subsets = 0, selfneg = 0;
 	// --- ce qui n'est PAS un elagage, mais une amputation de l'espace ---
 	uint64_t forced = 0;          // prompts reduits a la reponse par defaut
 	uint64_t forced_mask = 0;     // quels types de prompts
@@ -81,6 +81,7 @@ struct CutCounts {
 	void Add(const SearchStats& s) {
 		constraint += s.constraint_cuts;
 		guard      += s.guard_cuts;
+		selfneg    += s.self_negate_cuts;
 		turn       += s.turn_cuts;
 		bound      += s.edges_skipped;
 		claim      += s.claim_denied;
@@ -912,6 +913,11 @@ void PrintCuts(const CutCounts& c) {
 				(unsigned long long)c.constraint, (unsigned long long)c.guard,
 				(unsigned long long)c.turn, (unsigned long long)c.bound,
 				(unsigned long long)c.claim, (unsigned long long)c.subsets);
+	// Vie de --no-self-negate (s22ter) : options de chaine retirees.
+	if(c.selfneg)
+		std::printf("           discipline : %llu negation(s) sur soi "
+					"retiree(s) (--no-self-negate)\n",
+					(unsigned long long)c.selfneg);
 	// `impasses` est le symptome n°1 du jeu de scripts decale — la defaillance
 	// que ce depot redoute le plus — et il n'etait imprime qu'en mode --width,
 	// c'est-a-dire muet exactement la ou elle se produirait (1.9). `nouveaute`
@@ -1347,6 +1353,12 @@ struct Options {
 	// d'effets a la place de la derivation par les duaux du LP. Un drapeau le
 	// temps d'une mesure — les deux derivations s'impriment dans tous les cas.
 	bool quota_legacy = false;
+	// DISCIPLINE (s22ter, demande operateur) : ne jamais proposer une
+	// NEGATION du joueur sur son propre maillon de chaine (Crystal Wing,
+	// Zalen, Silver Hound...). Famille de --no-activate/--no-chain — une
+	// contrainte choisie, pas un elagage de qualite. Les effets vises se
+	// derivent de la table declaree (categories NEGATE/DISABLE), zero nom.
+	bool no_self_negate = false;
 	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3) : re-serialisation depuis la
 	// meilleure cellule-frontiere quand sp_max stagne depuis N tirages
 	// mesures. 0 = eteint — un mecanisme est un drapeau le temps de le
@@ -1509,6 +1521,10 @@ struct LineConstraints {
 	// Cartes jamais chainees par le joueur cible (--no-chain, codes
 	// canoniques) : elaguees a l'ENUMERATION des fenetres de chaine.
 	std::vector<uint32_t> no_chain;
+	// Effets de NEGATION du deck (--no-self-negate) : paires (code canonique,
+	// desc ; desc 0 = toute la carte), derivees de la table declaree apres le
+	// chargement des scripts. Jamais proposes sur un maillon A NOUS.
+	std::vector<std::pair<uint32_t, uint64_t>> self_negate;
 	// Minimum de resolutions d'effet, filtre par zone d'ACTIVATION (--resolve
 	// "carte[@zone][:n]" ; cf. ResolveReq — l'effet de cimetiere d'Omega ne
 	// compte pas pour le handrip, faux positif mesure).
@@ -2102,6 +2118,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--operators",        &Options::operators },
 				{ "--op-recipes",       &Options::op_recipes },
 				{ "--quota-legacy",     &Options::quota_legacy },
+				{ "--no-self-negate",   &Options::no_self_negate },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -4272,6 +4289,8 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	}
 	if(!cons.no_chain.empty())
 		cfg.enumeration.no_chain = &cons.no_chain;
+	if(!cons.self_negate.empty())
+		cfg.self_negate = &cons.self_negate;   // s22ter : discipline choisie
 	const bool ref_meets_cons = ReportConstraints(cons, ref, db);
 
 	// Ligne de reference relevee une fois pour tous les workers : digests
@@ -7711,6 +7730,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.enumeration.no_activate = &cons.no_activate;
 	if(!cons.no_chain.empty())
 		cfg.enumeration.no_chain = &cons.no_chain;
+	if(!cons.self_negate.empty())
+		cfg.self_negate = &cons.self_negate;   // s22ter : discipline choisie
 	// Verdict informatif : ici la reference joue sur un AUTRE deck, sa
 	// conformite ne conditionne aucun invariant — mais elle dit si le plan
 	// servi en repertoire respecte lui-meme la contrainte demandee.
@@ -7888,7 +7909,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// l'audit, et c'est la seule facon de repondre a la question
 			// laissee ouverte par le §9.11 : la garde elague-t-elle utilement,
 			// ou rase-t-elle l'espace ?
-			uint64_t constraint_cuts = 0, guard_cuts = 0;
+			uint64_t constraint_cuts = 0, guard_cuts = 0, self_negate_cuts = 0;
 			// Options (chantier 17) : prises / decisions absorbees / avortees.
 			uint64_t macro_taken = 0, macro_absorbed = 0, macro_aborted = 0;
 			size_t ctx_entries = 0;
@@ -8149,6 +8170,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.refine_top_hits += s.Stats().refine_top_hits;
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
+					m.self_negate_cuts += s.Stats().self_negate_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
 					m.ctx_entries = (std::max)(m.ctx_entries,
 											   s.Stats().ctx_entries);
@@ -8457,6 +8479,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)m.turn_cuts,
 						100.0 * double(m.constraint_cuts + m.guard_cuts +
 									   m.turn_cuts) / double(m.rollouts));
+			// Vie de --no-self-negate (s22ter).
+			if(m.self_negate_cuts)
+				std::printf("      %-7s discipline : %llu negation(s) sur soi "
+							"retiree(s)\n", mi ? "NRPA" : "glouton",
+							(unsigned long long)m.self_negate_cuts);
 		}
 		// PROFIL DE PROGRESSION PAR TIRAGE (s21) — l'instrument que 9.32
 		// nommait, et le verdict qu'il rend est binaire : un PIC unique dans
@@ -10332,6 +10359,61 @@ int main(int argc, char** argv) {
 	scripts.Init(opt.workdir, opt.scriptdirs);
 	std::printf("  dossiers scripts  : %zu%s\n", scripts.Dirs().size(),
 				opt.scriptdirs.empty() ? "" : "  (override)");
+
+	// --no-self-negate (s22ter) : les effets de NEGATION du deck se derivent
+	// ICI, au seul endroit ou base, scripts et decks coexistent avant tous
+	// les modes. Codes = deck du joueur cible du gabarit, plus la decklist
+	// --deck si donnee (surensemble : une paire sans carte ne matche rien).
+	// Categories lues dans constant.lua ; zero nom de carte compile.
+	if(opt.no_self_negate) {
+		std::vector<uint32_t> sn_codes;
+		const int tp0 = opt.target_player;
+		if(yrp && tp0 >= 0 &&
+		   static_cast<size_t>(tp0) < yrp->decks.size())
+			for(const auto* l :
+				{ &yrp->decks[tp0].main, &yrp->decks[tp0].extra })
+				for(uint32_t c : *l)
+					sn_codes.push_back(c);
+		if(!opt.deck_file.empty()) {
+			Deck ydk;
+			std::string derr;
+			if(LoadYdk(opt.deck_file, ydk, derr))
+				for(const auto* l : { &ydk.main, &ydk.extra })
+					for(uint32_t c : *l)
+						sn_codes.push_back(c);
+		}
+		ConstantTable snkt;
+		uint64_t c_negate = 0, c_disable = 0;
+		if(!snkt.Load(scripts) ||
+		   (!snkt.Lookup("CATEGORY_NEGATE", c_negate) &
+			!snkt.Lookup("CATEGORY_DISABLE", c_disable))) {
+			std::printf("!! --no-self-negate : constantes illisibles "
+						"(constant.lua absent ?) — discipline ETEINTE, dit "
+						"plutot que tue.\n");
+		} else if(!sn_codes.empty()) {
+			OperatorTable sntbl;
+			sntbl.Build(db, scripts, snkt, sn_codes);
+			std::string listing;
+			for(const auto& [code, co] : sntbl.All())
+				for(const DeclaredEffect& e : co.operators) {
+					if(!e.at_init ||
+					   !(e.category & (c_negate | c_disable)))
+						continue;
+					const uint32_t cc = db.Canonical(code);
+					cons.self_negate.emplace_back(
+						cc, e.has_desc ? e.desc_value : 0ull);
+					listing += db.Name(cc) + " ; ";
+				}
+			std::sort(cons.self_negate.begin(), cons.self_negate.end());
+			cons.self_negate.erase(std::unique(cons.self_negate.begin(),
+											   cons.self_negate.end()),
+								   cons.self_negate.end());
+			std::printf("  discipline --no-self-negate : %zu effet(s) de "
+						"negation derive(s) : %s\n",
+						cons.self_negate.size(),
+						listing.empty() ? "(aucun)" : listing.c_str());
+		}
+	}
 
 	int major = 0, minor = 0;
 	OCG_GetVersion(&major, &minor);

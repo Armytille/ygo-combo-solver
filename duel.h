@@ -91,6 +91,14 @@ public:
 	// instants distincts d'une meme resolution ont le meme digest et la
 	// recherche elague la branche du combo (patch C1).
 	const std::vector<uint8_t>& ProcessorState();
+	// LE DERNIER MAILLON DE LA CHAINE COURANTE (s22ter, --no-self-negate).
+	// Rend faux si aucune chaine n'est en cours ; sinon ecrit le joueur
+	// declencheur du maillon le plus recent. Decode le blob de ProcessorState
+	// (layout : le patch OCG_DuelQueryProcessorState d'ocgapi.cpp — c'est LUI
+	// la source de verite) plutot que de suivre MSG_CHAINING : un compteur
+	// membre se desynchroniserait aux restaurations d'arene, et une
+	// suppression a tort est la mauvaise direction (elle coupe un vrai coup).
+	bool LastChainLink(uint8_t* trigger_player);
 
 	bool LoadScript(const std::string& name);
 	bool ExecLua(const std::string& code, const std::string& chunk_name = " ");

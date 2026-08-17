@@ -37,6 +37,11 @@ struct Choice {
 	// positionner) — 0 si le choix n'en engage aucune. Support des indices de
 	// domaine (--hint) : "cette carte-la, essaie-la plus souvent".
 	uint32_t card = 0;
+	// Description de l'effet engage (s22ter) — la meme valeur u64 que le
+	// message transporte (aux.Stringid). 0 hors des fenetres de chaine.
+	// C'est elle qui donne a --no-self-negate sa precision d'EFFET : une
+	// carte peut porter une negation ET un autre effet rapide.
+	uint64_t desc = 0;
 	// L'IDENTITE CI-DESSUS EST APPROXIMATIVE sur les prompts de SELECTION sous
 	// `card_on_select` : un sous-ensemble de k > 1 cartes n'a pas d'identite, et
 	// l'on retient arbitrairement son premier code. Le VOLET `*_sel` de
@@ -66,6 +71,14 @@ struct Choice {
 // les reutilise.
 class ChoiceList {
 public:
+	// Retire le choix i (s22ter, --no-self-negate) : compactage en place, la
+	// derniere option (decliner) garde sa place de derniere.
+	void RemoveAt(size_t i) {
+		for(size_t j = i; j + 1 < used; ++j)
+			store[j] = std::move(store[j + 1]);
+		if(used)
+			--used;
+	}
 	Choice& Emit() {
 		if(used == store.size())
 			store.emplace_back();
@@ -75,6 +88,7 @@ public:
 		c.edge = 0;
 		c.plan_key = 0;
 		c.card = 0;
+		c.desc = 0;
 		// LE POOL REUTILISE SES ELEMENTS : tout champ ajoute a `Choice` doit etre
 		// remis a zero ici, sous peine de fuiter d'une decision a l'autre. La
 		// leçon vient d'un defaut reel (session 17) : un drapeau non reinitialise

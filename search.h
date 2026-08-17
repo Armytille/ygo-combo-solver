@@ -2105,6 +2105,15 @@ struct SearchConfig {
 	// quotas FRAIS (4 bits du score, eviction et tournoi de re-entree). Faux
 	// par defaut : cable en un seul point avec quota_hosts.
 	bool quota_fresh_pref = false;
+	// LA DISCIPLINE « PAS DE NEGATION SUR SES PROPRES CARTES » (s22ter,
+	// demande operateur — meme famille que --no-activate/--no-chain : une
+	// CONTRAINTE de ligne choisie, pas un elagage de qualite, la regle 2 est
+	// sauve). Paires (code canonique, desc) des effets de NEGATION declares
+	// du deck (categories NEGATE/DISABLE de la table s19 — aucun nom
+	// compile) ; desc 0 = tout effet de la carte. Nul ou vide = eteint. La
+	// coupe ne s'applique qu'aux fenetres de chaine NON forcees dont le
+	// dernier maillon est au joueur cible.
+	const std::vector<std::pair<uint32_t, uint64_t>>* self_negate = nullptr;
 	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3). Le run nu n'a pas de ligne
 	// de reference : quand la frontiere STAGNE (aucun gain de sp_max depuis
 	// `refine_after` tirages mesures — le seuil est IMPRIME), le prochain
@@ -2933,6 +2942,10 @@ struct SearchStats {
 	// --- contraintes ---
 	uint64_t constraint_cuts = 0;   // branches coupees par --summon
 	uint64_t guard_cuts = 0;        // branches coupees par la garde (--guard)
+	// Options de chaine retirees par --no-self-negate (s22ter). La VIE de la
+	// discipline : a zero avec le drapeau arme, soit la fenetre ne s'est
+	// jamais presentee, soit le cablage est mort — les deux se lisent.
+	uint64_t self_negate_cuts = 0;
 	// --- objectif de cout anytime ---
 	uint64_t burn_cuts = 0;         // tirages coupes par la borne brulees
 	// sqrt-LTS : nombre de noeuds developpes qui ont RE-ENRACINE la recherche
