@@ -1789,7 +1789,30 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		if(sp2)
 			++stats.refine_top_hits;
 	}
-	const uint32_t sp_eff = (std::min)(sp + sp2, 127u);
+	// LES RUNGS DE RESOLUTION (s22quater). Le run nu discipline de l'etalon B
+	// a monte 6/6 du board SANS un rip, et >=2 rips sans board : le score
+	// classait le progres d'echelle (bits 56+) au-dessus des resolutions
+	// (bits 44-48), donc « board+1 sans rip » dominait « board-1 avec 2
+	// rips » et la frontiere grimpait en ignorant le handrip. Les resolutions
+	// exigees (--resolve) sont des SOUS-BUTS au meme titre que les barreaux
+	// du bilan : elles entrent dans le progres d'echelle ET dans la cle de
+	// cellule — deux etats au meme board mais a rips differents cessent de
+	// partager un representant, et le retour au barreau re-entre aussi des
+	// cellules rippees (le rejeu de prefixe re-accumule `resolved`). Garde de
+	// perimetre : rien sans serialisation armee ni --resolve — l'etalon A et
+	// tous les modes sans rip sont inchanges a l'octet pres.
+	uint32_t rp_rungs = 0;
+	uint64_t rvec = 0;
+	if(!cfg.serial_reqs.empty() && !cfg.resolve_min.empty()) {
+		rp_rungs = rp;
+		for(size_t i = 0; i < cfg.resolve_min.size() && i < 4; ++i) {
+			const uint32_t got = (std::min)(
+				static_cast<uint32_t>((resolved >> (16 * i)) & 0xffff),
+				cfg.resolve_min[i].min_count);
+			rvec |= static_cast<uint64_t>((std::min)(got, 15u)) << (4 * i);
+		}
+	}
+	const uint32_t sp_eff = (std::min)(sp + sp2 + rp_rungs, 127u);
 	// Score : sous --resolve, les RESOLUTIONS d'abord — le verrou mesure est
 	// la jonction rips+board, et les racines qui la franchissent sont les
 	// etats deja rippes, pas les 8/8 muets. A egalite, le chemin le plus
@@ -1869,7 +1892,8 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		cfg.serial_reqs.empty()
 			? here.hash
 			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
-			   (sp2_vec * 0x9E3779B97F4A7C15ull));
+			   (sp2_vec * 0x9E3779B97F4A7C15ull) ^
+			   (rvec * 0xA24BAED4963EE407ull));
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
