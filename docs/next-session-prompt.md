@@ -1,348 +1,287 @@
-# Session 20 — LA CONSOMMATION, et le biais d'opérateur qui n'a jamais été jugé
+# Session 22 — L'UNIVERSALITÉ SE CALCULE : l'extraction cardinale, les duaux du LP, et l'échelle qui se raffine elle-même
 
 Tu reprends `combosolver` (racine `d:\ProjectIgnis\replay2video\combosolver`).
 
-La session 19 a fait ce que trois sessions avaient sauté : **vérifier que le
-modèle décrit le jeu avant de bâtir dessus**. Le harnais d'opérateurs passe, il
-a trouvé deux défauts dans du code écrit la veille, et le nœud qui manquait au
-graphe est posé — `--backward` n'est plus « un mécanisme correct sur un graphe
-amputé ».
+La session 21 a obtenu **le premier Liger de l'histoire du run nu** (`>=1` dans
+1 972 tirages à 900 s, tenu en proportion : 2 graines sur 3 après
+assainissement), par une chaîne entièrement mesurée : forme close →
+échelle x* → retour au barreau → dépoisonnement → (board, quotas) en clé de
+cellule. Elle a aussi **audité sa propre généricité** et trouvé un cas avéré de
+fine-tuning de récompense (le barreau @BANNIE, Goodharté en deux runs par la
+négation de Silver) — retiré, avec la règle extraite.
 
-Lis `README.md` (les trois règles), puis `docs/combo-solver-design.md` **§9.27**
-(le Lua, la cascade mesurée) et **§9.28** (le harnais, les deux défauts, le
-re-jugement de `--backward`), puis `docs/drapeaux.md`.
-La bibliographie est faite (§9.22 (h), §9.23 (c), §9.24) : ne la refais pas.
+**Ta mission** : rendre le solveur UNIVERSEL — c'est-à-dire remplacer chaque
+choix aujourd'hui ajusté à la main par un CALCUL, et étendre la couverture du
+modèle pour que la chaîne s'arme sur n'importe quel deck. Le critère n'est pas
+« ça marche sur Lunalight » : c'est « la même commande rend h fini, sous-buts,
+quotas et conversion sur l'étalon B, sans une ligne spécifique ».
 
----
-
-## CE QUE LA SESSION 19 A ÉTABLI, ET QUI NE SE REDÉMONTRE PAS
-
-**Le harnais passe.** Sur le plan résolu (283 décisions, 0 `MSG_RETRY`, 2 Liger) :
-37 activations, **0 non appariée**, 18/18 préconditions de zone tenues, 10/10 de
-ressource. La table d'opérateurs extraite des scripts **décrit le jeu**.
-
-**Le recensement des états accordés rend les deux pivots**, par un balayage de
-constantes et sans nommer une carte :
-
-```
-Lunalight Kaleido Chick  ->  EFFECT_ADD_CODE
-Lunalight Masquerade     ->  EFFECT_EXTRA_FUSION_MATERIAL
-```
-
-**Le nœud « code ACQUÉRABLE » est posé** (`--op-recipes`), et la décomposition à
-rebours — désormais **imprimée** — contient enfin l'opérateur :
-
-| | témoin | `--op-recipes` |
-|---|---|---|
-| sous-produits | 2 — Liger, Bagooska | **3 — Leo Dancer, Liger, Bagooska** |
-| exigences | Leo @zone jouable · archétype `0xdf` ×3 · niveau ×2 | + **Leo @EXTRA** · **KALEIDO CHICK @TERRAIN** |
-
-### Trois faits neufs à garder sous les yeux
-
-1. **`aux.Stringid(id, n)` = `(n & 0xfffff) | code << 20`**, et non `id*16 + n`.
-   Le décalage est **lu** dans `utility.lua`, jamais supposé. La version fausse
-   laissait `Choice::card` à **zéro** sur tous les `MSG_SELECT_YESNO` — le pivot
-   du combo était invisible au biais d'indices et aux sondes, en silence.
-2. **Le core FABRIQUE des descriptions.** `processor.cpp:743` émet `221` et
-   `:443` émet `0` pour « activer l'effet déclencheur de cette carte ? ». Le
-   message porte la **carte**, pas l'**effet** : **11 activations sur 37** ne
-   sont identifiables qu'au grain de la carte. C'est une **borne du protocole**,
-   pas un défaut d'extraction — et elle plafonne ce que l'identité
-   `(code, description)` de la s18ter peut séparer.
-3. **La table est déclarative et OPTIMISTE.** Conditions et coûts sont des
-   fermetures, non évaluées. Pour aller plus loin il faut le patch d'ocgcore qui
-   expose `peffect->get_category()` sur `MSG_SELECT_IDLECMD` — le projet l'a déjà
-   fait pour `OCG_DuelQueryProcessorState`.
+Lis `README.md` (les trois règles), `docs/rapport-session-21.md` (la synthèse),
+`docs/combo-solver-design.md` **§9.33** (le détail, dont (e) la forme close et
+(k)(l) les mécanismes), et `docs/etat-de-lart-consommation.md`. La
+bibliographie est faite — ne la refais pas.
 
 ---
 
-## CHANTIER A — JUGER `--op-bias`, ET IL N'A JAMAIS ÉTÉ MESURÉ
+## CE QUE LA S21 A ÉTABLI, ET QUI NE SE REDÉMONTRE PAS
 
-Écrit en session 19, **instrumenté, VIVANT, jamais jugé**. C'est le chantier 2 du
-dossier : depuis les faits de but non satisfaits, remonter aux opérateurs
-disponibles, et **biaiser la politique sur les décisions `IDLECMD`**.
-
-**Sa vie est déjà mesurée et non nulle** (étalon A nu, déterministe, 4 000
-tirages, `--recipes 0 --op-recipes --op-bias 3`) :
-
-```
-biais d'OPERATEUR : 1 carte(s) designee(s) par la decomposition ;
-                    704 decision(s) en offraient une, 666 l'ont prise (94,60 %)
-```
-
-La carte désignée est **Kaleido Chick**, et c'est la bonne. **Il ne reste donc
-que l'effet à juger** — et 94,6 % de prise à `w = 3` est un candidat sérieux à
-l'effondrement de diversité, donc `w` doit être balayé avant tout verdict.
-
-*Ce qu'il fait, et en quoi il diffère de `--assign-bias`* : ce dernier désigne
-des **matériaux** et mord sur les prompts de **sélection** ; `--op-bias` désigne
-des **opérateurs** — les cartes dont la décomposition exige la présence **sur le
-terrain** — et mord sur « que jouer ».
-
-*L'arithmétique qui le justifie, et elle est la seule à autoriser un levier* :
-le plan résolu fait 143 décisions **libres**, dont **32 seulement** sont des
-`IDLECMD`. La politique plafonne à **66 %** d'accord par décision ; il en
-faudrait 91 % sur 143. Mais `0,66^32 ≈ 1,7 × 10⁻⁶`, soit de l'ordre d'un succès
-par run de 90 s. Un plan ne remplace pas l'échantillonnage : il **conditionne la
-distribution sur les 32 décisions qui comptent**.
-
-**Le protocole, et il n'est pas négociable :**
-
-1. **Relire la VIE à chaque changement.** À `M = 0` le mécanisme est INERTE et
-   aucun juge de recherche ne le concerne. Le dossier a payé **trois** sessions
-   pour avoir sauté cette lecture (§9.26 (e), §9.28 (c), §9.28 (f)).
-2. Puis l'étalon A **nu**, `--recipes 0 --op-recipes --op-bias <w>`, juge :
-   la colonne « Kaleido Chick — renommage activé » passe-t-elle au-dessus de
-   **0,14 %** ? C'est **le goulot mesuré** (§9.27 (c)), et c'est exactement ce
-   que ce biais vise.
-3. Balayer `w` (1, 3, 6) : un poids est un pari tant qu'il n'est pas balayé.
-4. Puis l'étalon B, **N runs, lecture en proportion**.
-
-**Règle 2 du dossier, non négociable : un plan est un BIAIS, jamais un
-élagage.** Si le planificateur se trompe, l'échantillonneur couvre encore
-l'espace.
-
-## CHANTIER B — LA CONSOMMATION
-
-3 Liger = **3 codes-Leo + 9 corps Lunalight + 3 portes**, dont deux Wolf (un par
-copie) et une Masquerade payée par une défausse.
-
-C'est la leçon de §9.24 (d), et elle a déjà tué `--recipe-w` : *une heuristique
-h^add sur un graphe ET/OU n'est correcte que si la CONSOMMATION est modélisée* —
-la relaxation par suppression suppose qu'atteindre un sous-but ne détruit rien,
-hypothèse **exactement fausse** ici.
-
-Le graphe sait désormais dire ce qu'un opérateur **exige** ; il ne sait toujours
-pas dire ce qu'il **détruit**. La matière est là et **elle n'est branchée sur
-rien** : 54 déclarations `Duel.SetOperationInfo` (catégorie *et* zone) et les
-verbes (`SendtoGrave`, `Remove`, `DiscardHand`) relevés par fonction dans
-`CardOperators::fn_verbs` sont extraits, imprimés, et lus par **personne**
-(`operators.cpp:1102` les compte, `:1208` les imprime).
-
-**Et ce n'est pas une amélioration, c'est une condition de correction.** §9.28 (h)
-l'a mesuré : douze arêtes d'acquisition sur treize décrivaient des routes qui
-**détruisent le but** — « Chick acquiert le code de Liger » coûte un Liger de
-l'extra, et le but en demande trois. Le critère qui les a retirées est un
-pis-aller (« le code est-il nommé comme matériau ? ») ; le vrai critère est la
-consommation.
-
-*Un fait du core à ne pas re-découvrir* : `card::get_code()` **ignore** tout
-`EFFECT_ADD_CODE` portant une **opération**. Un Chick renommé n'apparaît jamais
-comme Liger au board — aucun faux positif sur `--target`, et c'est garanti par le
-core, pas supposé.
-
-Deux gardes, écrites parce que la première version du chantier 1 les rendait
-fausses, et qui valent pour celui-ci :
-
-- `Requirement::zone` est **un seul seau** : il ne sait pas dire « DECK ou
-  EXTRA ». Toute nouvelle arête doit trancher la zone sur un **fait** (le deck),
-  jamais sur une normalisation en aveugle ;
-- une arête qui boucle sur elle-même (acquérir son propre nom) coûte à chaque
-  niveau de récursion dans un graphe déjà cyclique.
-
-## CHANTIER C — LA DETTE MÉCANIQUE, ET ELLE A CHANGÉ
-
-1. **`--backward` n'est plus à retirer.** Le chantier 1 l'a ressuscité :
-   `docs/drapeaux.md` §A doit être corrigé, et la suppression annulée.
-2. **`--prior` / `--prior-weight`** restent neutres sur les deux étalons : à
-   retirer, santé avant et après.
-3. Les **27 jamais jugés** de `docs/drapeaux.md`, plus `--op-bias`. Attention :
-   `--canonical-zones` **casserait le combo** (les Zones Pendule sont des
-   séquences particulières de `LOCATION_SZONE`, et Wolf n'invoque que de là) —
-   le départager tel quel rendrait un verdict faussement négatif.
-4. **La promotion est FAITE pour deux des trois.** `--adapt-to-peak` et
-   `--hindsight 0.5` sont le **défaut** (étalon B, dix runs par bras : `>=2`
-   passe de **3/10 à 9/10**) ; `--no-adapt-to-peak` et `--no-hindsight` rejouent
-   l'A/B. **`--elide-forced` NON** — voir le chantier D, qui est plus grave.
-
-## CHANTIER D — UN SEUL POINT DE CÂBLAGE, ET C'EST LA TROISIÈME FOIS
-
-`cfg.elide_forced` n'était assigné **qu'à un seul endroit** :
-`RunGrowthMeasurement`. Ni `RunSolve` ni `RunTransplantSolve` ne le câblaient.
-**Trois sessions de bancs lui ont passé le drapeau sur le chemin de RECHERCHE, où
-il ne faisait rien** — preuve déterministe : `3000 tirages, 149334 états,
-3002 adaptations` **à l'octet près** avec et sans (§9.28 (f)). Câblé, il rend
-186 915 états contre 149 334 à tirages égaux.
-
-**C'est la troisième occurrence du même piège**, après `--assign-bias`
-(§9.26 (e)) et le `Choice::card` des prompts oui/non (§9.28 (c)). « Un mécanisme
-doit imprimer sa vie » ne suffit pas : ici, il n'y avait **rien à imprimer**.
-
-*La règle qui manque, et elle est mécanique* : **tout champ de `SearchConfig`
-doit être assigné depuis `Options` en UN SEUL point de câblage.** Trois
-`SearchConfig` sont construits dans `main.cpp` — `RunSolve` (3938),
-`RunTransplantSolve` (6238), `RunGrowthMeasurement` (9191) — et **aucun contrôle
-ne dit lequel oublie quoi**. Le premier travail est de le lire, champ par champ,
-et de faire converger les trois vers une fonction unique. C'est mécanique, c'est
-falsifiable, et cela vaut plus qu'un mécanisme de plus.
-
-**Conséquence immédiate à ne pas oublier** : `--hindsight` et `--adapt-to-peak`
-ne sont câblés que dans `RunTransplantSolve`. Le mode `--solve` **même-deck** (le
-contrôle de santé !) n'en a jamais vu un seul — c'est structurel, pas un hasard,
-et cela explique que la santé soit restée identique à travers la promotion.
-
-**Et `--elide-forced` redevient NON JUGÉ sur la recherche.** Les « +61 % de débit,
-×2,1 de boards » de §9.24 (k) ont été mesurés avec `--growth`, le seul chemin qui
-le câblait. Son défaut reste **éteint** : un correctif de câblage ne vaut pas une
-mesure. Le juger là où il agit désormais est un A/B propre et pas cher.
-
-## CHANTIER E — UNE SONDE QUI NE REND PAS LA PIÈCE
-
-Le run de 300 s (§9.28 (i)) laisse un écart **nommé et non élucidé** :
-
-```
-Lunalight Liger Dancer : >=1 0   <-- aucune invocation dans cette phase
-      ATTEINT :  terrain 3  cimetiere 380  bannie 2
-```
-
-Trois tirages où un Liger est en zone de terrain, zéro invocation comptée.
-**Trois pistes, aucune vérifiée** : la sonde lit l'octet 15 de `MSG_MOVE` **sans
-le contrôleur** (`search.cpp:322`) ; `NormalizeZone` **confond MZONE et SZONE** ;
-et l'histogramme `>=N` est **par phase** quand `ATTEINT` est **cumulé**.
-
-**Et l'instrument manque pour trancher.** La sonde compte des tirages, qui sont
-éphémères : *aucun replay n'est écrit* quand une carte surveillée atteint une
-zone surveillée. Le seul artefact du run est `best_approach_1of4.yrp`, et son
-`1/4` est **Bagooska** (vérifié par rejeu). Trois tirages sur 779 101, c'est
-peut-être le premier Liger de l'histoire du dossier — ou un défaut de compteur.
-**On ne peut pas le savoir**, et c'est exactement ce qu'un instrument doit
-empêcher.
-
-Le correctif est petit : écrire le `.yrp` du tirage qui déclenche une entrée
-`ATTEINT` sur une carte surveillée (plafonné, un par carte et par zone). Une
-sonde qui ne rend pas la pièce ne permet pas de vérifier son propre verdict.
-
-## CE QUI RESTE OUVERT, ET QUI N'EST PAS DE CETTE SESSION
-
-- **`ProcessorState` est-il encore nécessaire ?** ×1,00 aux points idle, et
-  `--elide-forced` retire 74,6 % des prompts intermédiaires de la table. La
-  justification du patch C1 n'a pas été re-mesurée. **Faisable maintenant** en
-  mode déterministe.
-- **L'adversaire dans la clé** : `StateDigest` boucle sur les deux joueurs, la
-  moitié des requêtes porte sur un adversaire qui ne joue pas. Question de
-  **débit**, pas de clé.
-- **Le finisseur seul n'a jamais été jugé.** `--finisher-min` proche de
-  `--solve-ms` le fait sans code.
-- **La sensibilité des 11 paris** du score (100, 10, 3, 1, `hint_bias` 2,0,
-  `resolve_weight` 250, budgets ×0,7 et ×0,8, `qhat_*`, `hindsight_k`).
-  **Faisable maintenant** : le mode déterministe existe.
-- **L'étalon B n'a aucun run nu** — `--resolve` y est l'énoncé du but *et* un
-  triple indice.
-- **Les scripts Lunalight ne sont PAS dans l'export épinglé** : ils viennent de
-  l'installation vivante via le repli `assets.cpp:253` (`<workdir>/script`).
-  `MSG_RETRY = 0` aujourd'hui ; rien ne le garantit demain. **Et la table
-  d'opérateurs hérite du même risque** : elle est lue par le MÊME
-  `ScriptProvider`, donc un décalage de scripts décale aussi la table.
-- **Un troisième deck** reste le seul juge de généralité, et il n'existe pas.
+- **La forme close** : coût d'un run sérialisé = `Σ b^(ℓᵢ)`, dominé par
+  `b^(ℓ_max)` ; seuil de correction **ℓ_max ≤ ~8 décisions à choix**. Le grain
+  le plus fin gagne toujours (`q* = L·ln b > L`).
+- **Le retour au barreau** (`--reenter`, défaut 0,5) fonctionne : 0 rejeu
+  échoué sur 1,5 M de ré-entrées, frontière ×12 en proportion. La moitié de
+  SIW_R qui manquait aux tirages est en place.
+- **L'état pertinent est (board, quotas)** : ni le digest, ni les atomes, ni la
+  cellule ne voyaient un compteur d'usage — le représentant « chemin court »
+  était systématiquement l'état qui n'avait pas payé ses igniteurs. Corrigé
+  par le compteur de chemin (MSG_CHAINING, 1 bit × 12 hôtes, bits 52-63 de la
+  clé). **C'est ce correctif qui a donné le premier Liger.**
+- **Deux poisons de récompense trouvés et retirés**, avec la règle : *un
+  barreau de consommation ne vaut que si la consommation est un PASSAGE OBLIGÉ
+  du plan — jamais quand un coût quelconque peut le servir* (Liger@CIMETIÈRE :
+  l'échelle récompensait la destruction du but ; @BANNIE : la négation de
+  Silver bannissait le Leo-matériau en coût, 98,9 % de suicides récompensés).
+- **La mécanique convertit quand elle est proche** : isolation `--approach
+  liger.yrpX` → 3/3 retrouvé depuis recul 10 (667 exp.) et recul 20 (14 303).
+- **Le juge « ≥1 Liger » est un ÉVÉNEMENT RARE** (0,13 % des tirages au
+  meilleur run) : 1 972 → 260 → 0 sur trois runs voisins de la même config.
+  **N graines par bras, lecture en proportion, toujours.**
+- **La sonde de généralité (étalon B Synchron)** : la machinerie tourne
+  (149 places, 34 transitions, 65/65), la garde dit la vérité — mais les
+  Synchros n'ont AUCUN producteur (`Synchro.AddProcedure` non extraite) →
+  h = ∞ → l'échelle refuse de s'armer. **Tout l'édifice s21 n'est opérationnel
+  que sur les combos Fusion.**
 
 ---
 
-## MÉTHODE
+## CHANTIER 1 — L'EXTRACTION CARDINALE (la fondation, TROIS gains)
+
+`Fusion.AddProcMixN(c, ..., 24550676, 1, IsSetCard(...), 3)` porte des codes
+dans l'appel — c'est pour cela que les Fusions sont couvertes. Les procédures
+`Synchro.AddProcedure`, `Xyz.AddProcedure`, `Link.AddProcedure`,
+`Ritual.AddProcedure` portent des **comptes et des filtres** (niveau, tuner,
+matériaux min/max) qui ne remplissent pas `unresolved_counts` aujourd'hui.
+
+À extraire (même niveau de difficulté que `SetCountLimit` et `aux.Stringid`,
+qui se sont lus) : le **compte de matériaux** de chaque procédure, versé dans
+`DeclaredRecipe::unresolved_counts`. Ne PAS extraire le niveau/type exigé si
+tu ne peux pas le lire — « N monstres » est plus faible que la vérité, donc
+`h` reste admissible (règle de sous-contrainte de 9.30).
+
+**Trois gains, chacun avec son juge :**
+
+| gain | juge (gratuit, 0,2 s) |
+|---|---|
+| Bagooska a un producteur | `--target "90590304@DEF"` : la sérialisation s'ARME à 4 buts (aujourd'hui « aucun sous-but posé ») |
+| les véhicules d'extra entrent dans x* → barreaux dans les déserts | banc du profil des écarts sur `liger.yrpX` : ℓ_max descend sous 33 |
+| tout deck non-Fusion | sonde de généralité étalon B : `h` FINI + sous-buts posés + quotas dérivés |
+
+**Piège nommé d'avance** : le LP « fusionne directement » — ajouter les
+recettes des véhicules ne suffit PAS à les faire tirer par x* (mesuré en s21 :
+ils ne sont pas requis par le plan relaxé). Le gain sur les déserts passe par
+le chantier 3, pas par l'espoir.
+
+---
+
+## CHANTIER 2 — LES DUAUX DU LP REMPLACENT LES CHOIX À LA MAIN
+
+Le fine-tuning de la s21 n'était pas des noms de cartes : c'était des **règles
+de sélection itérées jusqu'à couvrir les pivots de l'étalon** (trois versions
+de la dérivation des hôtes à quota « jusqu'à ce que Wolf apparaisse » ; le
+choix des classes ADD_CODE/EXTRA_FUSION_MATERIAL). La dérivation principielle
+est DANS le solveur :
+
+1. **Quotas = contraintes de capacité ACTIVES à l'optimum.** Le simplexe rend
+   déjà les coûts réduits ; expose les **duaux des lignes de borne** (`x_o ≤
+   u_o`). Une capacité saturée par x* (dual > 0, ou x*_o = u_o) désigne un
+   opérateur dont le quota LIE le plan — son hôte est un hôte à quota, calculé
+   et non choisi. Remplace la dérivation actuelle de `quota_hosts_wiring`
+   (garde-la en A/B témoin le temps d'une mesure).
+2. **Habilitants = hôtes des transitions tirées par x*** (x*_t > 0), pas des
+   classes d'effets choisies. Les barreaux de présence @EN JEU se dérivent de
+   là — Chick et Masquerade doivent en RESSORTIR, pas y être poussés.
+3. **Représentant de cellule** : à score de progrès égal, préférer l'état aux
+   **ressources liantes non dépensées** (les mêmes duaux croisés avec les
+   compteurs de quota du chemin) au lieu du chemin court. C'est le défaut qui
+   a coûté trois runs de 600-900 s.
+
+**Vie obligatoire** : imprime les contraintes actives et les hôtes dérivés
+(« QUOTAS suivis (duaux) : ... ») — la s21 a vu trois dérivations fausses
+UNIQUEMENT parce que la ligne de vie existait.
+
+---
+
+## CHANTIER 3 — LA RE-SÉRIALISATION DEPUIS LA FRONTIÈRE (l'échelle auto-raffinante)
+
+Le run nu n'a pas de ligne de référence — le banc du profil des écarts ne peut
+pas le guider. Mais l'histogramme `sp_final` sait dire « la frontière se
+COMPRIME contre un mur » (mesuré : 17-19 unités avant le correctif quotas).
+La réponse générique au « couper plus fin » de la forme close :
+
+- au déclencheur (frontière comprimée : part de la masse dans les k derniers
+  barreaux au-dessus d'un seuil, à définir et IMPRIMER),
+- prendre les meilleures cellules-frontière, y résoudre le LP (le marquage se
+  lit du duel — `BalanceModel::Solve` le fait déjà à ~2 ms),
+- sérialiser sur le **x\* restant** : ses places non encore servies deviennent
+  les barreaux d'une sous-échelle, la clé de cellule s'étend d'un niveau,
+- le retour au barreau et le tournoi travaillent inchangés sur l'échelle
+  raffinée.
+
+C'est récursif, dérivé, et sans référence. Commence par UN niveau de
+raffinement, mesuré : la frontière doit franchir le mur mesuré de la s21
+(`>=2 Liger` est le juge sur l'étalon A, en proportion sur N graines).
+
+---
+
+## CHANTIER 4 — L'ÉLAGAGE D'IMPASSE À CAPACITÉS DYNAMIQUES
+
+L'élagage d'impasse (chantier E historique) est **édenté** tel quel : le deck
+recycle (« il MANQUE 1, à servir par recyclage » — notre propre marche 1),
+donc brûler une pièce du but laisse le LP faisable. Il ne mord qu'avec des
+capacités DYNAMIQUES : les compteurs de quota du chemin (chantier 2) injectés
+dans le vecteur `u` avant `Solve`. Alors :
+
+- un état qui a dépensé son recycleur ET brûlé une pièce → h = ∞ **prouvé** ;
+- règle 2 tenue : on n'élague jamais un choix, on arrête un tirage démontré
+  mort ;
+- la valeur première n'est pas le débit (~0,7 % des tirages) mais l'HYGIÈNE :
+  les lignes mortes hors de l'archive, du partage `shared_best` et de
+  l'adaptation hindsight.
+
+Coût : n'appelle PAS le LP par décision (~2 ms). Appelle-le sur ÉVÉNEMENT
+(une pièce du but quitte DISPO, un quota lié se dépense) ou au moment
+d'archiver. Mesure le coût avant de juger l'effet.
+
+---
+
+## CHANTIER 5 — L'ASSAINISSEMENT DE L'EXISTANT (dé-fine-tuning)
+
+Chaque point ci-dessous est un écart nommé entre « générique de forme » et
+« sélectionné pour l'étalon ». Pour chacun : dériver, ou baliser comme
+hypothèse de JEU (pas de deck) avec sa mesure.
+
+1. **L'observable « cimetière » de `ConsumedFrom`** : « ce que x* consomme
+   atterrit au cimetière » est une hypothèse YGO-générale mais pas
+   universelle (coûts bannis, mélangés au deck). Dérivation possible : la
+   destination se lit de la catégorie du coût quand elle est déclarée ; sinon
+   l'hypothèse reste, ÉCRITE, avec le troisième deck pour juge.
+2. **Les constantes** : tranches de départs (2 × 15), reculs {15, 30, 45, 60},
+   plafond de 12 hôtes, seuil du tournoi (2). Aucune n'est fausse ; aucune
+   n'est dérivée. Balise-les (un bloc de constantes commentées « calées sur
+   l'étalon A, jamais balayées ») et ne les balaye QUE si un juge gratuit le
+   demande.
+3. **Le budget du finisseur** : les premières racines de recul mangent tout
+   (mesuré : 138-399 s chacune, la phase A2 — NRPA depuis les racines, avec
+   re-entrée — n'a jamais tourné). Un plafond PAR RACINE (budget/racines,
+   avec restitution) est la correction évidente ; mesure-la.
+4. **Hindsight renforce les fusions précoces** (qui dépensent le quota de Wolf
+   sur Tiger — le piège de choix nommé par le script). Mesure AVANT de
+   corriger : ventile les buts de substitution par « quota lié dépensé
+   oui/non ». Si le biais est réel, le correctif est un conditionnement du
+   crédit, jamais un élagage.
+5. **La négation de Silver reste jouable** (règle 2) : ne la bannis pas de
+   l'énumération. Si tu veux la décourager, c'est un biais mesuré
+   (`--self-negate-w`, famille de `--phase-w`), et l'A/B décide.
+
+---
+
+## MÉTHODE — les règles qui ont produit le Liger, à ne pas relâcher
 
 - **La santé est la porte, avant ET après chaque changement** :
   ```powershell
   .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
       --scriptdir ..\deps\scripts_2026-04-13\script --solve --solve-ms 60000 `
-      --outdir s20_sante --no-chain Zalen --no-chain "Crystal Wing"
-  # 273 digests, 210/273, 209 candidates, 16 replays, 0 MSG_RETRY.
+      --outdir s22_sante --no-chain Zalen --no-chain "Crystal Wing"
+  # 273 digests, 211/211, 209 candidates, 16 replays, 0 MSG_RETRY, 290/290/0.
   ```
-- **Le harnais est la porte du MODÈLE, et il coûte un run** :
+- **Le banc structurel de l'échelle (gratuit, 0,2 s + 0,6 s)** :
   ```powershell
-  .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\2026-08-16 13-19-12.yrpX" `
+  .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\liger.yrpX" `
       --scriptdir "D:\ProjectIgnis\replay2video\deps\compat_2026-08" `
       --scriptdir ..\deps\scripts_2026-04-13\script `
       --scriptdir "D:\ProjectIgnis\repositories\delta-bagooska\script" `
-      --scriptdir "D:\ProjectIgnis\repositories\delta-puppet\script" --operators
-  # 37 activations, 0 NON APPARIEE, 18/18 zone, 10/10 ressource.
+      --scriptdir "D:\ProjectIgnis\repositories\delta-puppet\script" `
+      --operators --target 54701958 --target 54701958 --target 54701958
+  # auto-test 65/65 ; h(depart)=14 ; theoreme 2 : 13->0, 0 chute>1 ;
+  # PROFIL DES ECARTS : l_max=33 (~17 a choix) — le nombre a faire descendre.
   ```
-  **Toute modification de l'extraction se re-juge là.** Un harnais qu'on cesse
-  de passer est un harnais qui ment.
-- **Le mode déterministe est l'instrument d'attribution** :
-  `--threads 1 --max-rollouts N --max-nodes N --solve-ms 900000` (le temps ne
-  doit JAMAIS mordre). Contrôle : 2 lignes de diff sur 397. Les mesures de
-  performance restent à seize workers.
-- **Sur l'étalon B : N runs par bras, lecture en PROPORTION.** Le juge y est
-  **bimodal** et la session 19 l'a re-mesuré : bras nu, `>=1` dans **5 runs sur
-  10**, `>=2` dans **3 sur 10**, et **aucun** des vingt runs n'écrit de solution
-  à 60 s. Le compteur de résolutions est le seul juge qui parle.
-- **Les juges les plus forts du dossier coûtent ZÉRO budget**, et il faut y
-  penser avant de lancer vingt minutes de mur : le verdict du harnais et la
-  décomposition imprimée sortent d'un rejeu de 0,2 s, sans un seul tirage. Le
-  chantier 1 a été tranché comme cela.
-- **`--solve-ms 60000` sur l'étalon B est un pari jamais balayé.** La bimodalité
-  est dans la GRAINE, pas dans la durée : si le mode se décide tôt,
-  `--max-rollouts` rendrait le même signal en trois fois moins de temps, donc
-  **trente runs pour le prix de dix** — plus de puissance statistique pour moins
-  de mur. Les vingt logs `s19p_*` sont là pour le vérifier sans rien relancer.
-- **UN DRAPEAU N'EST JAMAIS UN CORRECTIF.** Si aucun utilisateur ne voudrait le
-  comportement d'avant, c'est le défaut. Un mécanisme est un drapeau *le temps de
-  le mesurer*, puis devient le défaut.
-- **Un mécanisme doit imprimer sa VIE** (un compteur non nul quand il agit)
-  avant qu'on mesure son effet.
-- Une mesure en cours **verrouille le binaire** (`LNK1104`) : c'est voulu.
-- Logs PS en **UTF-16** : `Select-String`, jamais `grep`. Runs séquentiels, un
+- **La sonde de généralité (le juge du chantier 1)** :
+  ```powershell
+  .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\synchron handrip 2.yrpX" `
+      --scriptdir ..\deps\scripts_2026-04-13\script --operators `
+      --target 50954680 --target 9753964
+  # Aujourd'hui : « place SANS PRODUCTEUR », h = INFINI, echelle desarmee.
+  # SUCCES = h fini + sous-buts poses + quotas derives, SANS ligne specifique.
+  ```
+- **Le run nu de référence (étalon A)** :
+  ```powershell
+  .\bin\Release\combosolver.exe gabarits\etalon_a_lunalight.yrp `
+      --scriptdir "D:\ProjectIgnis\replay2video\deps\compat_2026-08" `
+      --scriptdir ..\deps\scripts_2026-04-13\script `
+      --scriptdir "D:\ProjectIgnis\repositories\delta-bagooska\script" `
+      --scriptdir "D:\ProjectIgnis\repositories\delta-puppet\script" `
+      --deck "D:\ProjectIgnis\deck\Lunalight.ydk" `
+      --hand "8379983|3027001|3027001|3027001" --no-ref `
+      --target 54701958 --target 54701958 --target 54701958 `
+      --max-decisions 700 --watch 35618217 --watch 24550676 `
+      --watch 54701958 --watch 47705572 --probe-repeat --options-online 60 `
+      --op-recipes --op-bias 3 --solve-ms 600000 --finisher-min 240000 `
+      --seed <graine> --finisher levin --archive-k 96 --outdir s22_<nom>
+  # JUGE : proportion de graines a >=1 (acquis : 2/3) et >=2 (le chantier).
+  # JAMAIS un run par bras : le juge est a 0,13 % des tirages.
+  ```
+- **Les juges gratuits d'abord** : harnais, banc, sonde de généralité, marche 1
+  — 0,2 s chacun. Vingt minutes de mur ne se paient qu'après.
+- **Un mécanisme doit imprimer sa VIE** avant tout A/B (les trois dérivations
+  fausses de `quota_hosts` n'ont été vues QUE par la ligne « QUOTAS suivis »).
+- **Un seul point de câblage** (`ApplyMechanisms`) ; tout champ ajouté à
+  `Choice` se remet à zéro dans `Emit()`.
+- **Règle 2** : jamais un élagage d'un choix jugé mauvais — un biais mesuré,
+  ou l'arrêt d'un état PROUVÉ mort.
+- Une mesure en cours **verrouille le binaire** (`LNK1104`) : voulu. Logs PS
+  en **UTF-16** : `Select-String`, jamais `grep`. Runs séquentiels, un
   `--outdir` par run.
-- **CODES et jamais NOMS** : `8379983` Gold Leo · `3027001` Fake Trap ·
-  `54701958` Liger · `24550676` Leo · `97165977` Panther (absent) ·
-  `88753594` Sabre · `81196066` Perfume · `35618217` Kaleido Chick ·
-  `2344618` Masquerade · `47705572` Wolf · `90590304` Bagooska ·
-  `24094653` Polymerization · `87931906` Lunalight Fusion.
-- Les scripts se lisent dans `D:\ProjectIgnis\script\official\c<code>.lua` — et
-  `--operators` les lit **pour toi**, avec leurs préconditions.
-- Bancs : `tools/s19_chantier1.ps1` (juge STRUCTUREL du graphe),
-  `tools/s19_promotion.ps1` (étalon B en proportion), `tools/s18_mur.ps1`,
-  `s18_determinisme.ps1`, `s18_axe1.ps1`, `s18_axe9.ps1`, `s18_yesno.ps1`.
+- **CODES et jamais NOMS** : `54701958` Liger · `24550676` Leo · `35618217`
+  Kaleido Chick · `2344618` Masquerade · `47705572` Wolf · `35763582` Silver
+  Hound · `90590304/90590303` Bagooska · `8379983` Gold Leo · `3027001` Fake
+  Trap · étalon B : `50954680` Crystal Wing · `9753964` Hot Red Abyss.
+- `py -3.11` + sympy pour toute formule neuve (`tools/s21_verify_formulas.py`
+  est le gabarit ; **piège : `lpmin` IGNORE `nonnegative=True` — les
+  contraintes `x ≥ 0` s'écrivent EXPLICITEMENT**).
 
-## CE QU'IL NE FAUT PAS REFAIRE
+## LES PIÈGES PAYÉS EN S21 — ne les repaie pas
 
-- **Supposer la convention `aux.Stringid`** : elle est `code << 20 | n` ici, et
-  elle se **lit** dans `utility.lua`. La supposer a rendu « 0 appariée sur 37 »,
-  ce qui se lit comme un échec d'extraction alors que c'est un échec
-  d'hypothèse.
-- **Juger une précondition sur un opérateur non déterminé** : le core fabrique
-  les descriptions 221 et 0, et Gold Leo a trois déclencheurs à compteurs
-  distincts. On COMPTE l'ambiguïté, on ne tranche pas.
-- **Croire que le script d'une carte déclare tous ses opérateurs** : la pose
-  d'une échelle Pendule et l'activation d'une Polymérisation vivent dans
-  `proc_*.lua`, à un et deux niveaux d'indirection.
-- **Chercher le « couplage fantôme » de `--card-on-select`** : il n'existe pas
-  (§9.25 (a)), et le drapeau a été supprimé — l'identité est inconditionnelle.
-- **Croire que `--threads 1` suffit au déterminisme** : c'est l'UNITÉ du budget,
-  et c'est corrigé.
-- **Re-mesurer §9.24 (o)** : un run par bras sur l'étalon B ne rend rien.
-- **Croire au ×27 de `--assign-bias`** (§9.24 (n)) : ce bras portait `--assign`
-  en plus ; une fois réellement actif, le mécanisme **divise l'arité 3 par
-  deux**.
-- **Croire à la « discontinuité du matériau NOMMÉ »** (§9.24) : elle n'existe
-  pas. L'exigence est `IsCode(24550676)` sur un **matériau**, et
-  `EFFECT_ADD_CODE` la satisfait.
-- **Le décodeur binaire** : audité champ par champ contre `playerop.cpp`,
-  **19 messages sur 19 justes** (§9.25 (c)) — et le décodeur d'activations de la
-  s19 suit exactement les mêmes dispositions.
-- Les réfutations de `docs/drapeaux.md` §A — dix sont hors du code, et
-  `--backward` en sort par le chantier 1.
-- « `--max-subsets` explique les trous de couverture » : mesuré, faux.
-- « le changement de phase gaspille les tirages » : mesuré, faux, drapeau retiré.
-- « la ligne est hors de l'espace d'actions » : mesuré, faux (couverture **100 %
-  au board**).
+1. **La récompense calquée sur la surface** (@BANNIE) : Goodhartée en deux
+   runs. Un barreau se dérive de x* ou d'une ressource irréversible — jamais
+   d'un type d'action vu dans la solution connue.
+2. **La dérivation itérée jusqu'à voir la carte attendue** (trois versions
+   pour Wolf) : c'est du fitting même sans nom de carte. Si tu itères un
+   critère en regardant si LA bonne carte sort, arrête : dérive des duaux.
+3. **Le représentant « chemin court »** : à vecteur égal il choisit l'état qui
+   n'a pas payé. Toute clé incomplète re-crée ce défaut ailleurs.
+4. **Un run par bras sur un juge rare** : 1 972 → 260 → 0 sur la même config.
+   Proportion sur N graines, sinon tu lis du bruit (payé trois fois en une
+   nuit).
+5. **L'éviction d'archive écrivait `here.hash` au lieu de `cell`** ; **la
+   branche d'élision n'ajoutait pas la réponse forcée à `path`** (solutions
+   non rejouables sous `--elide-forced`). Les deux sont corrigés — mais la
+   famille (une clé/un chemin incomplets qui ne cassent RIEN visiblement) est
+   la plus silencieuse du dossier.
+6. **La fusion de Wolf vit dans `Fusion.lua` partagé** : l'extraction par
+   carte ne la voit pas. Toute dérivation « par produits déclarés » a cet
+   angle mort — les procédures partagées se traitent au chantier 1.
 
-## LIVRABLE ATTENDU
+## ÉTAT DU DÉPÔT
 
-1. **UN SEUL POINT DE CÂBLAGE** (chantier D). C'est mécanique, c'est falsifiable,
-   et cela vaut plus qu'un mécanisme de plus : trois `SearchConfig` construits à
-   trois endroits, dont deux oublient des champs, ont fait mesurer du vide
-   pendant trois sessions.
-2. **La sonde rend la pièce** (chantier E). Trois tirages non élucidés valent
-   qu'on écrive un `.yrp`, et c'est vingt lignes.
-3. **Le verdict de `--op-bias`** : `w` balayé, puis le goulot de Kaleido Chick
-   (0,50 % après la s19 → ?), puis l'étalon B en proportion. Sa vie est déjà lue.
-4. **`--elide-forced` jugé là où il agit enfin.**
-5. **La CONSOMMATION dans le graphe** (chantier B) — condition de correction, pas
-   amélioration : §9.28 (h) a mesuré douze arêtes sur treize qui détruisaient le
-   but.
-6. La dette : `--prior` retiré, `docs/drapeaux.md` §A corrigé pour `--backward`,
-   les jamais-jugés entamés.
-7. Ce prompt régénéré.
+Commits : `a76bd55` (sympy, simplexe 65/65, barreaux de consommation),
+`a75ad3f` (premier Liger : reenter, échelle, quotas), `7714d4e` (poison
+Silver, audit du fine-tuning). Drapeau neuf : `--reenter <p>` (défaut 0,5,
+0 = témoin). Sources clés : `operators.h/cpp` (LP, `ConsumedFrom`,
+`lp_fuzz_cases.inc`), `search.h/cpp` (échelle zones 3/5/6, `ReenterMaybe`,
+`QuotaKey`, `sp_final`), `main.cpp` (câblage, banc du profil, sonde `sp=` par
+racine). Rapports : `docs/rapport-session-21.md`, design §9.33.
 
-**Le harnais est la porte du modèle. Le passer coûte un run ; ne pas le passer a
-coûté trois sessions.**
+**La définition du succès de ta session, en une ligne** : la sonde de
+généralité de l'étalon B rend `h fini + sous-buts + quotas dérivés des duaux`,
+et l'étalon A passe `>=2 Liger` en proportion — les deux par le MÊME binaire,
+sans un choix écrit à la main.
