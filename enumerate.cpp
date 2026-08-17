@@ -275,6 +275,10 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 	static thread_local std::vector<uint32_t> seen_codes;
 	static thread_local std::vector<std::pair<uint32_t, uint64_t>> seen_pairs;
 	static thread_local std::vector<uint32_t> codes;
+	// (code, emplacement) pour le dedoublonnage de `SELECT_UNSELECT_CARD` : le
+	// seul code ne suffit pas, cf. le correctif de couverture de la s20.
+	static thread_local std::vector<uint64_t> seen_keys;
+	static thread_local std::vector<uint64_t> loc_keys;
 
 	switch(message) {
 	case MSG_SELECT_IDLECMD: {
@@ -622,10 +626,32 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		uint8_t cancelable = r.Get<uint8_t>();
 		r.Get<uint32_t>(); r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
+		// LE `loc_info` EST LU, PAS JETE — et c'est un correctif de couverture,
+		// pas un raffinement.
+		//
+		// LA MESURE QUI L'IMPOSE (session 20). Sur `replay/liger.yrpX`, la seule
+		// ligne connue qui atteigne le but de l'etalon A, la reference choisit
+		// l'index 3 d'un `SELECT_UNSELECT_CARD` et l'enumerateur n'offrait que
+		// 0, 1, 2 : `dedup_by_code` avait replie l'index 3 sur un doublon de
+		// CODE. Resultat : 251/252 coups retrouves, et UN SEUL coup absent rend
+		// la ligne inatteignable a tout budget.
+		//
+		// Deux cartes de meme code ne sont PAS interchangeables sur ce prompt :
+		// la liste traverse les zones, et deux exemplaires y different par
+		// l'emplacement, la sequence et la position. Deduire par le seul code
+		// supprime donc de VRAIS coups. On dedoublonne desormais sur la paire
+		// (code canonique, emplacement) — l'octet est deja dans le message,
+		// il etait simplement saute.
 		codes.clear();
+		loc_keys.clear();
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
 			codes.push_back(canon(r.Get<uint32_t>()));
-			r.Skip(kLocInfo);
+			const uint8_t con = r.Get<uint8_t>();
+			const uint8_t loc = r.Get<uint8_t>();
+			const uint32_t seq = r.Get<uint32_t>();
+			r.Get<uint32_t>();   // position
+			loc_keys.push_back((uint64_t(con) << 40) | (uint64_t(loc) << 32) |
+							   seq);
 		}
 		uint32_t n_un = r.Get<uint32_t>();
 		if(!r.Ok()) {
@@ -642,13 +668,18 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			c.edge = EdgeOf(message, { key });
 			SetLabel(c, opt, what, 0, false);
 		};
-		seen_codes.clear();
+		seen_keys.clear();
 		for(uint32_t i = 0; i < codes.size(); ++i) {
 			if(opt.dedup_by_code) {
-				if(std::find(seen_codes.begin(), seen_codes.end(), codes[i]) !=
-				   seen_codes.end())
+				// Cle = (code, emplacement). Deux exemplaires du meme code dans
+				// la MEME zone restent replies (ils sont interchangeables) ;
+				// deux exemplaires dans des zones differentes ne le sont pas.
+				const uint64_t key =
+					(uint64_t(codes[i]) << 24) ^ loc_keys[i];
+				if(std::find(seen_keys.begin(), seen_keys.end(), key) !=
+				   seen_keys.end())
 					continue;
-				seen_codes.push_back(codes[i]);
+				seen_keys.push_back(key);
 			}
 			make(i, codes[i], "selectionner");
 		}

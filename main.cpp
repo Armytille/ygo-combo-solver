@@ -1332,6 +1332,13 @@ struct Options {
 	// DRAPEAU LE TEMPS DE LE MESURER (regle 2 du README), pas plus : passe sur
 	// les deux etalons, il devient le defaut et le drapeau devient negatif.
 	bool op_recipes = false;
+	// SERIALISATION PAR LE BILAN MATIERE (9.31). Un mecanisme est un drapeau LE
+	// TEMPS DE LE MESURER, puis devient le defaut : celui-ci naît donc allume et
+	// s'eteint par `--no-serial`, comme `--adapt-to-peak` apres sa promotion.
+	// C'est la seule voie que l'arithmetique des 105 ordres laisse ouverte.
+	bool serial = true;
+	// Poids soustrait au logit d'un changement de phase. 0 = eteint (le temoin).
+	double phase_w = 0.0;
 	// CHANTIER 2 (session 19) : LE CHAINAGE ARRIERE COMME BIAIS.
 	//
 	// Poids ajoute au logit des choix qui JOUENT une carte dont la
@@ -2088,6 +2095,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				static const struct { const char* name; bool Options::* member; }
 				kNoFlags[] = {
 					{ "--no-adapt-to-peak", &Options::adapt_to_peak },
+					{ "--no-serial",        &Options::serial },
 				};
 				for(const auto& f : kNoFlags)
 					if(a == f.name) { o.*(f.member) = false; matched = true; break; }
@@ -2379,6 +2387,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				std::printf("!! --assign-bias attend un poids >= 0\n");
 				return false;
 			}
+		} else if(a == "--phase-w") {
+			// Poids SOUSTRAIT au logit d'un changement de phase. Ce n'est pas
+			// un elagage : le choix reste tirable (regle 2), sa masse baisse.
+			const char* v = next("--phase-w"); if(!v) return false;
+			o.phase_w = std::atof(v);
 		} else if(a == "--op-bias") {
 			const char* v = next("--op-bias"); if(!v) return false;
 			o.op_bias = std::atof(v);
@@ -3528,6 +3541,159 @@ uint32_t MeasureWidth(Duel& duel, const Replay& yrp, const Options& opt,
 	return patience;
 }
 
+// --- UN SEUL POINT DE CABLAGE (session 20, chantier D) -----------------------
+//
+// LE FAIT QUI JUSTIFIE CETTE FONCTION, et il est mesure. Trois `SearchConfig`
+// etaient construits a trois endroits de ce fichier ; un releve champ par champ
+// rend, sur 82 champs : `RunTransplantSolve` en cable 66, `RunSolve` 11,
+// `RunGrowth` 6. Ce n'est PAS une divergence de propos — les budgets different
+// legitimement d'un mode a l'autre — c'est que les MECANISMES choisis en ligne
+// de commande n'etaient appliques que sur UN chemin :
+//
+//   * `--elide-forced` a passe TROIS sessions de bancs sur le chemin de
+//     recherche ou il ne faisait rien (9.28 (f), preuve a l'octet pres) ;
+//   * le mode `--solve` — le CONTROLE DE SANTE — n'a jamais vu ni
+//     `--hindsight` ni `--adapt-to-peak`, ce qui explique que la sante soit
+//     restee identique a travers leur promotion ;
+//   * `--max-rollouts` / `--max-nodes`, l'instrument du mode DETERMINISTE,
+//     n'existaient pas hors transplantation.
+//
+// La regle est desormais mecanique : TOUT champ de `SearchConfig` qui vient
+// d'une option est assigne ICI, et nulle part ailleurs. Restent a l'appelant, et
+// seulement eux :
+//   - les BUDGETS propres a un mode (bornes issues de la ligne de reference,
+//     profondeur de `--growth`, `anytime` de `--optimize`) ;
+//   - les POINTEURS vers des objets locaux (graphe de recettes, catalogue
+//     d'options, table partagee, politique NRPA) : ils n'existent pas dans tous
+//     les modes, et c'est precisement ce que `ReportMechanisms` rend visible ;
+//   - la derivation NRPA PAR WORKER (`nrpa_level` depend du nombre de fils),
+//     seule exception assumee, et elle est locale a la phase tirages.
+void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
+	cfg.target_player = opt.target_player;
+
+	// Budget en COMPTE (mode deterministe). `max_rollouts` a 0 = pas de borne,
+	// donc l'assignation inconditionnelle est neutre ; `max_nodes` a 0 signifie
+	// « laisse le mode choisir », d'ou la garde.
+	cfg.max_rollouts = opt.max_rollouts;
+	if(opt.max_nodes)
+		cfg.max_nodes = opt.max_nodes;
+
+	// Les quatre leviers de la session 17 et leurs suites. Tous sont LUS sous
+	// garde de `cfg.recipes` (search.cpp:2556) : les cabler sans graphe est sur
+	// et inerte — et `ReportMechanisms` le DIT au lieu de le taire.
+	cfg.assign = opt.assign;
+	cfg.assign_bias = static_cast<float>(opt.assign_bias);
+	cfg.op_bias = static_cast<float>(opt.op_bias);
+	cfg.backward = opt.backward;
+	cfg.probe_repeat = opt.probe_repeat;
+	if(opt.recipes >= 0)
+		cfg.recipe_h = static_cast<float>(opt.recipes);
+	cfg.landmark_weight = static_cast<float>(opt.landmark_weight);
+	cfg.landmark_h = static_cast<float>(opt.landmark_h);
+
+	cfg.hindsight = static_cast<float>(opt.hindsight);
+	cfg.hindsight_k = opt.hindsight_k;
+	cfg.adapt_to_peak = opt.adapt_to_peak;
+	cfg.elide_forced = opt.elide_forced;
+	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
+
+	// Finisseur et parcours.
+	cfg.levin_h = static_cast<float>(opt.levin_h);
+	cfg.levin_reroot = opt.levin_reroot;
+	cfg.reroot_h = static_cast<float>(opt.reroot_h);
+	cfg.dive_full = opt.dive_full;
+	cfg.lifo_ties = opt.lifo_ties;
+	cfg.merged_pop = opt.merged_pop;
+	cfg.finisher_post_goal = opt.finisher_post_goal;
+	cfg.finisher_options = opt.finisher_options;
+	cfg.archive_k = opt.archive_k;
+
+	// Politique. `-1` est le sentinelle « non donne » : le defaut du moteur
+	// gagne, et c'est ce que le rapport imprime.
+	if(opt.hint_bias >= 0)
+		cfg.hint_bias = static_cast<float>(opt.hint_bias);
+	if(opt.nrpa_bias >= 0)
+		cfg.nrpa_bias_known = static_cast<float>(opt.nrpa_bias);
+	if(opt.nrpa_alpha > 0)
+		cfg.nrpa_alpha = static_cast<float>(opt.nrpa_alpha);
+	if(opt.nrpa_iters)
+		cfg.nrpa_iters = opt.nrpa_iters;
+	cfg.nrpa_restart_keep = static_cast<float>(opt.nrpa_keep);
+	cfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
+	cfg.nrpa_adapt_passes = opt.adapt_passes;
+	cfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
+	cfg.ctx_max = opt.ctx_max;
+	cfg.qhat_depth = opt.qhat_depth;
+	cfg.qhat_window = opt.qhat_window;
+	cfg.qhat_rho = opt.qhat_rho;
+	cfg.qhat_max_nodes = opt.qhat_nodes;
+
+	// Cout lexicographique des brulees. Les valeurs par defaut d'`Options` et de
+	// `SearchConfig` coincident : l'assignation ne mord que si le drapeau est
+	// passe, et elle mord desormais dans TOUS les modes, pas seulement sous
+	// `--optimize`.
+	cfg.burn_slack = opt.burn_slack;
+	cfg.burn_limit = opt.burn_limit;
+	cfg.phase_w = static_cast<float>(opt.phase_w);
+}
+
+// LE CONTROLE QUI MANQUAIT, et il est la vraie lecon de 9.28 (f).
+//
+// « Un mecanisme doit imprimer sa vie » ne suffisait pas : quand le champ
+// n'etait cable NULLE PART, il n'y avait tout simplement RIEN a imprimer, et le
+// banc lisait un silence comme une absence d'effet. Cette fonction se lit APRES
+// que l'appelant a branche ses pointeurs, et rend deux choses qu'aucun log ne
+// rendait : les mecanismes ACTIFS dans ce mode, et ceux qui sont DEMANDES mais
+// INERTES ici faute de dependance. Un bras de mesure dont le rapport porte une
+// ligne `!! INERTE` est un bras a jeter avant de le lancer, pas apres.
+void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
+	const SearchConfig d;   // les defauts, pour n'imprimer que les ecarts
+	std::string on, inert;
+	char buf[160];
+	auto add = [&](std::string& dst, const char* fmt, auto... args) {
+		std::snprintf(buf, sizeof(buf), fmt, args...);
+		if(!dst.empty())
+			dst += ", ";
+		dst += buf;
+	};
+
+	if(cfg.elide_forced != d.elide_forced)     add(on, "elide-forced");
+	if(cfg.adapt_to_peak != d.adapt_to_peak)   add(on, "adapt-to-peak");
+	if(cfg.hindsight != d.hindsight)           add(on, "hindsight %.2f", cfg.hindsight);
+	if(cfg.assign != d.assign)                 add(on, "assign");
+	if(cfg.resolve_weight != d.resolve_weight) add(on, "resolve-w %.0f", cfg.resolve_weight);
+	if(cfg.max_rollouts)                       add(on, "max-rollouts %llu",
+												   (unsigned long long)cfg.max_rollouts);
+	if(cfg.hint_bias != d.hint_bias)           add(on, "hint-bias %.2f", cfg.hint_bias);
+	if(cfg.qhat_depth != d.qhat_depth)         add(on, "qhat %u", cfg.qhat_depth);
+
+	// Les cinq qui EXIGENT le graphe de recettes, et les deux qui exigent les
+	// landmarks. Un poids non nul sans son pointeur est exactement le piege 42.
+	auto dep = [&](bool served, const char* fmt, auto... args) {
+		add(served ? on : inert, fmt, args...);
+	};
+	if(cfg.assign_bias > 0.0f)
+		dep(cfg.recipes != nullptr, "assign-bias %.2f", cfg.assign_bias);
+	if(cfg.op_bias > 0.0f)
+		dep(cfg.recipes != nullptr, "op-bias %.2f", cfg.op_bias);
+	if(cfg.backward)
+		dep(cfg.recipes != nullptr, "backward");
+	if(cfg.probe_repeat)
+		dep(cfg.recipes != nullptr, "probe-repeat");
+	if(cfg.recipe_h > 0.0f)
+		dep(cfg.recipes != nullptr, "recipe-h %.2f", cfg.recipe_h);
+	if(cfg.landmark_weight > 0.0f)
+		dep(cfg.landmarks != nullptr, "landmark-w %.2f", cfg.landmark_weight);
+	if(cfg.landmark_h > 0.0f)
+		dep(cfg.landmarks != nullptr, "landmark-h %.2f", cfg.landmark_h);
+
+	std::printf("  MECANISMES [%s] : %s\n", mode,
+				on.empty() ? "aucun (defauts du moteur)" : on.c_str());
+	if(!inert.empty())
+		std::printf("!! DEMANDE mais INERTE ici (dependance absente dans ce "
+					"mode) : %s\n", inert.c_str());
+}
+
 // Le test unique ne prouve qu'une chose : Push/Pop marche a profondeur 1. Un
 // mecanisme de journal casse plutot sur les sequences imbriquees, les freres
 // successifs et les restaurations repetees. On les exerce ici tout au long de
@@ -4016,7 +4182,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 				ref_actions, ref_decisions, ref_burned);
 
 	SearchConfig cfg;
-	cfg.target_player = opt.target_player;
+	ApplyMechanisms(opt, cfg);   // chantier D : UN SEUL POINT DE CABLAGE
 	// Bornes issues de la ligne de reference : on ne cherche que des lignes qui
 	// ne sont pires ni en actions ni en decisions (section 3.2).
 	cfg.max_decisions = static_cast<uint32_t>(ref_decisions);
@@ -4081,8 +4247,9 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		// trouerait le repertoire en silence. --no-phase-change borne la
 		// RECHERCHE, pas la lecture de ce qui a ete joue.
 		EnumOptions leo = cfg.enumeration;
+		RefLineStats rls;
 		LiftRefLine(duel, arena, yrp, opt.target_player, ref_decisions,
-					leo, ref_digests, ref_keys);
+					leo, ref_digests, ref_keys, &rls);
 		arena.Restore();
 		size_t known = 0;
 		for(uint64_t k : ref_keys)
@@ -4090,6 +4257,117 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		std::printf("  ligne relevee  : %zu digests, %zu/%zu coups identifies "
 					"(%.0f ms)\n", ref_digests.size(), known, ref_keys.size(),
 					MsSince(t0));
+
+		// LA VRAISEMBLANCE DE LA REFERENCE, ET C'EST LE SEUL CHIFFRE QUI DISE SI
+		// L'ECHANTILLONNAGE A UNE CHANCE.
+		//
+		// A politique NEUVE, tous les poids `plan_key` partent a ZERO et aucun
+		// biais n'est arme : les logits de `search.cpp` sont donc tous egaux et
+		// le softmax est UNIFORME. La probabilite qu'un tirage reproduise la
+		// ligne vaut exactement le produit des inverses d'arites — un calcul,
+		// pas une estimation. 9.28 en donnait une approximation (`0,66^32`) sur
+		// les seules decisions idle d'un plan partiel ; ici c'est exact et sur
+		// la ligne entiere.
+		//
+		// Et la COUVERTURE se lit enfin sans confusion : « retrouve » (le coup
+		// est dans l'espace d'actions) n'est pas « identifie » (il est au
+		// repertoire). Un seul coup NON RETROUVE rend la ligne inatteignable a
+		// tout budget, et aucun compteur ne le disait.
+		{
+			size_t own = 0, forced = 0, branchy = 0, found = 0, absent = 0;
+			double log10p = 0.0;
+			uint32_t worst = 0;
+			size_t worst_at = 0;
+			for(size_t i = 0; i < rls.arity.size(); ++i) {
+				const uint32_t a = rls.arity[i];
+				if(!a)
+					continue;   // decision adverse : non enumeree
+				++own;
+				if(a == 1)
+					++forced;
+				else {
+					++branchy;
+					log10p -= std::log10(static_cast<double>(a));
+					if(a > worst) { worst = a; worst_at = i; }
+				}
+				if(rls.matched[i]) ++found; else ++absent;
+			}
+			std::printf("\n  --- VRAISEMBLANCE DE LA REFERENCE (politique "
+						"NEUVE = softmax uniforme) ---\n");
+			std::printf("  decisions du joueur : %zu  (forcees %zu, a choix "
+						"%zu)\n", own, forced, branchy);
+			std::printf("  COUVERTURE : coup de la reference RETROUVE dans "
+						"l'enumeration %zu/%zu", found, own);
+			if(absent)
+				std::printf("   <<< %zu ABSENT(S) : la ligne est HORS de "
+							"l'espace d'actions", absent);
+			std::printf("\n");
+			// QUEL coup manque, et a quelle arite. Un trou de couverture qu'on
+			// ne localise pas ne se repare pas — et un seul suffit a rendre la
+			// ligne inatteignable a tout budget.
+			for(const RefLineStats::Miss& m : rls.misses) {
+				std::printf("     decision #%zu  %s : %zu choix enumere(s), "
+							"AUCUN ne reproduit la reference\n", m.index,
+							PromptName(m.prompt), m.offered.size());
+				auto hex = [](const std::vector<uint8_t>& v) {
+					std::string s;
+					char b[8];
+					for(uint8_t x : v) {
+						std::snprintf(b, sizeof b, "%02x ", x);
+						s += b;
+					}
+					return s;
+				};
+				std::printf("        REELLE  : %s\n", hex(m.recorded).c_str());
+				for(size_t j = 0; j < m.offered.size(); ++j)
+					std::printf("        offerte : %s\n",
+								hex(m.offered[j]).c_str());
+			}
+			std::printf("  arite max : %u (decision #%zu)   |   arite moyenne "
+						"geometrique : %.2f\n", worst, worst_at,
+						branchy ? std::pow(10.0, -log10p / double(branchy))
+								: 1.0);
+			std::printf("  log10 P(tirage uniforme reproduit la ligne) = "
+						"%.1f   =>  UNE CHANCE SUR 10^%.0f\n", log10p, -log10p);
+			// OU PART L'IMPROBABILITE ? Un seul nombre ne le dit pas, et la
+			// reponse departage deux chantiers opposes : si l'essentiel vient
+			// de decisions qui NE PEUVENT PAS affecter le but (position, zone,
+			// ordre de materiaux equivalents), un QUOTIENT mecanique suffit ;
+			// si tout est dans IDLECMD et les selections, seule une
+			// SERIALISATION en sous-buts peut aider. Le calcul est gratuit :
+			// l'arite de chaque decision est deja relevee.
+			{
+				struct Agg { double log10p = 0.0; size_t n = 0; uint32_t mx = 0; };
+				std::map<uint8_t, Agg> by;
+				for(size_t i = 0; i < rls.arity.size(); ++i) {
+					const uint32_t a = rls.arity[i];
+					if(a < 2)
+						continue;
+					Agg& g = by[rls.prompt[i]];
+					g.log10p += std::log10(static_cast<double>(a));
+					++g.n;
+					g.mx = (std::max)(g.mx, a);
+				}
+				std::vector<std::pair<double, uint8_t>> ord;
+				for(const auto& [t, g] : by)
+					ord.emplace_back(g.log10p, t);
+				std::sort(ord.rbegin(), ord.rend());
+				std::printf("  --- d'ou viennent les %.0f ordres de grandeur "
+							"---\n", -log10p);
+				for(const auto& [v, t] : ord) {
+					const Agg& g = by[t];
+					std::printf("   %-24s %6.1f  (%zu decision(s), arite max "
+								"%u, moy. geo. %.2f)\n", PromptName(t), v, g.n,
+								g.mx, std::pow(10.0, v / double(g.n)));
+				}
+			}
+			std::printf("  Lecture : c'est la borne SANS apprentissage. La "
+						"politique ne peut la remonter\n"
+						"  que sur les decisions qu'elle revoit — une ligne "
+						"jamais echantillonnee\n"
+						"  n'adapte rien, et c'est la l'oeuf et la poule du "
+						"dossier, enfin chiffre.\n");
+		}
 	}
 	cfg.ref_digests = &ref_digests;
 	// Le repertoire fenetre ne sert que la reparation SOUS contraintes, son cas
@@ -4110,6 +4388,10 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	std::printf("  workers        : %u\n", threads);
 	std::printf("  nouveaute      : %s (patience %u)\n",
 				patience ? "active" : "desactivee", patience);
+	// Le mode `--solve` est le CONTROLE DE SANTE, et il n'a jamais vu un seul
+	// mecanisme jusqu'ici. Il les recoit desormais — et il DIT lesquels, ce qui
+	// est la seule facon de savoir si une sante a ete mesuree nue ou non.
+	ReportMechanisms(cfg, "solve");
 
 	struct PassOut {
 		std::vector<Solution> found;
@@ -6515,6 +6797,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// le run : les recettes sont des FAITS, les reunir ne peut qu'enrichir.
 	// `static` : il survit a toutes les recherches du run.
 	static RecipeGraph recipe_graph;
+	// Les sous-buts derives du bilan matiere sont calcules PLUS HAUT que la
+	// construction du `SearchConfig` (l'amorce par operateurs precede la
+	// recherche) : ils transitent par ici, et sont verses dans `cfg` au moment
+	// ou il existe. Un seul point de versement, comme le chantier D l'exige.
+	std::vector<SearchConfig::SerialReq> serial_from_balance;
 	if(opt.probe_repeat && cons.resolve_min.empty())
 		std::printf("!! --probe-repeat sans --summon-min ni --resolve : aucune "
 					"carte a surveiller, la sonde restera MUETTE\n");
@@ -6646,6 +6933,90 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					std::printf("      (aucune arete d'acquisition : aucune carte "
 								"du deck n'accorde EFFECT_ADD_CODE)\n");
 				ReportSeededDistances(target, recipe_graph, db, watched);
+
+				// --- LA SERIALISATION PAR x* (9.31) ---------------------------
+				//
+				// L'arithmetique ne laisse qu'une voie : ~110 decisions reelles
+				// d'arite geometrique 5,9 font `10^85` en UN bloc et `2x10^7` en
+				// quatorze blocs de huit. Ce qui manquait n'etait pas le
+				// mecanisme — `novelty_serialize` rouvre deja la table — mais
+				// son CRITERE : « une carte cible posee » ne bouge qu'a la toute
+				// fin. Les sous-buts du bilan matiere, eux, existent des la
+				// premiere brique, et ils sont CALCULES (theoremes de 9.30), pas
+				// devines.
+				std::vector<std::pair<uint32_t, uint32_t>> gc2;
+				for(uint32_t c : target.codes) {
+					auto it = std::find_if(gc2.begin(), gc2.end(),
+										   [&](const auto& g) {
+											   return g.first == c;
+										   });
+					if(it == gc2.end())
+						gc2.emplace_back(c, 1u);
+					else
+						++it->second;
+				}
+				// `owned` est DEDOUBLONNE (il sert d'ensemble d'appartenance) :
+				// le passer au bilan matiere donnerait UNE copie par code au
+				// lieu de trois, et « trois Liger » deviendrait infaisable pour
+				// une raison qui n'a rien a voir avec le deck. Le modele veut
+				// les copies PHYSIQUES.
+				std::vector<uint32_t> deck_mult;
+				for(const auto* l : { &sd.main, &sd.extra })
+					for(uint32_t c : *l)
+						deck_mult.push_back(c);
+				BalanceModel bm;
+				if(opt.serial && !gc2.empty() &&
+				   bm.Build(tbl, db, kt, deck_mult, gc2)) {
+					LPResult lr;
+					const double h0 = bm.Solve(deck_mult, {}, {}, &lr);
+					if(lr.feasible && lr.primal_ok && lr.optimal_ok) {
+						for(const BalanceModel::Need& n : bm.NeedsFrom(lr)) {
+							if(n.zone == 0)
+								continue;   // la RESERVE n'est pas un progres
+							SearchConfig::SerialReq rq;
+							rq.code = n.code;
+							rq.arch = n.arch;
+							rq.zone = n.zone;
+							rq.count = n.count;
+							serial_from_balance.push_back(rq);
+						}
+						// LES BARREAUX DE CONSOMMATION (s21). Le profil des
+						// ecarts a montre que tout l'ASSEMBLAGE est invisible
+						// aux sous-buts de production : trois deserts de 46 a
+						// 73 reponses, chacun hors de portee d'un
+						// echantillonneur (b^37 ~ 10^28). La colonne negative
+						// de x*, rendue en arrivees @CIMETIERE, monte pendant
+						// ces deserts — c'est le grain que la forme close
+						// exige.
+						for(const BalanceModel::Need& n : bm.ConsumedFrom(lr)) {
+							SearchConfig::SerialReq rq;
+							rq.code = n.code;
+							rq.arch = n.arch;
+							rq.zone = n.zone;
+							rq.count = n.count;
+							serial_from_balance.push_back(rq);
+						}
+						std::printf("  SERIALISATION par le bilan matiere : "
+									"h(depart) = %.0f, %zu sous-but(s)\n",
+									h0, serial_from_balance.size());
+						for(const SearchConfig::SerialReq& rq :
+							serial_from_balance)
+							std::printf("      x%-2u %-34s @%s\n", rq.count,
+										rq.code
+											? db.Name(rq.code).c_str()
+											: "(archetype)",
+										rq.zone == 2   ? "TERRAIN"
+										: rq.zone == 3 ? "CIMETIERE"
+													   : "DISPO");
+					} else {
+						// Un `h` infini ICI voudrait dire que le but est prouve
+						// hors d'atteinte depuis ce deck : on le DIT, on ne
+						// serialise pas sur du vide.
+						std::printf("!! SERIALISATION : le bilan matiere ne rend "
+									"aucun plan (h = INFINI ou solveur en "
+									"defaut) — aucun sous-but pose.\n");
+					}
+				}
 			}
 		}
 		// LA DECOMPOSITION A REBOURS, IMPRIMEE. C'est le juge du chantier 1, et
@@ -6742,7 +7113,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 
 	// --- 4. Recherche, par approfondissement progressif du nombre d'ecarts.
 	SearchConfig cfg;
-	cfg.target_player = opt.target_player;
+	ApplyMechanisms(opt, cfg);   // chantier D : UN SEUL POINT DE CABLAGE
+	cfg.serial_reqs = serial_from_balance;   // 9.31 : les sous-buts calcules
 	// Le plan compte 273 etapes ; un autre deck en demandera davantage pour
 	// arriver au meme endroit. On laisse de la marge, sans quoi la borne
 	// couperait avant le board.
@@ -6810,14 +7182,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	}
 	cfg.material_req = cons.material_req;
 	cfg.hint_cards = cons.hints;
-	cfg.levin_h = static_cast<float>(opt.levin_h);
-	cfg.levin_reroot = opt.levin_reroot;
-	cfg.reroot_h = static_cast<float>(opt.reroot_h);
-	cfg.dive_full = opt.dive_full;
-	cfg.finisher_post_goal = opt.finisher_post_goal;
-	cfg.finisher_options = opt.finisher_options;
-	cfg.lifo_ties = opt.lifo_ties;
-	cfg.merged_pop = opt.merged_pop;
 	cfg.options = option_catalog.Size() ? &option_catalog : nullptr;
 	// MINAGE EN LIGNE (session 14) : le corpus vivant du run. Il est declare
 	// ICI pour survivre a toutes les phases, mais n'est BRANCHE que sur les
@@ -6847,13 +7211,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					opt.options_online, online.max_pool, online.per_worker,
 					online.seed ? ", corpus --adapt en amorce" : "");
 	}
-	if(opt.hint_bias >= 0)
-		cfg.hint_bias = static_cast<float>(opt.hint_bias);
 	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
 				opt.hint_bias >= 0 ? "--hint-bias" : "defaut du moteur");
 	// MODE DETERMINISTE (audit 18). Imprime, parce qu'un budget qui n'est plus
 	// du temps change la lecture de TOUS les compteurs de debit du rapport.
-	cfg.max_rollouts = opt.max_rollouts;
 	if(opt.max_nodes)
 		cfg.max_nodes = opt.max_nodes;
 	if(opt.max_rollouts || opt.max_nodes) {
@@ -6866,7 +7227,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						"l'ORDRE des echanges ne l'est pas. Ajouter "
 						"--threads 1 pour un run reproductible.\n");
 	}
-	cfg.adapt_to_peak = opt.adapt_to_peak;
 	if(opt.adapt_to_peak)
 		std::printf("  gradient TRONQUE AU PIC du score (--adapt-to-peak)\n");
 	// CORRECTIF (session 19) : `--elide-forced` N'ETAIT CABLE NULLE PART SAUF
@@ -6880,24 +7240,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// pretendait agir. Ce qui devient discutable, c'est sa VALEUR PAR DEFAUT —
 	// et elle repasse a « eteint », parce que les +61 % de debit de 9.24 (k) ont
 	// ete mesures sur le chemin `--growth`, jamais sur celui-ci.
-	cfg.elide_forced = opt.elide_forced;
 	if(opt.elide_forced)
 		std::printf("  coups FORCES joues en ligne (--elide-forced) — NON JUGE "
 					"sur ce chemin : il y etait inerte jusqu'a la s19\n");
-	cfg.resolve_weight = static_cast<float>(opt.resolve_weight);
 	// Le graphe de recettes est cree et amorce PLUS HAUT (avant le rejeu
 	// d'adaptation, qui le nourrit) ; ici, seulement le cablage dans cfg.
 	if(opt.recipes >= 0) {
 		cfg.recipes = &recipe_graph;
-		cfg.recipe_h = static_cast<float>(opt.recipes);
 	}
 	// --- SESSION 17 : LES QUATRE LEVIERS ------------------------------------
 	// Les chantiers 1, 3 et 4 lisent tous le graphe de recettes : sans lui ils
 	// sont vivants et inertes. L'implication est appliquee PLUS HAUT (avec celle
 	// de --probe-repeat) et redite ici pour chaque drapeau qui l'a declenchee.
-	cfg.assign = opt.assign;
-	cfg.assign_bias = static_cast<float>(opt.assign_bias);
-	cfg.op_bias = static_cast<float>(opt.op_bias);
 	if(opt.op_bias > 0.0) {
 		// LES DEUX FACONS DONT CE MECANISME PEUT ETRE INERTE, DITES AVANT LE
 		// RUN. C'est la lecon de 9.26 (e), et elle a coute deux sessions : un
@@ -6933,9 +7287,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						"   Ajouter --recipes 0 — le graphe est alors alimente "
 						"et lu sans entrer dans aucun cout.\n");
 	}
-	cfg.hindsight = static_cast<float>(opt.hindsight);
-	cfg.hindsight_k = opt.hindsight_k;
-	cfg.backward = opt.backward;
 	// `--canonical-digest` (confondre les COLONNES dans la cle de transposition)
 	// a vecu ici, avec l'avertissement automatique sur les monstres LIEN.
 	// SUPPRIME (audit 18) : REFUTE sur l'etalon A — poses divisees par 2 et par
@@ -6958,7 +7309,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::printf("  session 17 : hindsight %.2f x alpha, au plus %zu but(s) de "
 					"substitution par worker\n",
 					opt.hindsight, opt.hindsight_k);
-	cfg.probe_repeat = opt.probe_repeat;
 	// LE JUGE « CONVERSION OFFRE -> CHOIX » a besoin de savoir quelle carte le
 	// coup retenu engage. Il n'y a plus rien a allumer : `Choice::card` est
 	// renseigne INCONDITIONNELLEMENT, y compris sur les prompts de SELECTION
@@ -6993,8 +7343,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// quoi les deux se confondent dans les logs.
 	if(!landmark_graph.Empty()) {
 		cfg.landmarks = &landmark_graph;
-		cfg.landmark_weight = static_cast<float>(opt.landmark_weight);
-		cfg.landmark_h = static_cast<float>(opt.landmark_h);
 		std::printf("  landmarks : ACTIFS, %zu accomplissement(s), poids tirages "
 					"%.2f, poids finisseur %.2f%s\n",
 					landmark_graph.Items().size(), opt.landmark_weight,
@@ -7006,14 +7354,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::printf("!! --landmark-w/--landmark-h sans graphe de landmarks : "
 					"le poids est INERTE (il manque --landmarks)\n");
 	}
+	// Les pointeurs sont branches : le rapport peut dire ce qui est ACTIF et ce
+	// qui est demande mais INERTE. Lu AVANT le premier tirage, il rend un bras
+	// de mesure jetable avant de depenser le budget, pas apres.
+	ReportMechanisms(cfg, "transplant");
 	// Optimisation de cout anytime : la recherche continue apres la premiere
 	// solution (chaque solution resserre la borne), l'ensemble par worker est
 	// borne par remplacement du pire, le score de but NRPA est lexicographique.
 	if(opt.optimize) {
 		cfg.anytime = true;
 		cfg.max_solutions = 24;
-		cfg.burn_slack = opt.burn_slack;
-		cfg.burn_limit = opt.burn_limit;
 		std::printf("\n  OPTIMISATION anytime : cout lexicographique (brulees, "
 					"actions, decisions),\n  la reference coute %u/%u/%zu — la "
 					"borne a battre.%s\n", ref_burned, ref_actions, ref_decisions,
@@ -7184,6 +7534,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::mutex merge;
 		struct ModeStats {
 			uint64_t nodes = 0, rollouts = 0, cuts = 0, turn_cuts = 0, adapts = 0;
+			// Profil de progression par tirage (s21) : additif entre workers.
+			uint64_t sp_final[40] = {};
+			uint64_t sp_at_sum = 0, sp_lines = 0;
 			uint64_t hint_seen = 0, hint_taken = 0;
 			// Ventilation (audit 18) : `sel` = prompts de SOUS-ENSEMBLE, ou
 			// l'identite de carte est approximative et n'existe que sous
@@ -7448,6 +7801,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.rollouts += s.Stats().rollout_count;
 					m.cuts += s.Stats().novelty_cuts;
 					m.turn_cuts += s.Stats().turn_cuts;
+					for(int k = 0; k < 40; ++k)
+						m.sp_final[k] += s.Stats().sp_final[k];
+					m.sp_at_sum += s.Stats().sp_at_sum;
+					m.sp_lines += s.Stats().sp_lines;
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
@@ -7756,6 +8113,44 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)m.turn_cuts,
 						100.0 * double(m.constraint_cuts + m.guard_cuts +
 									   m.turn_cuts) / double(m.rollouts));
+		}
+		// PROFIL DE PROGRESSION PAR TIRAGE (s21) — l'instrument que 9.32
+		// nommait, et le verdict qu'il rend est binaire : un PIC unique dans
+		// l'histogramme = tous les tirages meurent au meme barreau de
+		// l'echelle x* (un verrou NOMMABLE, chercher l'option manquante a ce
+		// palier) ; une DISPERSION = c'est l'arite qui tue, et la forme close
+		// (cout = Sigma b^(l_i), domine par b^(l_max)) dit qu'il faut couper
+		// plus fin, pas chercher un mecanisme de plus.
+		for(int mi = 0; mi < 2; ++mi) {
+			const ModeStats& m = mi ? nrpa : greedy;
+			if(!m.sp_lines)
+				continue;
+			int hi = 39;
+			while(hi > 0 && !m.sp_final[hi])
+				--hi;
+			int mode_k = 0;
+			uint64_t mode_n = 0;
+			std::printf("      %-7s profil de progression (max de SerialProgress "
+						"par tirage, %llu mesures) :\n",
+						mi ? "NRPA" : "glouton",
+						(unsigned long long)m.sp_lines);
+			for(int k = 0; k <= hi; ++k) {
+				if(!m.sp_final[k])
+					continue;
+				if(m.sp_final[k] > mode_n) {
+					mode_n = m.sp_final[k];
+					mode_k = k;
+				}
+				std::printf("        %2d unite(s) : %8llu  (%5.1f %%)\n", k,
+							(unsigned long long)m.sp_final[k],
+							100.0 * double(m.sp_final[k]) / double(m.sp_lines));
+			}
+			std::printf("        derniere decision de progres : %.1f en "
+						"moyenne ; verdict : %s\n",
+						double(m.sp_at_sum) / double(m.sp_lines),
+						2 * mode_n > m.sp_lines
+							? "PIC UNIQUE — verrou nommable a ce barreau"
+							: "DISPERSION — l'arite tue, couper plus fin");
 		}
 		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
 					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
@@ -9252,7 +9647,7 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 	uint64_t prev = 0;
 	for(uint32_t depth = 2; depth <= opt.growth_max; depth += 2) {
 		SearchConfig cfg;
-		cfg.target_player = opt.target_player;
+		ApplyMechanisms(opt, cfg);   // chantier D : UN SEUL POINT DE CABLAGE
 		cfg.max_decisions = depth;
 		cfg.time_limit_ms = opt.growth_ms;
 		cfg.max_nodes = 5000000;
@@ -9260,10 +9655,14 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.enumeration.max_subsets = opt.max_subsets;
 		// La question de l'operateur : combien de BOARDS, pas combien d'etats.
 		cfg.count_boards = true;
-		// Le correctif est mesurable ICI et nulle part mieux : `--growth` rend
-		// la PROFONDEUR atteinte a budget egal, qui est la grandeur que la
-		// fusion doit ameliorer.
-		cfg.elide_forced = opt.elide_forced;
+		// `--elide-forced` etait cable ICI et seulement ici — c'est ce qui a
+		// fait mesurer trois sessions de bancs sur un chemin de recherche ou il
+		// ne faisait rien (9.28 (f)). Il vient desormais d'`ApplyMechanisms`,
+		// comme partout ailleurs. `--growth` reste le meilleur endroit pour LE
+		// MESURER (il rend la profondeur atteinte a budget egal), pas pour le
+		// cabler.
+		if(depth == 2)   // une fois, au premier palier de profondeur
+			ReportMechanisms(cfg, "growth");
 
 		Search search(duel, arena, yrp, cfg);
 		search.Run(target);
@@ -9587,12 +9986,18 @@ int main(int argc, char** argv) {
 							"les --scriptdir : la table serait vide et le "
 							"harnais rendrait un faux verdict.\n");
 			} else {
-				std::vector<uint32_t> codes;
+				// Les codes du DECK, doublons compris : c'est le nombre de
+				// COPIES qui decide d'une capacite « par COPIE », et la marche 1
+				// en depend. Les codes hors decklist sont ajoutes ensuite, dans
+				// `codes` seulement — les compter comme des copies fabriquerait
+				// des capacites qui n'existent pas.
+				std::vector<uint32_t> deck_codes;
 				const size_t dk = static_cast<size_t>(opt.target_player);
 				if(dk < yrp->decks.size()) {
-					for(uint32_t c : yrp->decks[dk].main) codes.push_back(c);
-					for(uint32_t c : yrp->decks[dk].extra) codes.push_back(c);
+					for(uint32_t c : yrp->decks[dk].main) deck_codes.push_back(c);
+					for(uint32_t c : yrp->decks[dk].extra) deck_codes.push_back(c);
 				}
+				std::vector<uint32_t> codes = deck_codes;
 				// Le board cible peut nommer des cartes hors decklist (mode
 				// --target) : les lire aussi, sans quoi une activation de la
 				// ligne tomberait en « carte hors table » pour une raison qui
@@ -9605,6 +10010,327 @@ int main(int argc, char** argv) {
 				const size_t nread = tbl.Build(db, scripts, kt, codes);
 				tbl.Print(db, kt);
 				tbl.PrintGrants(db, kt);
+				// La colonne NEGATIVE (chantier B). La zone du but est l'EXTRA
+				// DECK : c'est la que dorment les copies que le but reclame, et
+				// c'est la place dont 9.28 (h) a montre que douze aretes sur
+				// treize la vidaient. Constante LUE, jamais ecrite en dur.
+				uint64_t extra = 0;
+				kt.Lookup("LOCATION_EXTRA", extra);
+				tbl.PrintConsumption(db, kt, extra);
+				// MARCHE 1. Trois `--target 54701958` ne sont pas trois buts :
+				// c'est UN but a TROIS exemplaires, et c'est toute la
+				// difference — la multiplicite est ce que `RecipeDistance` ne
+				// porte pas et ce que le biais d'operateur ne sait pas designer.
+				std::vector<std::pair<uint32_t, uint32_t>> goal_counts;
+				for(const auto& [gc, gpos] : cons.board_add) {
+					(void)gpos;
+					auto git = std::find_if(
+						goal_counts.begin(), goal_counts.end(),
+						[&](const auto& g) { return g.first == gc; });
+					if(git == goal_counts.end())
+						goal_counts.emplace_back(gc, 1u);
+					else
+						++git->second;
+				}
+				tbl.PrintFiringCounts(db, kt, deck_codes, goal_counts);
+				// LE SOLVEUR SE PROUVE AVANT DE SERVIR (9.30). Cinq instances a
+				// solution connue, couvrant les quatre theoremes. Un simplexe
+				// faux rendrait des valeurs plausibles et NON admissibles :
+				// c'est le seul point du chantier qui ne se demontre pas, donc
+				// c'est le seul qui se teste a chaque execution.
+				{
+					size_t tot = 0;
+					const size_t ok = SelfTestOperatorLP(&tot);
+					std::printf("\n  auto-test du simplexe : %zu/%zu%s\n", ok,
+								tot, ok == tot ? "" :
+								"   <<< SOLVEUR FAUX : toute valeur h est a "
+								"jeter");
+					if(ok == tot)
+						BuildAndSolveBalance(tbl, db, kt, deck_codes,
+											 goal_counts);
+				}
+				// --- LE THEOREME 2, CONSTATE SUR UNE LIGNE REELLE -----------
+				//
+				// `h` est demontre consistant (9.30) : le long d'un plan, il ne
+				// peut PAS descendre de plus que le cout du coup. Ce qui n'est
+				// pas demontrable, c'est que le MODELE decrive ce jeu — et une
+				// ligne valide de 331 decisions est le seul banc qui le dise.
+				//
+				// Trois lectures, et la troisieme est le but du chantier :
+				//   - `h` doit finir a ZERO (le but est atteint) ;
+				//   - aucune chute de plus de 1 par decision (sinon le modele
+				//     ou le solveur ment, et la garde le dit sur place) ;
+				//   - la DENSITE de descente, a comparer aux 15 % d'etats non
+				//     muets de la nouveaute (9.29 (k)) : c'est le gradient que
+				//     le score n'a jamais eu.
+				if(!goal_counts.empty() && arena_ptr) {
+					BalanceModel bm;
+					if(bm.Build(tbl, db, kt, deck_codes, goal_counts)) {
+						while(arena.Depth() > 1)
+							arena.Pop();
+						if(arena.Depth() == 0)
+							arena.Push();
+						arena.Restore();
+						const uint8_t con =
+							static_cast<uint8_t>(opt.target_player);
+						std::vector<uint32_t> res, ava, fld, grv, tmp;
+						auto snap = [&]() {
+							res.clear(); ava.clear(); fld.clear();
+							for(uint32_t loc : { 0x01u, 0x40u }) {   // DECK, EXTRA
+								duel.QueryCodes(con, loc, tmp);
+								res.insert(res.end(), tmp.begin(), tmp.end());
+							}
+							// DISPO = tout ce qui peut servir de materiau.
+							for(uint32_t loc : { 0x02u, 0x04u, 0x08u, 0x10u,
+												 0x20u }) {
+								duel.QueryCodes(con, loc, tmp);
+								ava.insert(ava.end(), tmp.begin(), tmp.end());
+							}
+							duel.QueryCodes(con, 0x04u, tmp);   // MZONE
+							fld.assign(tmp.begin(), tmp.end());
+							duel.QueryCodes(con, 0x10u, tmp);   // GRAVE (s21)
+							grv.assign(tmp.begin(), tmp.end());
+						};
+						// --- PROFIL DES ECARTS ENTRE BARREAUX (s21) -----------
+						// La forme close derivee en s21 sur 9.31 : le cout d'un
+						// run serialise a blocs inegaux est Sigma b^(l_i),
+						// DOMINE par b^(l_max). L'echelle de x* existe (16-18
+						// cellules mesurees) et le run nu echoue quand meme : la
+						// seule inconnue restante est le PROFIL des l_i le long
+						// d'une ligne qui atteint le but. On le mesure ICI, sur
+						// la meme marche que le banc du theoreme 2 — memes
+						// besoins que la serialisation (NeedsFrom du bilan au
+						// depart, RESERVE exclue), meme comptage que
+						// SerialProgress.
+						snap();
+						LPResult r0;
+						bm.Solve(res, ava, fld, &r0);
+						std::vector<BalanceModel::Need> needs;
+						if(r0.feasible) {
+							for(const BalanceModel::Need& n : bm.NeedsFrom(r0))
+								if(n.zone != 0)
+									needs.push_back(n);
+							// Les barreaux de CONSOMMATION (s21) — le meme
+							// grain que la serialisation du chemin de
+							// recherche, pour que ce banc juge l'echelle que
+							// le run nu escalade vraiment.
+							for(const BalanceModel::Need& n :
+								bm.ConsumedFrom(r0))
+								needs.push_back(n);
+						}
+						auto served_now = [&]() {
+							std::pair<uint64_t, uint32_t> out{ 0, 0 };
+							uint32_t slot = 0;
+							for(const BalanceModel::Need& n : needs) {
+								const std::vector<uint32_t>& pool =
+									n.zone == 2   ? fld
+									: n.zone == 3 ? grv
+												  : ava;
+								uint32_t have = 0;
+								for(uint32_t raw : pool) {
+									const uint32_t c = db.Canonical(raw);
+									bool okc = false;
+									if(n.code)
+										okc = c == n.code;
+									else if(const CardRow* row = db.Find(c))
+										for(uint16_t sc : row->setcodes)
+											if(sc && (sc & 0x0fffu) ==
+														 (n.arch & 0x0fffu)) {
+												okc = true;
+												break;
+											}
+									if(okc && ++have >= n.count)
+										break;
+								}
+								const uint32_t got = (std::min)(have, n.count);
+								out.second += got;
+								if(slot < 16)
+									out.first |=
+										static_cast<uint64_t>(
+											(std::min)(got, 15u))
+										<< (slot * 4);
+								++slot;
+							}
+							return out;
+						};
+						uint32_t max_served = served_now().second;
+						// Attribution PAR SOUS-BUT (s21) : quelle exigence
+						// chaque unite sert, et a quelle reponse. C'est ce qui
+						// transforme « il y a un desert de 73 reponses » en
+						// « le desert est ENTRE tel et tel sous-but » — la
+						// question a laquelle un barreau de plus doit repondre.
+						std::vector<uint32_t> got_max(needs.size(), 0);
+						{
+							uint32_t slot2 = 0;
+							const uint64_t pk0 = served_now().first;
+							for(size_t i = 0; i < needs.size() && slot2 < 16;
+								++i, ++slot2)
+								got_max[i] = static_cast<uint32_t>(
+									(pk0 >> (slot2 * 4)) & 15u);
+						}
+						std::vector<size_t> unit_at;   // reponse du n-ieme +1
+						std::vector<size_t> unit_need; // indice du sous-but servi
+						std::vector<uint64_t> rung_vals;
+						size_t at = 0, steps = 0, down = 0, up = 0, bad = 0;
+						double prev = -1.0, first_h = -1.0, last_h = -1.0;
+						size_t infeasible = 0;
+						while(at < yrp->responses.size()) {
+							const size_t used = Advance(duel, *yrp, at, 1);
+							if(!used)
+								break;
+							at += used;
+							++steps;
+							snap();
+							if(!needs.empty()) {
+								const auto [pk, sv] = served_now();
+								rung_vals.push_back(pk);
+								for(size_t i = 0;
+									i < needs.size() && i < 16; ++i) {
+									const uint32_t g = static_cast<uint32_t>(
+										(pk >> (i * 4)) & 15u);
+									while(got_max[i] < g) {
+										++got_max[i];
+										unit_at.push_back(steps);
+										unit_need.push_back(i);
+									}
+								}
+								if(sv > max_served)
+									max_served = sv;
+							}
+							const double h = bm.Solve(res, ava, fld);
+							if(h < 0) { ++infeasible; continue; }
+							if(first_h < 0)
+								first_h = h;
+							if(prev >= 0) {
+								if(h < prev - 1.0 - 1e-6)
+									++bad;      // chute > 1 : th. 2 VIOLE
+								else if(h < prev - 1e-6)
+									++down;
+								else if(h > prev + 1e-6)
+									++up;
+							}
+							prev = h;
+							last_h = h;
+						}
+						arena.Restore();
+						std::printf("\n=== h LE LONG DE LA LIGNE REELLE "
+									"(theoreme 2) ===\n");
+						std::printf("  %zu decision(s) parcourue(s) ; h : %.0f "
+									"-> %.0f\n", steps, first_h, last_h);
+						std::printf("  descentes %zu (%.0f %%), montees %zu, "
+									"plats %zu\n", down,
+									steps ? 100.0 * double(down) / double(steps)
+										  : 0.0,
+									up, steps - down - up - bad - infeasible);
+						// CE COMPTEUR N'EST PAS UN JUGE DU THEOREME 2, et le dire
+						// est le correctif. L'unite du theoreme est la
+						// TRANSITION ; l'unite de cette marche est la DECISION,
+						// et une seule decision resout parfois une chaine
+						// entiere — donc plusieurs operateurs. Une chute de k
+						// sur une decision est LEGITIME des que k operateurs ont
+						// tire. Le premier tirage de ce banc l'a compte comme
+						// une violation : c'etait l'instrument, pas le modele.
+						std::printf("  chutes de plus de 1 sur UNE decision : "
+									"%zu  (attendu : une decision resout parfois "
+									"une chaine entiere)\n", bad);
+						// TROIS CAS, ET LES CONFONDRE FERAIT MENTIR LE RAPPORT.
+						// La premiere version imprimait « le modele RECONNAIT
+						// le but » sur un but PROUVE IMPOSSIBLE (h = infini
+						// partout, `last_h` reste a son sentinelle) : un
+						// instrument qui felicite le modele quand il declare la
+						// ligne morte est pire qu'aucun instrument.
+						if(infeasible == steps && steps)
+							std::printf("  h = INFINI sur TOUTE la ligne : le "
+										"modele declare ce but hors d'atteinte "
+										"(coherent avec l'impasse prouvee)\n");
+						else if(last_h < 0)
+							std::printf("  h final : INDETERMINE (aucun etat "
+										"faisable rencontre)\n");
+						else
+							std::printf("  h final = %.0f  %s\n",
+										std::fabs(last_h) < 1e-9 ? 0.0 : last_h,
+										std::fabs(last_h) < 1e-6
+											? "— le modele RECONNAIT le but"
+											: "<<< le but est atteint et h ne "
+											  "le voit pas : modele INCOMPLET");
+						if(infeasible)
+							std::printf("  etats ou h = INFINI : %zu   <<< le "
+										"modele declare morte une ligne qui "
+										"ABOUTIT : sur-contrainte\n",
+										infeasible);
+						// --- le profil, et son verdict en forme close ---------
+						if(!needs.empty() && !unit_at.empty()) {
+							std::sort(rung_vals.begin(), rung_vals.end());
+							rung_vals.erase(std::unique(rung_vals.begin(),
+														rung_vals.end()),
+											rung_vals.end());
+							std::vector<size_t> gaps;
+							size_t prev_at = 0;
+							for(size_t p : unit_at) {
+								gaps.push_back(p - prev_at);
+								prev_at = p;
+							}
+							std::sort(gaps.rbegin(), gaps.rend());
+							std::printf("\n=== PROFIL DES ECARTS ENTRE BARREAUX "
+										"(s21, le long de la ligne reelle) ===\n");
+							std::printf("  %zu unite(s) de sous-but servies en "
+										"%zu reponses ; %zu palier(s) distincts "
+										"de l'echelle\n", unit_at.size(), steps,
+										rung_vals.size());
+							// L'echelle NOMMEE : chaque barreau, sa reponse, et
+							// l'ecart depuis le precedent. Les deserts se lisent
+							// ici — entre QUELS sous-buts, pas seulement de
+							// quelle longueur.
+							{
+								size_t pat = 0;
+								for(size_t i = 0; i < unit_at.size(); ++i) {
+									const BalanceModel::Need& n =
+										needs[unit_need[i]];
+									char nb[64];
+									if(n.code)
+										std::snprintf(nb, sizeof nb, "%s",
+													  db.Name(n.code).c_str());
+									else
+										std::snprintf(nb, sizeof nb,
+													  "archetype 0x%llx",
+													  (unsigned long long)n.arch);
+									std::printf("    barreau %2zu  reponse %3zu "
+												"(+%3zu)  %-34s @%s\n", i + 1,
+												unit_at[i], unit_at[i] - pat, nb,
+												n.zone == 2   ? "TERRAIN"
+												: n.zone == 3 ? "CIMETIERE"
+															  : "DISPO");
+									pat = unit_at[i];
+								}
+							}
+							std::printf("  ecarts entre unites consecutives, en "
+										"REPONSES (adverses et forcees "
+										"comprises),\n  tries decroissants :");
+							for(size_t i = 0; i < gaps.size() && i < 12; ++i)
+								std::printf(" %zu", gaps[i]);
+							if(gaps.size() > 12)
+								std::printf(" ...");
+							std::printf("\n");
+							// La forme close (s21) : cout ~ Sigma b^(l_i) en
+							// decisions A CHOIX. Sur liger.yrpX, 170 des 331
+							// reponses sont des decisions a choix (~0,51) ;
+							// l'ecart en reponses MAJORE donc l'ecart utile.
+							const double ratio = 0.51, b = 5.9;
+							const double lmax =
+								static_cast<double>(gaps.empty() ? 0 : gaps[0]);
+							std::printf("  l_max = %.0f reponses (~%.0f "
+										"decisions a choix) ; terme dominant "
+										"b^l : 10^%.1f a b=%.1f\n", lmax,
+										lmax * ratio,
+										lmax * ratio * std::log10(b), b);
+							std::printf("  Lecture : sous ~8 decisions a choix "
+										"par ecart, chaque bloc est a portee "
+										"de ~10^6 tirages ;\n  au-dela, c'est CE "
+										"bloc qui interdit le run nu — l'option "
+										"qui manque est ENTRE ces barreaux.\n");
+						}
+					}
+				}
 				std::printf("\n  (%zu script(s) lu(s), %zu introuvable(s))\n",
 							nread, tbl.Missing());
 				HarnessVerdict hv = ConfrontPlan(tbl, db, kt, first.activations);

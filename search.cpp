@@ -10,6 +10,13 @@
 #include <queue>
 
 namespace solver {
+
+// Declaree ici, definie plus bas : deux points de partition l'appellent avant
+// le corps. Voir 9.31 — la serialisation par les sous-buts du bilan matiere.
+uint32_t SerialProgress(Duel& duel, uint8_t con,
+						const std::vector<SearchConfig::SerialReq>& reqs,
+						const CardDB& db, uint64_t* packed = nullptr);
+
 namespace {
 
 uint64_t Mix(uint64_t h, uint64_t v) {
@@ -1647,6 +1654,21 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		return;
 	const uint32_t overlap = CommonCodes(here.codes, target.codes);
 	const uint32_t rp = ResolveProgress(resolved);
+	// LA CELLULE EST LE PROGRES DE SOUS-BUT, PAS LE HACHAGE DE BOARD (9.32).
+	//
+	// C'est la moitie manquante de SIW_R. Rouvrir la table de nouveaute change
+	// ce qui compte comme neuf ; seul le RETOUR fait que chaque bloc reparte du
+	// precedent — et c'est lui qui transforme `5,9^110` en `14 x 5,9^8`.
+	//
+	// Go-Explore appelle « cellule » une classe d'etats dont on ne garde que le
+	// meilleur. Indexer par le hachage du board fait une cellule PAR ETAT :
+	// l'archive devient un cache, jamais une echelle. Indexee par le progres,
+	// elle garde le MEILLEUR etat de chaque palier — et le finisseur, qui prend
+	// deja ses racines dans l'archive triee, repart donc de chaque palier.
+	uint64_t sp_vec = 0;
+	const uint32_t sp = SerialProgress(duel,
+									   static_cast<uint8_t>(cfg.target_player),
+									   cfg.serial_reqs, duel.Db(), &sp_vec);
 	// Score : sous --resolve, les RESOLUTIONS d'abord — le verrou mesure est
 	// la jonction rips+board, et les racines qui la franchissent sont les
 	// etats deja rippes, pas les 8/8 muets. A egalite, le chemin le plus
@@ -1675,16 +1697,32 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	auto floor_of = [&](void) -> uint64_t {
 		return archive.size() >= cfg.archive_k ? archive_min_score : 0ull;
 	};
-	uint64_t score = pack(0);
+	// Le progres passe AVANT l'overlap : une cellule qui a franchi un sous-but
+	// intermediaire vaut mieux qu'une qui a pose une carte cible par hasard.
+	// Sans serialisation, `sp` vaut 0 et le classement est celui d'avant — le
+	// mecanisme ne peut donc pas degrader le bras temoin.
+	auto pack_sp = [&](uint32_t b) -> uint64_t {
+		const uint64_t base = pack(b);
+		return cfg.serial_reqs.empty()
+				   ? base
+				   : (static_cast<uint64_t>((std::min)(sp, 63u)) << 56) |
+						 (base >> 8);
+	};
+	uint64_t score = pack_sp(0);
 	if(uint64_t fl = floor_of(); fl && score <= fl)
 		return;
 	if(cfg.anytime) {
 		burned = CurrentBurned();
-		score = pack(burned);
+		score = pack_sp(burned);
 		if(uint64_t fl = floor_of(); fl && score <= fl)
 			return;
 	}
-	auto it = archive_cells.find(here.hash);
+	// La cle : le palier de progres quand la serialisation est active, sinon le
+	// hachage de board (comportement d'avant, a l'octet pres).
+	const uint64_t cell = cfg.serial_reqs.empty()
+							  ? here.hash
+							  : (0x5E21A1000000000ull ^ sp_vec);
+	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
 		if(score <= e.score)
@@ -1696,8 +1734,8 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		e.burned = burned;
 		e.path = path;
 	} else if(archive.size() < cfg.archive_k) {
-		archive_cells.emplace(here.hash, archive.size());
-		archive.push_back({ here.hash, score, overlap, rp, depth, burned, path });
+		archive_cells.emplace(cell, archive.size());
+		archive.push_back({ cell, score, overlap, rp, depth, burned, path });
 	} else {
 		size_t worst = 0;
 		for(size_t i = 1; i < archive.size(); ++i)
@@ -1706,8 +1744,15 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		if(score <= archive[worst].score)
 			return;
 		archive_cells.erase(archive[worst].cell);
-		archive_cells.emplace(here.hash, worst);
-		archive[worst] = { here.hash, score, overlap, rp, depth, burned, path };
+		archive_cells.emplace(cell, worst);
+		// LA CLE STOCKEE EST `cell`, PAS `here.hash` (defaut s21, trouve en
+		// relisant). L'entree portait le hachage de board alors que la carte
+		// `archive_cells` indexe le palier de progres : des la premiere
+		// eviction sous serialisation, `erase(archive[worst].cell)` visait une
+		// cle ABSENTE, la vraie cle restait et pointait une entree d'une autre
+		// cellule — l'echelle se corrompait en silence, exactement dans le
+		// regime (archive pleine) ou le run nu vit.
+		archive[worst] = { cell, score, overlap, rp, depth, burned, path };
 	}
 	archive_min_score = ~0ull;
 	for(const ArchiveEntry& e : archive)
@@ -1731,6 +1776,13 @@ bool Search::NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
 	uint32_t partition = cfg.novelty_serialize
 		? CommonCodes(here.codes, target.codes) * 16u + ResolveProgress(resolved)
 		: 0u;
+	// SERIALISATION PAR x* : le progres sur les sous-buts du bilan matiere se
+	// substitue au comptage des seules cartes cibles. Il bouge des la premiere
+	// brique posee, la ou l'autre reste plat jusqu'a la fin.
+	if(!cfg.serial_reqs.empty())
+		partition = partition * 64u +
+					(SerialProgress(duel, static_cast<uint8_t>(cfg.target_player),
+									cfg.serial_reqs, duel.Db()) & 63u);
 	CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here, partition,
 				 atoms_scratch);
 	if(novelty.Observe(atoms_scratch, depth, cfg.novelty_strict)) {
@@ -2535,6 +2587,24 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		bool armed;
 		~HindsightGuard() { if(armed) self->HindsightCommit(*run, *hits); }
 	} hs_guard{ this, &run, &hs_hits, hs_on };
+	// PROFIL DE PROGRESSION (s21) : le max de SerialProgress atteint par CE
+	// tirage, et l'indice de decision de son dernier progres. Verse par garde
+	// RAII pour la meme raison que Q^ et hindsight — les sorties sont trop
+	// nombreuses, et ce sont justement les tirages MORTS qui portent le signal.
+	uint32_t sp_max = 0, sp_max_at = 0;
+	struct SpGuard {
+		Search* self;
+		const uint32_t *mx, *at;
+		bool armed;
+		~SpGuard() {
+			if(!armed)
+				return;
+			++self->stats.sp_final[(std::min)(*mx, 39u)];
+			self->stats.sp_at_sum += *at;
+			++self->stats.sp_lines;
+		}
+	} sp_guard{ this, &sp_max, &sp_max_at,
+				!cfg.serial_reqs.empty() && cfg.novelty_patience != 0 };
 	// LES MECANISMES QUI LISENT L'INSTANTANE DU GRAPHE.
 	//
 	// `assign_bias` MANQUAIT ICI, et c'est un defaut mesure (session 18bis).
@@ -2844,6 +2914,19 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				// litteral.
 				if(cfg.backward)
 					partition = partition * 64u + (rec_back & 63u);
+				// SERIALISATION PAR x* (9.31), meme geste qu'au-dessus. La
+				// valeur nourrit AUSSI le profil de progression (s21) : elle
+				// etait calculee puis jetee apres la partition.
+				if(!cfg.serial_reqs.empty()) {
+					const uint32_t spv = SerialProgress(
+						duel, static_cast<uint8_t>(cfg.target_player),
+						cfg.serial_reqs, duel.Db());
+					partition = partition * 64u + (spv & 63u);
+					if(spv > sp_max) {
+						sp_max = spv;
+						sp_max_at = nsteps;
+					}
+				}
 				CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here,
 							 partition, atoms_scratch);
 				if(novelty.Observe(atoms_scratch, depth)) {
@@ -3084,7 +3167,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
 							(hinted ? cfg.hint_bias : 0.0f) +
 							(useful ? cfg.assign_bias : 0.0f) +
-							(op_useful ? cfg.op_bias : 0.0f)) /
+							(op_useful ? cfg.op_bias : 0.0f) -
+							(choices[i].phase ? cfg.phase_w : 0.0f)) /
 						   (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f);
 				mx = (std::max)(mx, logit[i]);
 				step.keys.push_back(key);
@@ -4369,9 +4453,16 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			++stats.reroots;
 		}
 
-		// Softmax de la politique sur les choix — les MEMES logits que les
-		// tirages NRPA (poids plan_key + biais repertoire + biais indices),
-		// pour que la politique apprise garde exactement son sens.
+		// Softmax de la politique sur les choix — les memes logits que les
+		// tirages NRPA a l'exception PRES, et il faut la nommer (s21) : les
+		// biais d'instantane (--assign-bias, --op-bias, --phase-w) n'existent
+		// pas ici, faute des listes `snap_*` que seul le rollout entretient.
+		// La TEMPERATURE, elle, y est desormais appliquee : la politique a ete
+		// APPRISE sous logits/tau (PolicyRollout et AdaptRun divisent tous
+		// deux) — la lire sans diviser en changeait le sens des que
+		// --nrpa-temp != 1. A temp = 1 (defaut), inchange a l'octet pres.
+		const double finv_t =
+			1.0 / (cfg.nrpa_temp > 1e-3f ? cfg.nrpa_temp : 1e-3f);
 		const size_t nc = ro_choices.size();
 		logit.resize(nc);
 		double mx = -1e300;
@@ -4388,8 +4479,9 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 										  c.card) != cfg.hint_cards.end();
 			auto pit = pol.find(c.plan_key);
 			const double w = (pit == pol.end()) ? 0.0 : pit->second;
-			logit[i] = w + (known ? cfg.nrpa_bias_known : 0.0f) +
-					   (hinted ? cfg.hint_bias : 0.0f);
+			logit[i] = (w + (known ? cfg.nrpa_bias_known : 0.0f) +
+						(hinted ? cfg.hint_bias : 0.0f)) *
+					   finv_t;
 			mx = (std::max)(mx, logit[i]);
 		}
 		// ARETES MACRO (chantier 3). Memes gardes qu'au rollout : UNE macro par
@@ -4424,7 +4516,10 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 			}
 			for(const auto& mp : lapp) {
 				auto pit = pol.find(cfg.options->ids[mp.first]);
-				logit.push_back((pit == pol.end()) ? 0.0 : pit->second);
+				// Meme temperature que les aretes atomiques (s21) : un softmax
+				// mi-tempere n'est celui d'aucune politique.
+				logit.push_back(((pit == pol.end()) ? 0.0 : pit->second) *
+								finv_t);
 				mx = (std::max)(mx, logit.back());
 				++stats.macro_taken;
 			}
@@ -4931,7 +5026,10 @@ CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
 		// Bornes accumulees : somme des d_i/pi_i, en log10 par segment puis
 		// somme en lineaire via le max (les termes couvrent des ordres de
 		// grandeur enormes, sommer naivement perdrait tout).
-		double best_log10 = -1e300, worst_log10 = -1e300;
+		// (`best_log10` retire s21 : il calculait le meme max que `worst_log10`
+		// et n'etait lu nulle part — du code mort qui se donnait l'air d'une
+		// deuxieme borne.)
+		double worst_log10 = -1e300;
 		std::vector<double> seg_log10;
 		auto close_segment = [&] {
 			if(!seg_depth)
@@ -4940,7 +5038,6 @@ CostForecast ForecastSearchCost(const NrpaPolicy& pol, const NrpaResidual* res,
 							 seg_logpi / std::log(10.0);
 			seg_log10.push_back(l);
 			worst_log10 = (std::max)(worst_log10, l);
-			best_log10 = (std::max)(best_log10, l);
 			seg_logpi = 0;
 			seg_depth = 0;
 		};
@@ -5371,15 +5468,93 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 	return static_cast<double>(majority) / static_cast<double>(total);
 }
 
+// LE PROGRES SUR LES SOUS-BUTS DU BILAN MATIERE (9.31).
+//
+// Rend la somme des exigences SERVIES : pour chaque place demandee par `x*`,
+// combien de jetons y sont deja, plafonne par ce que le plan en exige. Le
+// nombre monte donc des la premiere brique — c'est toute la difference avec
+// `CommonCodes`, qui ne compte que les cartes cibles POSEES et reste plat sur
+// toute la montee.
+//
+// COUT : les requetes de zone ne sont faites QUE si des exigences existent.
+// Mecanisme eteint = zero requete, donc zero regression de debit sur les bras
+// temoins. C'est la garde qui manquait a trois mecanismes de ce dossier.
+uint32_t SerialProgress(Duel& duel, uint8_t con,
+						const std::vector<SearchConfig::SerialReq>& reqs,
+						const CardDB& db, uint64_t* packed) {
+	if(reqs.empty())
+		return 0;
+	static thread_local std::vector<uint32_t> zone_scratch;
+	// DISPO = tout ce qui peut servir de materiau ; TERRAIN = la zone monstre ;
+	// CIMETIERE (zone 3, s21) = les barreaux de CONSOMMATION de x* — chaque tir
+	// consommateur y depose un corps, et c'est ce qui monte pendant les deserts
+	// que le profil des ecarts a nommes. Les listes sont baties une fois par
+	// appel, puis comptees.
+	std::vector<uint32_t> ava, fld, grv;
+	for(uint32_t loc : { 0x02u, 0x04u, 0x08u, 0x10u, 0x20u }) {
+		duel.QueryCodes(con, loc, zone_scratch);
+		for(uint32_t c : zone_scratch)
+			ava.push_back(db.Canonical(c));
+		if(loc == 0x04u)
+			for(uint32_t c : zone_scratch)
+				fld.push_back(db.Canonical(c));
+		if(loc == 0x10u)
+			for(uint32_t c : zone_scratch)
+				grv.push_back(db.Canonical(c));
+	}
+	uint32_t served = 0;
+	uint32_t slot = 0;
+	if(packed)
+		*packed = 0;
+	for(const SearchConfig::SerialReq& rq : reqs) {
+		const std::vector<uint32_t>& pool =
+			rq.zone == 2 ? fld : rq.zone == 3 ? grv : ava;
+		uint32_t have = 0;
+		for(uint32_t c : pool) {
+			if(rq.code) {
+				if(c == rq.code)
+					++have;
+			} else if(const CardRow* row = db.Find(c)) {
+				for(uint16_t sc : row->setcodes)
+					if(sc && (sc & 0x0fffu) == (rq.arch & 0x0fffu)) {
+						++have;
+						break;
+					}
+			}
+			if(have >= rq.count)
+				break;
+		}
+		const uint32_t got = (std::min)(have, rq.count);
+		served += got;
+		// LE VECTEUR, ET NON PLUS SA SOMME. Trente-trois unites de sous-but
+		// agregees en un entier ne rendaient que DIX paliers d'archive (9.32) :
+		// « deux corps et un Leo » et « trois corps » y avaient la meme cle,
+		// donc une seule cellule, donc un seul barreau d'echelle. Empaqueter
+		// chaque exigence sur quatre bits distingue les combinaisons — et c'est
+		// le nombre de BARREAUX qui decide si `5,9^110` se coupe en blocs
+		// franchissables.
+		if(packed && slot < 16)
+			*packed |= static_cast<uint64_t>((std::min)(got, 15u))
+					   << (slot * 4);
+		++slot;
+	}
+	return served;
+}
+
 void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 				 size_t stop_after, const EnumOptions& eo,
 				 std::unordered_map<uint64_t, size_t>& digests,
-				 std::vector<uint64_t>& keys) {
+				 std::vector<uint64_t>& keys, RefLineStats* stats) {
 	uint8_t ptype = 0;
 	std::vector<uint8_t> payload;
 	int player = -1;
 	size_t ri = 0;
 	keys.assign((std::min)(yrp.responses.size(), stop_after), 0);
+	if(stats) {
+		stats->arity.assign(keys.size(), 0);
+		stats->matched.assign(keys.size(), 0);
+		stats->prompt.assign(keys.size(), 0);
+	}
 
 	// Meme appariement que LiftPlan : applique une reponse, rend l'empreinte de
 	// l'etat atteint (0 = rejet, aucune correspondance possible).
@@ -5426,16 +5601,37 @@ void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 		if(player == target_player) {
 			auto choices = Enumerate(ptype, payload.data(),
 									 static_cast<uint32_t>(payload.size()), eo);
+			if(stats && ri < stats->arity.size()) {
+				stats->arity[ri] = static_cast<uint32_t>(choices.size());
+				stats->prompt[ri] = ptype;
+			}
 			arena.Push();
 			uint64_t want = advance(recorded);
 			arena.Restore();
+			bool hit = false;
 			for(const Choice& c : choices) {
 				uint64_t got = advance(c.response);
 				arena.Restore();
 				if(want && got == want) {
+					hit = true;
 					keys[ri] = c.plan_key;
+					// RETROUVE : le coup joue EST dans l'espace d'actions. A
+					// distinguer de `plan_key != 0`, qui dit seulement qu'il est
+					// au repertoire — la confusion des deux faisait lire une
+					// couverture trouee la ou il n'y avait qu'un coup sans cle.
+					if(stats && ri < stats->matched.size())
+						stats->matched[ri] = 1;
 					break;
 				}
+			}
+			if(!hit && stats && stats->misses.size() < RefLineStats::kMaxMisses) {
+				RefLineStats::Miss m;
+				m.index = ri;
+				m.prompt = ptype;
+				m.recorded = recorded;
+				for(const Choice& c : choices)
+					m.offered.push_back(c.response);
+				stats->misses.push_back(std::move(m));
 			}
 			arena.Pop();
 		}

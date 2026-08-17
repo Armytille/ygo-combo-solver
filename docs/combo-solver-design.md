@@ -6748,3 +6748,1349 @@ est **par phase** quand `ATTEINT` est cumulé.
 zone surveillée. Le seul artefact du run est `best_approach_1of4.yrp`, et le
 rejeu montre que son `1/4` est **Bagooska**. Une sonde qui ne rend pas la pièce
 ne permet pas de vérifier son propre verdict.
+
+### 9.29 Session 20 : le point de câblage unique, et la colonne NÉGATIVE du bilan
+
+**(a) LE CHANTIER D EST PIRE QUE SON ÉNONCÉ, et le relevé le chiffre.** Le
+prompt disait « deux des trois oublient des champs ». Le relevé champ par champ,
+fait par script sur les trois sites (`RunSolve`, `RunTransplantSolve`,
+`RunGrowthMeasurement`), rend sur **82 champs** :
+
+| site | champs câblés |
+|---|---|
+| `RunTransplantSolve` | **66** |
+| `RunSolve` — *le contrôle de santé* | **11** |
+| `RunGrowthMeasurement` | **6** |
+
+Ce n'est pas une divergence de propos — les budgets diffèrent légitimement d'un
+mode à l'autre. C'est que **les mécanismes choisis en ligne de commande
+n'étaient appliqués que sur UN chemin**. Trois conséquences, dont deux étaient
+inconnues du dossier :
+
+1. `--elide-forced` : la troisième occurrence, déjà documentée (§9.28 (f)).
+2. `--max-rollouts` / `--max-nodes` — **l'instrument du mode déterministe** —
+   n'existaient pas hors transplantation : `RunSolve` codait `max_nodes` en dur
+   à 50 000 000 et ignorait l'option. *Le mode déterministe n'a jamais été
+   disponible sur le contrôle de santé.*
+3. `--hindsight` et `--adapt-to-peak`, promus défauts en s19, n'atteignaient pas
+   la santé — ce que le prompt avait déduit, et qui est confirmé.
+
+**Le correctif est `ApplyMechanisms(opt, cfg)`** (`main.cpp`), seul endroit du
+fichier où un champ de `SearchConfig` reçoit une option. **26 assignations en
+double ont été retirées** de `RunTransplantSolve` : les laisser aurait recréé le
+piège au premier changement. Restent à l'appelant, et seulement eux : les
+budgets propres au mode, les **pointeurs** vers des objets locaux (graphe de
+recettes, catalogue d'options, table partagée) et la dérivation NRPA par worker.
+
+*Un défaut introduit et rattrapé, qui vaut d'être écrit* : deux des lignes
+retirées étaient des **corps de `if` sans accolades**. La suppression a laissé
+`if(opt.hint_bias >= 0)` avaler le `printf` suivant — le rapport « biais des
+indices » ne se serait imprimé que lorsque le drapeau était passé. Une
+suppression par script se relit ligne à ligne.
+
+**(b) LE CONTRÔLE QUI MANQUAIT : `ReportMechanisms`.** « Un mécanisme doit
+imprimer sa vie » ne suffisait pas — quand le champ n'était câblé nulle part, il
+n'y avait **rien à imprimer**, et le banc lisait un silence comme une absence
+d'effet. La fonction se lit après que l'appelant a branché ses pointeurs et rend
+deux choses : les mécanismes **ACTIFS** dans ce mode, et ceux **DEMANDÉS mais
+INERTES** ici faute de dépendance (poids non nul, pointeur nul). Un bras dont le
+rapport porte une ligne `!! INERTE` se jette **avant** de dépenser le budget.
+
+**(c) LA SANTÉ EST INCHANGÉE, ET C'EST UN RÉSULTAT.** Étalon de santé, mêmes
+chiffres qu'en s19 à l'unité près : *273 digests, 210/273, 209 candidates,
+16 replays, 0 `MSG_RETRY`, 290 états / 290 distincts / 0 fusions*. Or le rapport
+neuf dit `MECANISMES [solve] : adapt-to-peak, hindsight 0.50` — les deux défauts
+promus **atteignent désormais la santé et ne la changent pas**. Le prompt
+supposait que l'invariance de la santé à travers la promotion était
+*structurelle* (ils n'y arrivaient pas) ; elle est **aussi** comportementale.
+
+**(d) LE MODE DÉTERMINISTE MORD ENFIN DANS `--solve`, et il révèle un pari.**
+Même commande avec `--threads 1 --max-nodes 3000` : **3,9 s au lieu de 60 s**, et
+**le même verdict** (209 candidates, 16 replays). Le `--solve-ms 60000` du
+contrôle de santé est donc, sur ce cas, **quinze fois plus long que nécessaire**
+— la même remarque que le prompt faisait pour l'étalon B, ici mesurée.
+
+**(e) CHANTIER B, MARCHE 0 : LA COLONNE NÉGATIVE EST IMPRIMÉE.** La matière
+était extraite depuis la s19 (`fn_verbs`, `fn_locations`, `count_limit`) et lue
+par personne. `OperatorTable::PrintConsumption` la lit et rend, pour la place du
+but (`LOCATION_EXTRA`, constante **lue** dans `constant.lua`) :
+
+```
+  --- CE QUI CONSOMME DANS LOCATION_EXTRA (la ligne du but) ---
+  +1  Lunalight Black Sheep     exgythop   SendtoHand    [SANS BORNE declaree]
+  -1  Lunalight Kaleido Chick   cost       SendtoGrave   [cap 1/tour par COPIE]
+  -1  Lunalight Liger Dancer    descost    SendtoGrave   [cap 1/tour par COPIE]
+  +1  Lunalight Perfume Dancer  spop       SendtoHand    [cap 1/tour par NOM]
+```
+
+Coût : **un rejeu de 0,2 s, aucun tirage**. Harnais inchangé (37 activations,
+0 non appariée, 18/18 zone, 10/10 ressource).
+
+*Ce que la ligne dit, et le dossier ne l'avait jamais chiffré.* « par COPIE »
+vaut autant que de copies posables, « par NOM » vaut 1 quel qu'en soit le
+nombre. La place « Lunalight @ EXTRA » subit donc **jusqu'à six sorties par
+tour** (3 Kaleido Chick + 3 Liger, une chacune) contre **une seule entrée
+bornée** (Perfume, 1/tour par NOM). Et le but réclame **trois** Ligers d'un deck
+qui en porte trois : marge nulle. C'est §9.22 (h) — « les sous-buts identiques
+se disputent les ressources » — passé de l'énoncé au **calcul**.
+
+*Et le coût de Kaleido Chick est une découverte de la marche 0* : le pivot du
+combo mange lui-même dans l'extra deck. Aucune session ne l'avait relevé.
+
+**(f) LA CONSOMMATION N'EST PAS UN STOCK — objection posée en séance, et elle
+corrige la doctrine.** « Le but demande 3, il en reste 1, donc impasse » est un
+raisonnement de stock, c'est-à-dire l'erreur exacte que l'équation de bilan
+existe pour ne pas commettre. Un recycleur est une **transition à entrée
+positive** : tant qu'il est dans la matrice, la ligne reste **faisable** et rien
+n'est élagué. Trois règles en sortent, et elles sont écrites dans le code :
+
+1. **L'asymétrie du risque dicte le classement des verbes.** Oublier une
+   consommation rend le bilan plus mou, jamais faux ; oublier une **production**
+   le rend **non sonore** — il tuerait une vraie ligne. Au moindre doute un
+   verbe va donc dans `recycle` ou `autre`, **jamais** dans `detruit`.
+2. **`Duel.SendtoHand` sur un monstre d'extra est un RECYCLEUR**, pas une
+   consommation : le core le remet à l'EXTRA, et les scripts le disent en
+   testant `IsLocation(LOCATION_HAND|LOCATION_EXTRA)` juste après. Idem
+   `SendtoDeck`.
+3. **Ce qui fait mordre le bilan n'est pas la rareté, c'est la CAPACITÉ.** Sans
+   la borne `Y_o ≤ cap`, le bilan ferait tirer le recycleur cinq fois et ne
+   dirait jamais rien. Elle est déclarative (`SetCountLimit`), déjà extraite, et
+   elle est désormais imprimée **des deux côtés du signe**.
+
+*Un défaut d'appariement trouvé par cette exigence* : `fn_verbs` est indexé par
+le nom **à la définition** (`function s.spop` → `spop`) et les champs `fn_*` d'un
+effet par le nom **à l'usage** (`e2:SetOperation(s.spop)` → `s.spop`). Comparés
+tels quels, **aucune capacité ne se liait jamais** et le rapport imprimait
+« SANS BORNE » partout — un rapport vivant qui imprime le pessimisme partout,
+piège 42 sous une autre forme. Normalisation des deux côtés (`NormFn`).
+
+**(g) CE QUE LA MARCHE 0 NE DIT PAS, ET IL FAUT LE DIRE.** Black Sheep est un
+recycleur **réellement sans borne** (son `e2` ne porte aucun `SetCountLimit` —
+vérifié, ce n'est pas un défaut d'appariement), mais il est gardé par une
+**fermeture** : `IsLocation(LOCATION_GRAVE) and r == REASON_FUSION`. La table est
+déclarative et optimiste ; elle ne l'évaluera jamais. La ligne du but est donc
+**faisable**, et c'est la bonne réponse — la marche 0 ne prouve ici aucune
+impasse, elle **chiffre l'asymétrie**. Prouver des impasses demande la marche 1
+(le LP complet), et *dire ce qu'on ne prouve pas* est ce qui sépare cette marche
+du pis-aller de §9.28 (h).
+
+**(h) UN FAIT DU JEU, LU DANS LES SCRIPTS ET NON SUPPOSÉ, QUI CHANGE LA LECTURE
+DU CHANTIER E.** `c54701958.lua` porte `c:AddMustBeFusionSummoned()` **et**
+`c:EnableReviveLimit()` : **un Liger au cimetière ne revient jamais au terrain**.
+La place « Liger @ cimetière » est un **puits**. Le run de 300 s (§9.28 (i))
+rendait `Liger : terrain 3, cimetiere 380` — ces 380 ne sont donc pas des
+quasi-réussites, ce sont **380 jetons définitivement morts**, et le rapport
+380/3 mesure que la recherche brûle son budget sur des routes qui vident l'extra
+deck. Le seul recycleur de ce corps est Perfume `e2`, qui fait **terrain →
+extra** (et non cimetière → terrain), à **1/tour par NOM**.
+
+**(i) MARCHE 1 : LES COMPTES DE TIR, ET L'ARITHMÉTIQUE COMPLÈTE DU BUT.** La
+marche 0 chiffrait une asymétrie ; la marche 1 rend le vecteur `x` — *quel
+opérateur, et combien de fois* — puis le confronte aux capacités. Toujours **un
+rejeu de 0,2 s, aucun tirage** :
+
+```
+  --- CE QUI DOIT TIRER, ET COMBIEN DE FOIS ---
+  x3    invocation de Lunalight Liger Dancer     (3 copie(s) au deck)
+  x3    invocation de Lunalight Leo Dancer       (2 copie(s) au deck)
+  x15   CORPS d'archetype 0xdf  (exigence cardinale)
+  --    Number 41: Bagooska ... x1 : HORS COMPTES (aucune recette extraite)
+
+  --- LA LIGNE DU BILAN, PAR PRODUIT (copies + recyclage >= tirs) ---
+  capacite de RECYCLAGE sur l'extra : 1/tour + un recycleur SANS BORNE
+                                      (garde par une fermeture : on ne conclut pas)
+  Lunalight Leo Dancer   tirs x3, copies 2  =>  il MANQUE 1   TENDU
+
+  --- LES ACQUISITIONS (materiau NOMME absent du deck) ---
+  Lunalight Panther Dancer <- Kaleido Chick  requis x3, capacite 3 par COPIE  OK
+```
+
+**Trois chiffres neufs, et ils corrigent le dossier :**
+
+1. **Le but exige TROIS invocations de Leo Dancer, et le deck n'en porte que
+   DEUX.** Une copie doit donc être **recyclée**, et la seule capacité bornée
+   sur l'extra est Perfume à **1/tour par NOM**. La marge est exactement nulle.
+   Ce n'était écrit nulle part, et c'est la contrainte la plus dure du but.
+2. **Quinze corps Lunalight, pas neuf.** Le prompt de la s20 comptait
+   « 3 codes-Leo + 9 corps » — c'est le seul premier niveau. Leo a sa propre
+   recette, qui consomme aussi : la vraie exigence cardinale est **15**.
+3. **La porte n'est pas Leo, c'est Panther Dancer.** Le matériau nommé absent du
+   deck est `97165977`, et c'est *lui* que l'`EFFECT_ADD_CODE` de Kaleido Chick
+   acquiert. Requis **×3**, capacité **3 par COPIE avec 3 Chicks** : servi
+   **exactement à la limite**, et chaque activation paie l'arête `−1` de la
+   marche 0 (une Lunalight de l'extra au cimetière).
+
+**Le mur de §9.22 (h) est donc entièrement chiffré**, et sans un seul tirage :
+trois Chicks doivent tous atteindre la zone monstre et tous activer (3/3 de
+capacité), brûlant trois cartes de l'extra ; trois invocations de Leo doivent
+sortir de deux copies, donc un recyclage obligatoire à capacité 1 ; quinze corps
+Lunalight doivent passer ; et l'extra doit **encore** rendre trois Ligers à la
+fin. « Les sous-buts identiques se disputent les ressources » n'est plus une
+phrase.
+
+*Portée, dite dans le rapport lui-même* : une seule voie déclarée est
+développée, les conditions restent des fermetures, l'ordre n'y entre pas. Un
+`INFAISABLE` est une preuve ; un `OK` n'est qu'une absence de preuve du
+contraire. C'est ce qui sépare cette marche du pis-aller de §9.28 (h).
+
+**(j) DEUX DÉFAUTS TROUVÉS PAR LA MARCHE 1, ET LE SECOND EST UNE LACUNE DE LA
+TABLE.** Le but `--target 90590304` nomme la forme couchée de Bagooska tandis
+que la table est bâtie sur les codes du deck : la carte **disparaissait des
+comptes sans un mot**. Canoniser l'amorce n'a pas suffi — l'alias ne se réduit
+pas — donc le rapport **imprime désormais ce qui n'entre pas dans les comptes**,
+avec sa cause. Le verdict est net et c'est une lacune à traiter : *la recette
+Xyz de Bagooska n'est pas extraite*. Un bilan qui compte la moitié d'un but se
+lit exactement comme un bilan complet ; c'est la même famille de piège que
+§9.28 (f), et le correctif est le même — **le faire voir**.
+
+**(k) UNE LIGNE QUI ATTEINT LE BUT — `replay/liger.yrpX` — ET C'EST D'ABORD UNE
+RÉFUTATION DE LA RECHERCHE.** Fournie en séance par l'opérateur : trois Liger
+Dancer depuis une main donnée, plus l'effet d'A Bao A Qu, et **annoncée non
+optimale**.
+
+**Ce que cet artefact prouve en premier, et il faut l'écrire avant tout le
+reste** : la ligne **existe**, elle fait **331 décisions** depuis une main
+réelle, elle est **sous-optimale de l'aveu de son auteur** — et le solveur ne
+l'a jamais approchée. Le compteur de la sonde reste à `Liger >=1 : 0` sur
+**779 101 tirages** (§9.28 (i)). Ce n'est pas une bonne nouvelle, c'est la
+**première borne dure** sur l'échec : jusqu'ici on ignorait si le but était
+seulement atteignable dans ce régime ; on sait maintenant qu'il l'est, et donc
+que l'échec est entièrement du côté de la recherche.
+
+**LE PIÈGE À NE PAS PRENDRE, ET LE DOSSIER LE CONNAÎT DÉJÀ.** Une référence est
+un **indice massif** : le dossier reproche déjà à l'étalon B de n'avoir « aucun
+run nu — `--resolve` y est l'énoncé du but *et* un triple indice ». Bâtir la
+suite sur `liger.yrpX` en mode `--solve`, c'est mesurer avec la réponse sous les
+yeux, et cela ne dira **rien** de la capacité à trouver seul. La ligne vaut donc
+comme **contre-exemple à diagnostiquer**, pas comme béquille.
+
+*Vérifié, pas supposé* :
+
+| | |
+|---|---|
+| rejeu | **0 `MSG_RETRY`** — fidèle |
+| board final | `MZONE[1..3] = 3× Lunalight Liger Dancer` ATK ; Tiger, Masquerade, Tenki, Wolf en zone S/T |
+| coût de la ligne | **63 actions, 331 décisions, 20 cartes brûlées** |
+| digests | 332 états sur la ligne, 332 distincts, 0 fusion |
+| harnais | **44 activations, 0 NON APPARIÉE**, 20/20 zone, 11/11 ressource |
+| **test de but** | **« le test de but SE DÉCLENCHE en rejouant la référence »** |
+
+Cette dernière ligne est celle qui compte : la machinerie `--solve` — celle du
+contrôle de santé, avec ses déviations à k écarts, ses digests de
+resynchronisation et son répertoire de fenêtre — **accepte cette ligne comme
+référence**. L'étalon A cesse d'être « un but qu'on n'atteint pas » pour devenir
+**un problème d'optimisation avec une borne supérieure connue** : chercher une
+ligne qui ne soit pire ni en actions ni en décisions que 63/331. Et l'opérateur
+dit lui-même la ligne non optimale, c'est-à-dire exactement le régime pour
+lequel `--solve` a été écrit.
+
+**LA CONSOMMATION, MESURÉE SUR UNE VRAIE LIGNE.** L'extra deck passe de
+**15 à 4**. Onze cartes le quittent, dont **trois** sont les Ligers posés : la
+ligne en **brûle donc huit autres** pour arriver au but. La thèse du chantier B
+n'est plus une lecture de scripts, c'est un compte sur une ligne valide.
+
+**CE QUE LA CONFRONTATION AVEC LA MARCHE 1 DONNE — et elle expose une faiblesse
+de mon propre code.** Deux prédictions tiennent : `x3` invocations de Liger, et
+la chaîne des matériaux nommés (`Liger ← Leo`, puis `Leo ← Panther`, ce dernier
+absent du deck — imprimé par la table comme `materiau NOMME 97165977 x1`). Mais
+la troisième est **indécidable en l'état** : la marche 1 affirme « 3 invocations
+de Leo depuis 2 copies, donc un recyclage obligatoire », alors que l'exigence
+`IsCode(24550676)` porte sur un **matériau** et qu'un `EFFECT_ADD_CODE` la
+satisfait sans invoquer quoi que ce soit (§9.24, déjà au dossier).
+
+*La faiblesse est nommée* : l'appariement d'acquisition de la marche 1 associe
+**n'importe quel** accordeur d'`EFFECT_ADD_CODE` à **n'importe quel** matériau
+nommé manquant — il ne lit pas **quel code** est accordé (il vit dans le
+`SetValue` de l'effet, non extrait). Il a donc raison sur la structure et ne
+peut rien garantir sur l'identité. Tant que ce champ n'est pas lu, le `TENDU` du
+bilan par produit est une **alerte, pas une contrainte** : il suppose qu'un
+matériau nommé se fabrique par sa recette alors qu'il peut s'**acquérir**.
+
+C'est la bonne façon dont un modèle se fait corriger : par une ligne réelle, en
+0,2 s, et avant qu'un seul tirage ait été dépensé sur sa prédiction.
+
+**LE DIAGNOSTIC, ET IL TIENT EN TROIS NOMBRES SORTIS D'UN RUN DE 5,5 s.** C'est
+là qu'est la valeur du contre-exemple : il ne répare rien, il **localise**.
+
+```
+=== largeur effective (atomes IW) le long de la reference ===
+  etats visites             : 332
+  atomes distincts          : 110  (380 avec serialisation)
+  etats muets (rien de neuf): 281 (85%)  |  serialise : 267 (80%)
+  plus longue serie muette  : 18         |  serialise : 11
+  => patience retenue : 15 decisions
+```
+
+1. **85 % des états de la vraie ligne n'apportent AUCUN atome neuf.** La mesure
+   de nouveauté — qui pilote la sérialisation, la patience et une part du
+   score — **n'a aucun gradient le long de la solution**. Une recherche guidée
+   par la nouveauté ne peut pas préférer cette ligne : pendant 85 % du chemin,
+   elle ne la distingue de rien.
+2. **La plus longue série muette est de 18 décisions**, contre une **patience
+   retenue de 15**. Sérialisée elle tombe à 11 et passe — mais la marge est de
+   quatre décisions, et personne ne l'avait mesurée.
+3. **La nouveauté DÉGRADE autour de cette référence**, et c'est le contrôle A/B
+   intégré qui le dit : `sans : 1228 états, 16 solutions` contre
+   `avec : 3512 états, 8 solutions, 64 coupures (+186 % d'états)`. Deux fois
+   moins de solutions pour trois fois plus d'états.
+
+**Voilà ce que le contre-exemple achète** : non pas une béquille, mais le
+premier endroit où l'on peut dire *pourquoi* la ligne est hors de portée, avec
+des chiffres, sans dépenser un tirage. Et la réponse ne ressemble à aucune des
+hypothèses des sessions passées (ni la taille du board, ni la profondeur, ni le
+budget, ni la couverture de l'espace d'actions).
+
+**LA MESURE QUI MANQUE ENCORE, ET ELLE EST DÉCISIVE.** La vraisemblance de la
+ligne réelle **sous la politique courante** : le produit des probabilités que la
+politique attribue au bon coup, décision par décision, le long des 331. §9.28
+estimait `0,66^32 ≈ 1,7×10⁻⁶` sur les seules décisions `IDLECMD` d'un plan
+partiel ; ici le calcul peut être **exact** et sur la ligne entière. S'il rend
+`10⁻³⁰`, aucun budget de tirages n'atteindra jamais ce but et
+**l'échantillonnage est réfuté pour cette cible** — ce serait le résultat le plus
+important du dossier. C'est un rejeu, pas une recherche.
+
+*Réserve* : la ligne emploie **A Bao A Qu**, carte qui n'apparaît dans aucun
+étalon antérieur. Le deck de `liger.yrpX` doit donc être comparé à
+`Lunalight.ydk` avant de traiter les deux étalons comme le même problème.
+
+**(l) LA VRAISEMBLANCE DE LA LIGNE RÉELLE : `10⁻¹⁰⁴`, ET UN TROU DE COUVERTURE.**
+La mesure demandée en (k) est faite. Elle ne coûte qu'un relevé de 119 ms.
+
+*Pourquoi elle est exacte et non estimée* : à politique NEUVE tous les poids
+`plan_key` partent à zéro et aucun biais n'est armé, donc les logits de
+`search.cpp:3084` sont tous égaux et le softmax est **uniforme**. La probabilité
+qu'un tirage reproduise la ligne vaut donc exactement le produit des inverses
+d'arités. §9.28 en donnait une approximation (`0,66^32 ≈ 1,7×10⁻⁶`) sur les
+seules décisions idle d'un plan partiel.
+
+```
+  --- VRAISEMBLANCE DE LA REFERENCE (politique NEUVE = softmax uniforme) ---
+  decisions du joueur : 252  (forcees 82, a choix 170)
+  COUVERTURE : coup RETROUVE dans l'enumeration 251/252  <<< 1 ABSENT
+     decision #210 : 4 choix enumere(s), AUCUN ne reproduit la reference
+  arite max : 13 (decision #19)  |  arite moyenne geometrique : 4.11
+  log10 P(tirage uniforme reproduit la ligne) = -104.3
+```
+
+**1. `10⁻¹⁰⁴`, et la lecture honnête de ce nombre.** 170 décisions libres,
+arité géométrique moyenne **4,11**. Ce n'est **pas** la probabilité de résoudre
+le but : c'est celle de reproduire **cette ligne-là**, et le solveur n'a besoin
+que d'**une** ligne, pas de celle-ci. Le nombre seul ne réfute donc rien.
+
+*Ce qu'il réfute, en revanche, une fois croisé avec la mesure existante* : la
+sonde rend `Liger >=1 : 0` sur **779 101 tirages** (§9.28 (i)). Pour qu'un
+échantillonnage uniforme ait une chance, il faudrait que l'ensemble des lignes
+gagnantes soit d'une densité de l'ordre de `10⁻⁶` — et la mesure dit qu'elle est
+en dessous de `10⁻⁶` sans qu'on en connaisse le plancher. **L'œuf et la poule du
+dossier est enfin chiffré** : NRPA adapte vers des séquences qu'il a
+**échantillonnées** ; si aucun tirage n'atteint jamais le but, il n'y a rien
+vers quoi adapter, et vingt sessions de réglage de politique portaient sur un
+mécanisme qui ne pouvait pas démarrer. Ce n'est pas un défaut de réglage, c'est
+un défaut d'**amorçage**.
+
+**2. UN TROU DE COUVERTURE, LOCALISÉ.** À la **décision #210**, l'énumérateur
+produit **4 choix et aucun ne reproduit la référence**. Un seul suffit à rendre
+cette ligne inatteignable **quel que soit le budget**. C'est la première fois que
+le dossier tient un trou de couverture **sur une ligne qui atteint le but** — et
+cela n'infirme pas le « couverture 100 % au board » de §9.24 (h), qui mesurait
+autre chose (l'appartenance du BOARD, pas des coups d'une solution).
+
+**3. UNE CORRECTION D'INSTRUMENT, ET C'EST LA MÊME FAMILLE QUE TOUJOURS.**
+`ligne relevee : 251/331 coups identifies` **confondait deux questions** :
+*retrouvé* (le coup est dans l'espace d'actions du solveur) et *identifié* (il
+porte un `plan_key`, donc il est au répertoire). Un coup retrouvé mais sans clé
+était compté comme non identifié. Séparés : **251/252 retrouvés** sur les
+décisions du joueur, et l'écart 331 → 252 est constitué des décisions
+**adverses**, jamais énumérées. Le chiffre qui semblait dire « 24 % de la ligne
+échappe au solveur » n'en disait rien.
+
+**CE QUE CELA COMMANDE POUR LA SUITE, ET C'EST UN CHANGEMENT DE CAP.** Si
+l'amorçage est le défaut, alors *tout* mécanisme qui suppose un échantillon
+gagnant (adaptation NRPA, prior par rejeu, corpus, répertoire, `--hindsight`)
+est hors sujet tant que le premier succès n'existe pas. Les seules familles qui
+peuvent produire ce premier succès sont celles qui **construisent** au lieu
+d'échantillonner : la décomposition à rebours servie par un bilan matière
+correct (chantiers B), et une recherche best-first ordonnée par un `h` qui
+descende réellement (le `x*` de la marche 1). C'est exactement ce que la revue
+de littérature désignait, et la mesure vient de le rendre non négociable.
+
+**(m) LE TROU #210 EST UN DÉDOUBLONNAGE TROP GROSSIER — trouvé, réparé, gardé.**
+Le vidage octet à octet tranche sans ambiguïté :
+
+```
+decision #210  SELECT_UNSELECT_CARD : 4 choix enumere(s), AUCUN ne reproduit
+   REELLE  : 01 00 00 00  03 00 00 00        <- index 3
+   offerte : 01 00 00 00  00 00 00 00
+   offerte : 01 00 00 00  01 00 00 00
+   offerte : 01 00 00 00  02 00 00 00
+   offerte : ff ff ff ff                     <- terminer
+```
+
+`opt.dedup_by_code` repliait l'index 3 sur un **doublon de code**
+(`enumerate.cpp`, `MSG_SELECT_UNSELECT_CARD`) — et l'énumérateur **lisait puis
+jetait** le `loc_info` (`r.Skip(kLocInfo)`) qui l'aurait distingué. Or sur ce
+prompt la liste **traverse les zones** : deux exemplaires d'un même code y
+diffèrent par l'emplacement, la séquence et la position, et ne sont pas
+interchangeables. Le dédoublonnage porte désormais sur la paire
+**(code canonique, emplacement)** ; l'octet était déjà dans le message.
+
+| | avant | après |
+|---|---|---|
+| couverture sur `liger.yrpX` | 251/252 (**1 absent**) | **252/252** |
+| arité moyenne géométrique | 4,11 | 4,17 |
+| `log10 P` de la ligne | −104,3 | −105,4 |
+| santé (handrip, 60 s) | 209 cand., 16 replays, 0 retry | **identique**, et `coups identifiés` 210 → **211** |
+
+Le correctif coûte **un ordre de grandeur** de vraisemblance sur cent cinq. Ce
+n'est pas un arbitrage, c'est un défaut réparé : une réduction qui supprime un
+coup réel n'est pas une réduction, c'est une amputation — et un seul coup absent
+rend une ligne inatteignable à tout budget.
+
+**(n) LE CONTRÔLE QUI CORRIGE (l) — ET LA VRAISEMBLANCE N'EST PAS LA VARIABLE
+EXPLICATIVE.** Le même run de santé mesure la ligne de l'étalon B :
+
+| | étalon A (`liger.yrpX`) | étalon B (handrip) |
+|---|---|---|
+| décisions libres | 170 | 211 |
+| `log10 P` sous politique neuve | **−105,4** | **−85,9** |
+| ce que le solveur atteint | `Liger >=1` : **0** sur 779 101 tirages | `>=1` dans **5 runs sur 10**, `>=2` dans **3 sur 10** |
+
+**Dix-neuf ordres de grandeur d'écart, et des issues opposées.** Si la
+vraisemblance de la ligne de référence était la grandeur qui décide, l'étalon B
+serait lui aussi hors de portée — il ne l'est pas. La conclusion de (l) doit donc
+être corrigée : `10⁻¹⁰⁵` **ne mesure pas la difficulté du but**, il mesure celle
+de reproduire *une ligne nommée*, et le solveur n'a jamais eu besoin de celle-là.
+
+*Ce que la comparaison isole, en revanche, et c'est §9.22 (h) enfin sous
+contrôle* : ce qui sépare A de B n'est ni l'arité, ni la profondeur, ni la
+vraisemblance par ligne — c'est la **DENSITÉ de l'ensemble des solutions**, et
+elle suit la forme du but. Huit cartes **distinctes** se créditent une par une :
+chaque tirage partiel a un score, donc un gradient, donc des millions de lignes
+« presque bonnes » vers lesquelles adapter. Trois cartes **identiques** dont la
+fabrication consomme la même chaîne n'ont presque aucun crédit partiel avant la
+toute fin — et §9.29 (k) l'a mesuré indépendamment : **85 % des états de la vraie
+ligne n'apportent aucun atome neuf**.
+
+**Ce qui reste vrai de (l), et ce qui tombe.** Tombe : « l'échantillonnage est
+réfuté », qui ne suit pas du seul `10⁻¹⁰⁵`. Reste, et c'est mesuré : le solveur
+n'a **jamais** produit un seul succès sur l'étalon A, donc l'adaptation NRPA n'y
+a jamais eu de matière — le défaut d'**amorçage** est réel, mais sa cause est la
+platitude du crédit partiel, pas l'improbabilité d'une ligne particulière. C'est
+une cause qu'on peut attaquer : elle porte sur le SCORE, pas sur le budget.
+
+*La revue de littérature qui fonde tout ce chantier est dans
+`docs/etat-de-lart-consommation.md` (équation d'état de Bonet, cadre
+operator-counting, et pourquoi red-black planning ne nous va pas).*
+
+### 9.30 Le crédit partiel ne s'invente pas : `h^SEQ`, et ses quatre preuves
+
+*Consigne de séance, et elle est structurante : **pas de rustine, que des
+formules prouvées**. Le score du solveur porte aujourd'hui **onze paris** (100,
+10, 3, 1, `hint_bias` 2,0, `resolve_weight` 250, budgets ×0,7 et ×0,8, `qhat_*`,
+`hindsight_k`) dont la sensibilité n'a jamais été balayée. Ce qui suit ne les
+règle pas : il les **remplace** par une quantité dont chaque propriété se
+démontre en trois lignes.*
+
+#### Le modèle, et il est déjà construit
+
+Un **jeton** par carte physique. Une **place** `p = (code canonique, zone
+normalisée)`. Une **transition** `o` par opérateur déclaré, de vecteur de
+changement net `A_o` — la colonne positive vient des recettes
+(`DeclaredRecipe`), la négative des verbes destructeurs par zone
+(`fn_verbs` × `fn_locations`), toutes deux extraites et imprimées (§9.29 (e)).
+`M_s` est le marquage de l'état `s`, `M_G` celui du but. Coûts `c_o ≥ 0`,
+capacités `u_o` lues dans `SetCountLimit`.
+
+```
+    h(s)  =  min  cᵀx      s.c.   Aᵀx  ≥  M_G − M_s ,   0 ≤ x ≤ u
+```
+
+#### Théorème 1 — ADMISSIBILITÉ
+
+*Tout plan `π` de `s` vers le but a un coût `≥ h(s)`.*
+
+**Preuve.** Soit `u_π` le vecteur de comptes de tir de `π` (combien de fois
+chaque opérateur est joué). L'équation d'état donne
+`M_{fin} = M_s + Aᵀu_π`, et `M_{fin} ≥ M_G` puisque `π` atteint le but ; donc
+`Aᵀu_π ≥ M_G − M_s`. Par ailleurs `u_π ≥ 0`, et `u_π ≤ u` car aucun plan légal
+ne peut jouer `o` plus que sa capacité par tour. Donc `u_π` est **admissible
+pour le programme**, d'où `h(s) ≤ cᵀu_π = coût(π)`. ∎
+
+*Conséquence directe, et c'est la première fois que le dossier peut la faire* :
+`h` ne peut pas récompenser l'accumulation stérile ni **punir la consommation**,
+puisqu'il compte les effets négatifs dans `A`. C'est exactement le contresens
+qui a réfuté `--recipe-w` (§9.24 (d)), et il est ici impossible par
+construction, pas par réglage.
+
+#### Théorème 2 — CONSISTANCE (donc gradient)
+
+*Pour tout opérateur `o` applicable en `s` menant à `s'` : `h(s) ≤ c_o + h(s')`.*
+
+**Preuve.** `M_{s'} = M_s + Aᵀe_o`. Soit `x'` optimal pour `s'`, donc
+`Aᵀx' ≥ M_G − M_{s'}`. Alors
+`Aᵀ(x' + e_o) = Aᵀx' + Aᵀe_o ≥ (M_G − M_{s'}) + (M_{s'} − M_s) = M_G − M_s`,
+donc `x' + e_o` est admissible pour `s`, d'où
+`h(s) ≤ cᵀx' + c_o = h(s') + c_o`. ∎
+
+*C'est la propriété qui fabrique le crédit partiel*, et elle vaut sans aucune
+hypothèse sur la forme du but : chaque opérateur utile **fait descendre `h` d'au
+plus son coût, et jamais monter au-delà**. Un but à trois exemplaires identiques
+porte `M_G(p) = 3` ; poser le premier Liger fait tomber le membre de droite de 1
+et retire du programme le coût d'une fabrication entière — matériaux compris. La
+descente est donc **continue le long de la chaîne**, pas seulement à la pose :
+accumuler un corps Lunalight réduit déjà les tirs exigés en amont. C'est
+précisément ce que `CommonCodes` ne peut pas voir (il ne compte que le board) et
+ce que §9.29 (k) a mesuré comme absent — 85 % d'états muets.
+
+**Réserve, dite d'avance** : la preuve utilise `x' + e_o ≤ u`. Elle est valide si
+`u` est la capacité **restante** à l'état courant (elle décroît quand `o` est
+joué), et non la capacité initiale. C'est une condition sur l'implémentation, pas
+une hypothèse cachée : `u` se lit dans l'état.
+
+#### Théorème 3 — LES IMPASSES SONT PROUVÉES
+
+*Si le programme est infaisable en `s`, aucun plan de `s` n'atteint le but.*
+
+**Preuve.** Contraposée du théorème 1 : un plan fournirait `u_π` admissible. ∎
+
+*Portée exacte, et il faut la dire* : la réciproque est **fausse**. `h(s) < ∞`
+ne prouve rien — le programme ignore l'ordre et la légalité (les conditions sont
+des fermetures non évaluées). Un `∞` est une preuve d'impasse ; un fini est une
+absence de preuve. C'est la même asymétrie que §9.29 (g).
+
+#### Théorème 4 — LES CAPACITÉS ET LES LANDMARKS NE PEUVENT QUE RESSERRER
+
+*Ajouter au programme toute contrainte satisfaite par `u_π` conserve
+l'admissibilité et augmente `h`.*
+
+**Preuve.** Ajouter une contrainte réduit l'ensemble admissible, donc le minimum
+ne peut que croître ; et `u_π` reste dedans par hypothèse, donc `h(s) ≤ cᵀu_π`
+tient encore. ∎
+
+Deux familles satisfont l'hypothèse **sans démonstration supplémentaire** :
+
+- **capacité** `x_o ≤ u_o` — un plan légal ne dépasse pas `SetCountLimit` ;
+- **landmark** `Σ_{o ∈ L} x_o ≥ 1` pour tout ensemble `L` dont un opérateur au
+  moins doit être joué. Le dossier a **déjà** un graphe de landmarks appris
+  (§9.23 (c)) qui n'a jamais été branché sur quoi que ce soit de démontré.
+
+C'est le cadre *operator-counting* de Pommerening, Röger, Helmert & Bonet
+(ICAPS 2014) : les contraintes s'empilent dans **un seul** programme, et la
+réunion **domine le maximum** des composantes prises séparément.
+
+#### Ce que cela remplace, et ce que cela ne remplace pas
+
+| aujourd'hui | demain |
+|---|---|
+| `CommonCodes` (matériel au board) + 11 poids | `h(s)`, un seul nombre, quatre preuves |
+| `RecipeDistance` (h^add sans consommation, réfuté) | `A` porte la colonne négative |
+| « impasse » jamais détectée | `h = ∞`, prouvé |
+| landmarks appris et inertes | contraintes du même programme |
+
+**Ne sont PAS remplacés** : la politique NRPA (qui échantillonne), la garde,
+l'énumérateur. `h` est une **fonction d'évaluation**, pas une politique — et la
+règle 2 du dossier tient : `h = ∞` élague *un état prouvé mort*, jamais un choix
+jugé mauvais.
+
+#### Le seul point non démontré, et son coût
+
+Le programme se résout par simplexe à bornes. Les instances sont minuscules
+(~180 places, ~100 transitions), mais **écrire un simplexe juste est le vrai
+risque** de ce chantier — un simplexe faux rendrait des valeurs plausibles et
+non admissibles, c'est-à-dire le pire cas du dossier : un mécanisme vivant et
+menteur. Deux gardes, à poser **avant** toute mesure de recherche :
+
+1. **Vérification primal-dual à chaque appel en mode contrôle** : toute solution
+   `x` rendue doit satisfaire `Aᵀx ≥ b`, `0 ≤ x ≤ u`, et son coût doit égaler
+   celui du dual. Un écart est un défaut de solveur, détecté sur place.
+2. **Le cas à recette unique se calcule sans simplexe** : l'expansion par
+   multiplicité de la marche 1 (§9.29 (i)) est alors **exactement optimale** —
+   la contrainte de chaque place est saturée par un unique chemin de production.
+   Elle sert donc de **témoin croisé** sur l'étalon A, où elle rend déjà
+   `x3 Liger, x3 Leo, x15 corps`.
+
+#### Le solveur est écrit et testé ; la MATRICE ne peut pas encore l'être
+
+**Le simplexe.** Deux phases, règle de **Bland** — plus lente que le coût le plus
+négatif, et retenue exactement pour cela : elle **garantit la terminaison**
+(aucun cyclage), et nos instances sont minuscules. Un solveur qui boucle sur une
+instance dégénérée serait indétectable dans un run ; un solveur lent ne l'est
+pas.
+
+**Il porte ses propres gardes, vérifiées à chaque appel** : faisabilité primale
+(`A'x ≥ b`, `0 ≤ x ≤ u`) sur la solution rendue, et optimalité (plus aucun coût
+réduit négatif). Les théorèmes 1 à 4 ne valent que si ce solveur ne ment pas :
+c'est le seul point du chantier qui ne se démontre pas, donc le seul qui se teste
+à chaque exécution.
+
+**Auto-test : 5/5**, sur cinq instances à solution connue à la main, choisies
+pour couvrir les quatre théorèmes — multiplicité (`but ≥ 3`), consommation (une
+transition qui détruit ce qu'une autre produit), capacité (th. 4 : la voie la
+moins chère plafonnée force la voie chère), **infaisabilité** (th. 3 : le but
+exige 3, la seule voie plafonne à 2), et contrainte à membre droit négatif (déjà
+satisfaite, elle ne doit rien imposer).
+
+#### CE QUI MANQUE POUR BÂTIR `A`, ET POURQUOI ON S'ARRÊTE ICI
+
+La colonne **positive** est exacte et disponible : `DeclaredRecipe` porte les
+matériaux nommés avec leurs comptes et les exigences cardinales par setcode, et
+`SetCountLimit` donne `u`. La consommation **intra-recette** (un matériau
+consommé par l'invocation) y est donc déjà, et c'est l'essentiel du théorème 1.
+
+La colonne **négative hors recette ne peut pas être écrite aujourd'hui**, et il
+faut le dire au lieu de la fabriquer :
+
+1. **Les verbes destructeurs sont typés par ZONE, pas par CARTE.** `fn_verbs`
+   dit « cette fonction fait `SendtoGrave` » et `fn_locations` dit « elle touche
+   `LOCATION_EXTRA` » — jamais *quelle* carte part. Une colonne écrite là-dessus
+   attribuerait la destruction à une place choisie par nous : c'est exactement
+   la rustine, et elle rendrait `h` **non admissible** (théorème 1 tombe si `A`
+   décrit une consommation que le plan ne fait pas).
+2. **Le code accordé par `EFFECT_ADD_CODE` n'est pas extrait.** Il vit dans le
+   `SetValue` de l'effet. §9.29 (k) l'a montré en confrontant la marche 1 à
+   `liger.yrpX` : l'appariement d'acquisition associe *n'importe quel* accordeur
+   à *n'importe quel* matériau manquant. Sans ce champ, la transition
+   d'acquisition n'a **pas de cible**, donc pas de colonne.
+
+**Les deux manques sont des EXTRACTIONS, pas des modélisations** — c'est-à-dire
+qu'ils se lisent dans le Lua, comme `SetCountLimit` et `aux.Stringid` avant eux,
+et qu'ils se vérifient au harnais. Ils sont le prochain travail, dans cet ordre :
+
+| # | à lire | ce que ça débloque |
+|---|---|---|
+| 1 | `SetValue` d'un effet `EFFECT_ADD_CODE` | la transition d'acquisition a une cible ; la marche 1 cesse d'apparier au hasard |
+| 2 | l'argument de groupe des verbes (`Duel.SendtoGrave(g, ...)` — d'où vient `g`) | la colonne négative est attribuée à une place, et `A` est complet |
+
+Tant qu'ils manquent, `h` se bâtirait sur une matrice partiellement inventée. Le
+simplexe est prêt, testé, et **il attend une matrice qui se démontre**.
+
+#### Les deux extractions : l'une est faite, l'autre est PROUVÉE IMPOSSIBLE — et c'est mieux
+
+**Extraction 2 — FAITE.** La contrainte ne vit presque jamais dans la fonction
+qui détruit : `descost` fait
+`SelectMatchingCard(tp, s.descostfilter, ..., LOCATION_EXTRA, ...)` et c'est le
+**filtre** qui porte `IsSetCard(SET_LUNALIGHT)`. Un relevé des fonctions
+référencées (`fn_refs`, un seul niveau) plus le relevé des `IsSetCard`/`IsCode`
+par fonction (même mécanisme que `fn_locations`) donnent la place :
+
+```
+-1  Lunalight Kaleido Chick   cost      SendtoGrave  [cap 1/tour par COPIE]  arch 0xdf
+-1  Lunalight Liger Dancer    descost   SendtoGrave  [cap 1/tour par COPIE]  arch 0xdf
+```
+
+Avant ce saut d'indirection, les **deux** arêtes du deck étaient « place
+INDÉTERMINÉE ». La colonne négative est désormais attribuable :
+`(archétype 0xdf, LOCATION_EXTRA) → (archétype 0xdf, LOCATION_GRAVE)`.
+Harnais inchangé (0 non appariée, 20/20 zone, 11/11 ressource).
+
+**Extraction 1 — RÉFUTÉE AVANT D'ÊTRE ÉCRITE, et c'est le résultat de la
+séance.** Le `SetValue` d'un `EFFECT_ADD_CODE` n'est pas une constante :
+
+```lua
+-- Kaleido Chick, cout :
+local cg = Duel.SelectMatchingCard(tp, s.costfilter, tp, LOCATION_DECK|LOCATION_EXTRA, 0,1,1,nil,c)
+Duel.SendtoGrave(cg, REASON_COST)
+e:SetLabel(cg:GetFirst():GetCode())     -- le code de la carte ENVOYEE
+-- operation :
+e1:SetCode(EFFECT_ADD_CODE)
+e1:SetValue(e:GetLabel())               -- la valeur EST le label : RUNTIME
+-- et s.chngcon restreint : (sumtype & MATERIAL_FUSION) ~= 0
+-- s.costfilter : IsSetCard(SET_LUNALIGHT) and IsMonster() and IsAbleToGraveAsCost()
+```
+
+**Aucune lecture statique ne rendra jamais ce code** : il est choisi par le
+joueur, à l'exécution. Toute session future qui essaiera de « lire le
+`SetValue` » perdra son temps — c'est écrit ici pour cela.
+
+*Et le mécanisme réel est plus simple que ce que quatre sessions ont supposé.*
+Ce n'est pas « Chick accorde le nom de Leo » : c'est **une famille de
+transitions paramétrées**, une par code candidat `X` (monstre Lunalight du
+DECK ou de l'EXTRA) :
+
+```
+chick_rename(X) :  −1 (X, DECK|EXTRA)      la carte est envoyee au cimetiere
+                   +1 (X, GRAVE)
+                   +1 (X, materiau-Fusion) le Chick compte comme X, POUR UNE FUSION
+   capacite : 1 par tour et par COPIE de Chick, portee LOCATION_MZONE
+```
+
+Le LP exprime cette famille nativement — c'est **plus** naturel qu'une arête
+unique, pas moins. Et l'arithmétique de l'étalon A s'en trouve élucidée : chaque
+renommage vers « Leo Dancer » **envoie un vrai Leo au cimetière**, où
+`EFFECT_EXTRA_FUSION_MATERIAL` de Masquerade le rend **lui-même utilisable comme
+matériau**. Deux copies de Leo à l'extra rendent donc jusqu'à **quatre**
+matériaux-Leo (deux Chicks renommés + deux Leos au cimetière) pour trois
+exigés — la marge que la marche 1 croyait négative (« il manque 1, TENDU ») est
+en réalité positive, et pour une raison que seule la lecture du coût donne.
+
+**Ma marche 1 était donc fausse sur ce point, et le dossier le note** : elle
+appariait « Panther ← Kaleido Chick » alors que Chick n'accorde pas Panther en
+particulier, et elle comptait « 3 invocations de Leo » alors que Leo n'a jamais
+besoin d'être invoqué. Deux erreurs de la même racine : avoir supposé qu'un
+matériau nommé se **fabrique** par sa recette, alors qu'il s'**acquiert** — et
+le prix de l'acquisition est un jeton, pas une invocation.
+
+#### État exact du chantier, et ce qui reste
+
+| pièce | état |
+|---|---|
+| théorèmes 1 à 4 | **démontrés** (9.30) |
+| simplexe deux phases, Bland, gardes primal/optimal | **écrit, auto-test 5/5** |
+| colonne positive (recettes, comptes, cardinaux) | **extraite** |
+| capacités `u` (`SetCountLimit`, par NOM / par COPIE) | **extraites** |
+| colonne négative (place = archétype × zone) | **extraite** |
+| famille d'acquisition (renommage paramétré) | **comprise et spécifiée** |
+| **assemblage de `A` et calcul de `h`** | **reste à faire — plus aucun inconnu** |
+
+Le dernier point est un **assemblage**, plus une découverte : chaque coefficient
+a désormais sa source dans le Lua, et chaque propriété de `h` a sa preuve. Le
+premier juge sera gratuit et sans tirage : `h` à l'état de départ de l'étalon A
+doit être **fini** (la ligne existe, `liger.yrpX` le prouve), et `h` doit
+**décroître** le long de cette ligne — c'est le théorème 2, et une ligne réelle
+de 331 décisions est le banc qui le vérifie.
+
+#### `A` est assemblée, et `h` se calcule — à nu, en 0,2 s, sans un seul tirage
+
+**Le modèle, et chacun de ses choix est justifié par l'asymétrie du risque.**
+Trois zones abstraites — `RESERVE` (deck + extra), `DISPO` (main, terrain,
+cimetière, bannie : tout ce qui peut servir de matériau), `TERRAIN` (le but s'y
+lit). Quatre familles de transitions :
+
+| famille | effet | capacité |
+|---|---|---|
+| `mobiliser(C)` | `RESERVE → DISPO`, une action | ∞ |
+| `invoquer(C)` | `−1 (C,RES)`, `+1 (C,TERRAIN)`, `+1 (C,DISPO)`, `−k` par matériau nommé et `−k` par exigence cardinale | ∞ |
+| `renommer(X)` | `−1 (X,RES)`, **`+2 (X,DISPO)`** | copies du porteur |
+| destruction | `(arch, zone) → (arch, GRAVE)` | `SetCountLimit` |
+
+`mobiliser` est **optimiste et assumé** : on ignore quelle carte est réellement
+extractible du deck et à quel prix, et supposer que toute carte l'est pour une
+action **sous-estime** le coût — donc garde `h ≤ h*`, donc garde `h = ∞` comme
+**preuve**. Sur-contraindre aurait fait mentir la preuve. C'est la même
+asymétrie qu'en 9.29 (f), appliquée au modèle entier.
+
+Le `+2` de `renommer` n'est pas un réglage : il sort de la lecture du coût
+(§ précédent). Le porteur compte comme `X` pour une Fusion, **et** la carte
+envoyée au cimetière y devient elle-même matériau sous
+`EFFECT_EXTRA_FUSION_MATERIAL`.
+
+**Le résultat, sur l'étalon A, à nu :**
+
+```
+=== LE BILAN MATIERE : h(depart) ===
+  places 79, transitions 51 (dont 16 renommages), lignes 79
+  h(depart) = 13   [gardes : primal OK, optimal OK]
+  --- le vecteur de tirs x (non nuls) ---
+   x3.0   invoquer    Lunalight Liger Dancer @TERRAIN
+   x3.0   mobiliser   Lunalight Masquerade @DISPO
+   x3.0   mobiliser   Lunalight Scarlet Tiger @DISPO
+   x1.0   renommer    Lunalight Leo Dancer @DISPO
+   x1.0   mobiliser   Lunalight Leo Dancer @DISPO
+   x1.0   mobiliser   Lunalight Fusion @DISPO
+   x1.0   mobiliser   Lunalight Serenade Dance @DISPO
+```
+
+**Le LP retrouve seul le mécanisme du combo.** Un seul renommage (qui rend deux
+matériaux-Leo) plus un Leo mobilisé = **trois matériaux-Leo pour trois Ligers**.
+C'est exactement l'arithmétique déduite à la main de `e:SetLabel(...)` — mais ici
+personne ne l'a écrite : elle sort de la matrice.
+
+**Et cela corrige la marche 1 une seconde fois.** Elle annonçait `x15 corps` en
+développant la recette de Leo ; le LP rend **9**, parce que Leo n'est jamais
+invoqué — il est *acquis*. Une expansion ET développe toutes les branches ; un
+programme linéaire choisit la moins chère. C'est précisément la différence entre
+une décomposition et une optimisation, et elle vaut six unités ici.
+
+**Les trois juges, et le troisième est celui que le dossier n'a jamais pu
+rendre :**
+
+| but | `h(départ)` | lecture |
+|---|---|---|
+| 1 Liger | **4** | |
+| 3 Liger | **13** | et non 12 : les trois exemplaires **partagent** le renommage |
+| 4 Liger | **∞** | **IMPASSE PROUVÉE** — le deck n'a que trois copies |
+
+Le dernier est le théorème 3 qui mord sur le vrai modèle. Aucune session n'avait
+jamais pu prononcer « ce but est impossible depuis ce deck » ; c'est désormais un
+calcul de 0,2 s, et c'est une **preuve**, pas une heuristique.
+
+*Ce qui reste, et c'est une mesure, pas une découverte* : brancher `h` sur les
+états de la recherche (il faut le marquage depuis le duel, pas depuis la
+decklist) et vérifier le **théorème 2 sur une ligne réelle** — `h` doit décroître
+le long des 331 décisions de `liger.yrpX`. Le banc existe, la propriété est
+démontrée : il ne reste qu'à la constater.
+
+#### `h` le long d'une ligne réelle : le modèle reconnaît le but, et le gradient est PLUS PLAT que la nouveauté
+
+Le modèle se résout désormais à **n'importe quel état** — le marquage est lu
+depuis le duel (`QueryCodes`), plus depuis la decklist. Promené sur les 332
+décisions de `liger.yrpX`, en **0,6 s au total** :
+
+```
+=== h LE LONG DE LA LIGNE REELLE (theoreme 2) ===
+  332 decision(s) parcourue(s) ; h : 12 -> 0
+  descentes 16 (5 %), montees 2, plats 313
+  chutes de plus de 1 sur UNE decision : 1  (attendu)
+  h final = 0  — le modele RECONNAIT le but
+```
+
+**Ce qui passe.** `h(post-pioche) = 12` (contre 13 avant pioche : une carte de
+moins en réserve, cohérent), `h ≤ 63 actions` donc admissible sur ce cas, et
+surtout **`h` finit à 0** : le modèle reconnaît le but atteint. Une fonction
+d'évaluation qui ne reconnaîtrait pas sa propre cible serait à jeter avant
+toute mesure ; celle-ci ne l'est pas.
+
+**Un défaut d'INSTRUMENT trouvé au premier tirage du banc, et corrigé.** Le
+compteur annonçait « chutes de plus de 1 → violation du théorème 2 → LE MODÈLE
+MENT ». C'est faux : l'unité du théorème est la **transition**, celle de la
+marche est la **décision**, et une seule décision résout parfois une chaîne
+entière — donc plusieurs opérateurs. Une chute de `k` sur une décision est
+légitime dès que `k` opérateurs ont tiré. Le compteur mesurait la granularité du
+rejeu, pas une violation. *Un juge mal étiqueté aurait fait rejeter un modèle
+juste* — le piège symétrique de tous ceux du dossier.
+
+**LE RÉSULTAT NÉGATIF, ET IL EST LE PLUS IMPORTANT DE LA SECTION.** Le gradient
+est de **5 %** de décisions descendantes. La nouveauté, sur la même ligne, en
+rend **15 %** (§9.29 (k) : 85 % d'états muets). **`h` est donc trois fois plus
+plat que ce qu'il devait remplacer.**
+
+*La cause est nommée, et elle est dans le modèle, pas dans le solveur.*
+`mobiliser` est **gratuit et sans borne** : le programme suppose déjà que toute
+carte du deck est à une action de la zone disponible. Jouer réellement cette
+carte ne change donc presque rien à l'optimum — d'où 313 plats. **L'optimisme
+qui achète l'admissibilité (th. 1, donc la preuve d'impasse du th. 3) coûte
+exactement le gradient.** Ce n'est pas une surprise a posteriori : c'est
+l'arbitrage énoncé à la construction, et il vient d'être mesuré.
+
+**Et le théorème 4 dit précisément comment le payer sans rien perdre.** Toute
+contrainte que *tout plan* satisfait peut être ajoutée : `h` monte, le gradient
+se resserre, l'admissibilité tient. Les candidates ne sont pas des réglages,
+ce sont des **règles du jeu** ou des **déclarations** :
+
+| contrainte | source | statut |
+|---|---|---|
+| une Invocation Normale par tour | règle du jeu | tout plan la satisfait |
+| chaque effet de recherche a son `SetCountLimit` | déclaré (déjà extrait) | tout plan la satisfait |
+| une carte ne sort du deck que par un effet qui la nomme ou nomme son archétype | déclaré (`listed_names`, `listed_series`, déjà extraits) | tout plan la satisfait |
+
+Chacune remplace une part de l'optimisme de `mobiliser` par un fait. Le banc
+existe et coûte 0,6 s : chaque contrainte ajoutée se juge par le **couple**
+(`h(départ)` monte, densité de descente monte, `h final` reste 0, aucune
+violation par transition). C'est la première fois du dossier qu'un mécanisme
+d'évaluation dispose d'un juge complet **sans dépenser un seul tirage**.
+
+#### `mobiliser` est SUPPRIMÉE : seuls les effets réels des cartes priment
+
+*Correction posée en séance, et elle porte sur les trois contraintes que la
+section précédente proposait.* « Une Invocation Normale par tour » ne borne pas
+`mobiliser` — qui n'est pas une invocation. Et « une carte ne sort du deck que
+par un effet qui la nomme ou nomme son archétype » est **faux** : une recherche
+par niveau ou par type ne nomme rien, donc la contrainte **interdirait de vrais
+plans** et casserait l'admissibilité, c'est-à-dire la preuve d'impasse du
+théorème 3. Borner une transition inventée par des règles inventées ne corrige
+rien : c'est la transition qu'il faut retirer.
+
+**Ce qui la remplace était déjà extrait.** Chaque `Duel.SetOperationInfo`
+déclare une paire **(catégorie, zone source)** — 53 déclarations sur ce deck :
+
+```
+3x  CATEGORY_SPECIAL_SUMMON @ LOCATION_DECK    3x  CATEGORY_TOHAND @ LOCATION_DECK
+2x  CATEGORY_TOGRAVE @ LOCATION_DECK           4x  CATEGORY_SPECIAL_SUMMON @ LOCATION_GRAVE
+```
+
+C'est une transition, avec sa zone d'origine, sa destination **lue dans la
+catégorie**, et la capacité de l'effet qui la porte (`SetCountLimit`, × copies
+si « par COPIE »). La place vient du filtre (`IsSetCard`/`IsCode` via
+`fn_refs`), sinon des `listed_series`/`listed_names`, sinon de l'archétype de la
+carte. **Aucune de ces sources n'est une règle ajoutée** : toutes sont déclarées
+dans le script.
+
+*Ce que cela change pour le théorème 1, et il faut l'écrire.* `h` devient
+admissible **relativement au modèle déclaré** : si un effet échappait à
+l'extraction, un plan réel pourrait violer une ligne. Ce n'est pas une hypothèse
+en l'air — c'est ce que le **harnais mesure** (44 activations, 0 non appariée sur
+`liger.yrpX`). La garantie est conditionnée à un nombre relu à chaque run.
+
+**Un manque de l'implémentation, révélé par le changement.** Le solveur rend des
+`x` **fractionnaires** (`x1.5 renommer`) : c'est la relaxation continue, et la
+définition porte `h = ⌈c'x*⌉`. L'arrondi manquait. Il est admissible (les coûts
+sont entiers, donc tout plan a un coût entier ≥ `c'x*`) et il resserre
+gratuitement.
+
+**Les mesures, à modèle purement déclaré :**
+
+| | avec `mobiliser` (inventée) | effets déclarés seuls |
+|---|---|---|
+| places / transitions | 79 / 51 | **109 / 47** |
+| `h(départ)`, but 3 Liger | 13 | **14** |
+| but 4 Liger | ∞ | **∞** (th. 3 tient) |
+| `h` le long de la ligne | 12 → 0 | **12 → 0** |
+| **densité de descente** | 5 % | **5 %** |
+
+**ET LA DENSITÉ NE BOUGE PAS. Cela réfute mon propre diagnostic de la section
+précédente** : l'optimisme de `mobiliser` n'était **pas** la cause de la
+platitude. Retirer la transition inventée était juste — pour la fidélité — mais
+ne rend aucun gradient.
+
+*La lecture qui reste, et elle est soutenue par deux instruments indépendants.*
+La nouveauté rend **15 %** d'états informatifs (§9.29 (k)), le bilan matière en
+rend **5 %**. Deux mesures de nature entièrement différente — atomes d'IW d'un
+côté, optimum d'un programme linéaire de l'autre — s'accordent sur le même fait :
+**85 à 95 % des décisions de cette ligne ne font progresser aucune grandeur
+d'état.** L'information n'est pas dans l'état ; aucun score d'état ne la
+fabriquera.
+
+**Conséquence, et elle réoriente le chantier A.** Le produit utilisable de ce
+programme n'est pas `h` comme score, c'est **`x*`** :
+
+```
+x3.0   invoquer    Lunalight Liger Dancer @TERRAIN
+x1.5   renommer    Lunalight Leo Dancer @DISPO
+x5.0   effet       arch 0xdf @DISPO
+```
+
+*Quels opérateurs, et combien de fois.* C'est exactement l'entrée que
+`--op-bias` n'a jamais eue — il ne désigne aujourd'hui qu'**une** carte, sans
+multiplicité. Un biais qui sait « la Fusion doit tirer trois fois et le
+renommage deux » conditionne la distribution là où elle décide, au lieu de
+chercher un gradient dans un état qui n'en porte pas.
+
+**Trois défauts d'instrument corrigés dans cette seule section**, et c'est la
+constante du dossier : le compteur de violations du théorème 2 comptait des
+décisions au lieu de transitions ; l'arrondi supérieur manquait ; et le rapport
+imprimait « le modèle RECONNAÎT le but » sur un but **prouvé impossible** (h
+infini partout, sentinelle relue comme un zéro). Un instrument qui félicite le
+modèle quand il déclare la ligne morte est pire qu'aucun instrument.
+
+### 9.31 D'où viennent les 105 ordres de grandeur — et ce qu'il faut pour un run NU
+
+**La ventilation, pour 119 ms de rejeu :**
+
+| type de prompt | ordres de grandeur | décisions | arité moy. géo. |
+|---|---|---|---|
+| `SELECT_IDLECMD` | **31,0** | 35 | 7,69 |
+| `SELECT_CARD` | **24,7** | 33 | 5,62 |
+| `SELECT_UNSELECT_CARD` | **19,6** | 29 | 4,73 |
+| `SELECT_PLACE` | **15,9** | 29 | 3,54 |
+| `SELECT_CHAIN` | 5,5 | 16 | 2,21 |
+| `SELECT_POSITION` | **4,5** | 15 | 2,00 |
+| `EFFECTYN` + `OPTION` + `YESNO` | 4,1 | 13 | ~2 |
+
+**(a) CE QU'UN QUOTIENT PEUT PRENDRE, ET C'EST BORNÉ.** `PLACE` + `POSITION` =
+**20,4 ordres sur 105** — des décisions qui, pour ce but, ne changent pas
+l'issue. C'est beaucoup et c'est mécanique. Mais **il reste 85 ordres** répartis
+sur de vraies décisions (`IDLECMD` 31, les deux sélections 44,3, les fenêtres de
+chaîne 9,6). **Aucun quotient ne rend un tirage nu viable.** Le dire maintenant
+évite d'y consacrer une session.
+
+**(b) UN JUGE MAL POSÉ, ET C'ÉTAIT LE MIEN.** `--canonical-zones` rend
+**242/252** de couverture, dix `SELECT_PLACE` absents — la référence joue
+`00 04 02` (colonne 2), le quotient n'offre que `00 04 00`. Mais **un quotient
+est fait pour ne PAS reproduire la même ligne** : il en reproduit une
+équivalente. « Le coup exact de la référence est-il énumérable » est donc le
+mauvais critère pour juger une réduction ; le bon est « le but reste-t-il
+atteignable ». Mon instrument mesure le premier.
+
+*Et le détail réfute l'avertissement du dossier au passage* : les dix échecs sont
+tous en **MZONE** (`0x04`), pas dans les Zones Pendule. Le danger nommé dans le
+prompt s20 (« les Zones Pendule sont des séquences de `LOCATION_SZONE`, et Wolf
+n'invoque que de là ») **n'est pas celui qui mord ici**. Ce qui rend malgré tout
+un quotient MZONE aveugle FAUX est autre chose, et c'est déjà au dossier
+(§9.24 (j)) : **ce deck porte trois monstres LIEN**, dont les flèches rendent
+les colonnes non interchangeables.
+
+**(c) L'ARITHMÉTIQUE DU RUN NU, ET ELLE DÉSIGNE UNE SEULE VOIE.** Après quotient
+idéal il reste **85 ordres** sur ~110 décisions réelles, soit une arité
+géométrique de **~5,9**. Un échantillonneur atteint ~`10⁻⁶` par bloc de **8**
+décisions (`5,9⁸ ≈ 1,5×10⁶`). Donc :
+
+```
+   en UN bloc de 110 decisions   :  5,9^110  ≈  10^85     impossible
+   en 14 blocs de 8 decisions    :  14 × 5,9^8 ≈ 2×10^7   ATTEIGNABLE
+```
+
+**La différence entre impossible et faisable n'est ni la politique, ni le budget,
+ni le quotient : c'est la SÉRIALISATION.** Et c'est la seule conclusion que les
+mesures de cette session soutiennent.
+
+**(d) CE QUI MANQUE EXACTEMENT, EN UNE PHRASE.** Le solveur ne sait pas
+**s'engager**. Chaque tirage repart de zéro et doit réussir les 170 décisions
+d'un coup ; rien n'est jamais gardé. L'archive Go-Explore garde des *états*,
+mais rien ne dit d'un état qu'il est *en progrès* — d'où la nécessité d'un
+compteur de progrès que le board ne porte pas.
+
+Les trois pièces existent désormais séparément et n'ont jamais été assemblées :
+
+| pièce | état |
+|---|---|
+| **les sous-buts**, avec multiplicité | `x*` du bilan matière (§9.30) — calculés, pas devinés |
+| **le retour à un état choisi** | archive Go-Explore + arène (restauration 0,05 ms) |
+| **le critère de progrès** | consommation de `x*` : combien de tirs exigés ont eu lieu |
+
+Assembler = un `SIW_R` : atteindre le sous-but *i*, rouvrir la table de
+nouveauté, repartir de là. `novelty_serialize` fait déjà la moitié du geste,
+mais son critère est « une carte cible posée » — donc il ne se déclenche
+**jamais avant la toute fin**, ce que §9.29 (k) mesure comme 85 % d'états muets.
+Remplacer ce critère par la consommation de `x*` est le chantier, et c'est le
+seul que l'arithmétique désigne.
+
+### 9.32 La sérialisation par `x*` : construite, vivante, et il lui manque la MOITIÉ du geste
+
+**La chaîne complète est câblée** : le bilan matière est résolu dans le chemin de
+recherche (sous `--op-recipes`), son vecteur `x*` est converti en sous-buts avec
+multiplicités, et ceux-ci partitionnent la table de nouveauté à chaque décision.
+Drapeau `--no-serial` pour l'A/B ; il naît allumé, comme le veut la règle.
+
+**La VIE, lue avant tout juge de recherche :**
+
+```
+SERIALISATION par le bilan matiere : h(depart) = 14, 5 sous-but(s)
+    x15 (archetype)              @DISPO
+    x9  (archetype)              @DISPO
+    x3  Lunalight Liger Dancer   @DISPO
+    x3  Lunalight Liger Dancer   @TERRAIN
+    x3  Lunalight Leo Dancer     @DISPO
+```
+
+Cinq sous-buts, dont **trois intermédiaires** qui existent bien avant qu'aucun
+Liger ne soit posé — précisément ce que `CommonCodes` ne peut pas voir.
+
+**QUATRE DÉFAUTS TROUVÉS EN CÂBLANT, et chacun aurait rendu le mécanisme inerte
+ou menteur :**
+
+1. **`owned` est DÉDOUBLONNÉ** dans le chemin de recherche (il sert d'ensemble
+   d'appartenance). Le passer au bilan donnait **une** copie par code au lieu de
+   trois : « trois Liger » devenait infaisable pour une raison qui n'a rien à
+   voir avec le deck.
+2. **Les recettes purement CARDINALES étaient sautées.** `Xyz.AddProcedure(c,
+   nil, 4, 2)` ne remplit ni `named` ni `setcode` : le garde les écartait, donc
+   Bagooska n'avait **aucun producteur** et le programme entier devenait
+   infaisable.
+3. **L'ALIAS n'était pas réduit.** `--target 90590304` (Bagooska couché) et
+   `90590303` sont la même carte pour le core (`card::get_code`), pas pour
+   `Canonical` : deux places pour un seul objet.
+4. **Une place sans producteur passait pour une preuve d'impossibilité.** La
+   garde distingue désormais « ce but est PROUVÉ hors d'atteinte » (copies,
+   capacités : un fait) de « je ne sais pas fabriquer cette place » (lacune
+   d'extraction : une liste de travail). Confondre les deux rendait le
+   théorème 3 inutilisable.
+
+*Il reste une lacune nommée* : Bagooska n'a toujours pas de producteur — son
+`unresolved_counts` est vide, donc l'extraction de `Xyz.AddProcedure` ne relève
+pas le compte de matériaux. C'est la prochaine extraction, et elle est du même
+niveau que les précédentes.
+
+**L'A/B, à graine fixée et budget en compte (3 000 tirages, `--threads 1`) :**
+
+| bras | états | résultat |
+|---|---|---|
+| `--no-serial` | 188 789 | 0/3 cartes cibles, 2 monstres |
+| sérialisation | 182 847 (**−3 %**) | 0/3 cartes cibles, 2 monstres |
+
+**Coût mesuré : −3 % de débit. Effet : INDÉCIDABLE à ce budget** — les deux bras
+sont à 0/3, le juge n'a aucune résolution. Un but qui demande ~10⁷ tirages ne se
+départage pas à 3 000, et le dire vaut mieux que de lire un bruit.
+
+**CE QU'IL MANQUE, ET C'EST LA MOITIÉ DU GESTE.** `SIW_R` fait deux choses :
+rouvrir la mesure de nouveauté à chaque sous-but franchi, **et repartir de
+l'état qui l'a franchi**. Je n'ai implémenté que la première. Rouvrir la table
+change ce qui compte comme neuf ; **rien ne ramène le tirage à l'état du
+sous-but atteint pour y continuer**. Or c'est exactement ce que l'arithmétique
+exige : `14 × 5,9⁸` ne vaut `2×10⁷` que si chaque bloc REPART du précédent. Sans
+le retour, chaque tirage refait les 110 décisions depuis la racine et l'on reste
+à `5,9¹¹⁰`.
+
+La pièce existe pourtant, et elle est à quelques lignes : **l'archive
+Go-Explore** garde déjà des états avec leur chemin, et l'arène les restaure en
+0,05 ms. Il lui manque d'être indexée par **progrès de sous-but** au lieu du
+hachage de board — c'est-à-dire : une cellule par valeur de la partition
+`SerialProgress`, et un tirage sur deux qui repart d'une cellule au lieu de la
+racine.
+
+C'est la dernière pièce, elle est nommée, et le banc pour la juger existe déjà.
+
+#### La dernière pièce est câblée — et le run nu ne trouve toujours pas
+
+**Le correctif.** La cellule d'archive Go-Explore est désormais le **palier de
+progrès de sous-but**, et non le hachage de board. C'était la moitié manquante
+de `SIW_R` : rouvrir la table de nouveauté change ce qui compte comme neuf, mais
+seul le RETOUR fait que chaque bloc reparte du précédent. Indexer par le hachage
+faisait **une cellule par état** — l'archive était un cache, jamais une échelle.
+Le progrès passe aussi devant l'overlap dans le score ; sans sérialisation `sp`
+vaut 0 et le classement est celui d'avant, à l'octet près.
+
+**L'échelle se forme, et c'est vérifié :**
+
+```
+--- finisseur : LTS sur 15 racine(s) (archive 10 cellules, politique 123 poids) ---
+  archive 00  0/3   32 exp.   EPUISE      hR=3.0
+  archive 02  0/3  1164 exp.  EPUISE      hR=9.0
+  archive 07  0/3 22975 exp.  budget      hR=9.0
+  archive 08  0/3 13865 exp.  budget      hR=12.0
+```
+
+**Dix paliers distincts** ont été atteints et conservés — donc le progrès est
+réel, il est gardé, et le finisseur repart bien de chaque barreau. Le mécanisme
+fait ce qu'il annonce.
+
+**LE RUN NU, ET LE RÉSULTAT EST NÉGATIF.** Étalon A, aucune référence, aucun
+indice, 16 workers, 300 s :
+
+```
+h(depart) = 14, 5 sous-buts
+180 053 etats en 20 s ; total 196 s
+AUCUNE ligne trouvee jusqu'a 12 ecarts
+Meilleure approche : 0 des 3 cartes du board, 6 monstre(s) poses
+```
+
+**0/3.** Le solveur ne trouve toujours pas la ligne seul. Six monstres posés au
+lieu de deux au budget court — un progrès de surface, pas une conversion.
+
+*Ce que le diagnostic ajoute, et il est précis* : au sommet de l'échelle, la
+distance de recettes reste `hR = 9,0` à `12,0`. L'échelle compte **dix**
+barreaux quand le vecteur `x*` en exige **trente-trois** unités de sous-but
+(15 + 9 + 3 + 3 + 3). Autrement dit : **les blocs restent trop gros**. La
+sérialisation existe mais son grain est trois fois trop grossier pour ramener
+`5,9¹¹⁰` dans le domaine du faisable — l'arithmétique de 9.31 demandait des
+blocs de huit décisions, et rien ne garantit que ces dix paliers en font moins
+de trente.
+
+**Santé inchangée** (209 candidates, 16 replays, 0 `MSG_RETRY`, 290/290/0,
+couverture 211/211) : le changement d'archive ne dégrade aucun autre chemin.
+
+**Ce que la séance établit donc, sans l'enjoliver.** Le run nu ne fonctionne pas.
+Ce qui a changé, c'est qu'on sait **pourquoi**, avec des nombres à chaque
+étape — 105 ordres de grandeur ventilés par type de prompt, 20 récupérables par
+quotient, le reste ne cédant qu'à une sérialisation dont le grain est désormais
+mesurable (10 paliers pour 33 unités). La question suivante n'est plus « quel
+mécanisme essayer » mais **« comment couper plus fin »**, et c'est une question
+à laquelle le vecteur `x*` peut répondre : il porte 33 unités, l'archive n'en
+distingue que 10 parce que `SerialProgress` les agrège en un seul entier. Une
+cellule par **sous-but individuel servi** — et non par leur somme — multiplierait
+les barreaux sans rien coûter d'autre qu'une clé plus large.
+
+#### Le run nu ne fonctionne pas — et voici tout ce qu'on a éliminé
+
+**Le grain plus fin de l'échelle a été livré** : la cellule d'archive est le
+**vecteur** des sous-buts servis (quatre bits par exigence) et non plus leur
+somme. Effet mesuré : **10 → 16 cellules**, 15 → 21 racines de finisseur.
+L'échelle s'affine réellement. Résultat sur le but : **inchangé, 0/3**.
+
+**L'ISOLATION LA PLUS PROPRE DE LA SÉANCE.** Run nu depuis le départ de
+`liger.yrpX` — c'est-à-dire depuis une main dont on SAIT qu'une ligne de 331
+décisions atteint le but — avec `--start --no-plan`, aucune référence, aucun
+indice, 16 workers, 180 s :
+
+```
+112 167 etats en 20 s ; total 112 s ; archive 18 cellules
+AUCUNE ligne trouvee jusqu'a 12 ecarts
+Meilleure approche : 0 des 3 cartes du board, 5 monstre(s) poses
+```
+
+**Ce n'est donc pas la main.** Même départ que la solution connue, plus d'un
+million d'états, et cinq monstres posés sur les sept du board cible.
+
+**CE QUE LA SÉANCE A ÉLIMINÉ, chaque point par une mesure :**
+
+| hypothèse | verdict |
+|---|---|
+| la ligne est hors de l'espace d'actions | **non** — couverture 252/252 après le correctif `dedup_by_code` |
+| la main de l'étalon A est insuffisante | **non** — même résultat depuis la main de `liger.yrpX` |
+| le biais d'opérateur manquait | **non** — vivant à 97,6 % de prise, 0/3 ; à `w=6` la prise atteint **100 %** et le résultat EMPIRE (5 contre 6 monstres) |
+| la sérialisation n'était pas câblée | **non** — 5 sous-buts, échelle de 16 à 18 barreaux, 0/3 |
+| les tirages gaspillent la fin de tour | **non, et j'avais tort** — voir ci-dessous |
+
+**MON HYPOTHÈSE DE FIN DE TOUR EST RÉFUTÉE, ET PAR MA PROPRE MESURE.** Le
+compteur dit `tour 100 % des tirages`, sur 683 044 tirages, aucun coupé par
+contrainte ni par garde. J'en ai conclu que terminer le tour était tiré
+uniformément parmi ~10 choix idle (`0,9³² ≈ 3 %` de survie) et j'ai écrit
+`--phase-w`, un **biais** soustrait au logit des changements de phase (jamais un
+élagage : règle 2). A/B à graine fixée :
+
+| bras | coupures « tour » | résultat |
+|---|---|---|
+| `--phase-w 0` | 27 281 (100 %) | 0/3, 4 monstres |
+| `--phase-w 3` | 26 711 (100 %) | 0/3, 5 monstres |
+
+**Aucun effet.** La coupure « tour » n'est donc pas un choix du joueur mais la
+fin **naturelle** du tirage — exactement ce que §9.24 (i) affirmait, et que
+j'avais cru pouvoir relire autrement. Le drapeau reste, éteint par défaut, avec
+sa mesure : c'est une réfutation, pas un mécanisme.
+
+**L'ÉTAT HONNÊTE, SANS ENJOLIVURE.** Le solveur ne trouve pas la ligne seul, et
+la séance n'a pas débloqué le run nu. Ce qu'elle a produit est d'une autre
+nature : une **chaîne de mesure complète** là où il n'y avait que des
+hypothèses.
+
+*Ce qui reste, et c'est la seule chose que rien n'a encore testée* : entre « 5
+monstres posés » et « 3 Liger », il y a 63 actions dans la ligne réelle et le
+solveur en enchaîne cinq. Le prochain instrument n'est donc pas un mécanisme de
+recherche de plus — c'est le **profil de progression d'un tirage** : à quelle
+décision, en moyenne, un tirage cesse-t-il d'ajouter quoi que ce soit au board,
+et **quelle option lui manquait à ce moment-là**. `SerialProgress` est déjà
+calculé à chaque décision : l'histogramme « progrès atteint par tirage » ne coûte
+qu'un compteur, et il dira si les tirages meurent tous au même endroit — auquel
+cas il y a un verrou nommable — ou s'ils se dispersent, auquel cas c'est bien
+l'arité qui tue et seul un grain de sérialisation encore plus fin peut aider.
+
+### 9.33 Session 21 : chaque formule dérivée par sympy, trois défauts, et la forme close qui gouverne la sérialisation
+
+*Consigne de séance : reprendre chaque formule, la dériver via sympy
+(`py -3.11`), débusquer les erreurs, dégraisser, viser des formes closes — et
+débloquer le run nu. Le script de dérivation est
+`tools/s21_verify_formulas.py` (table de fuzz commise en
+`lp_fuzz_cases.inc`).*
+
+#### (a) Ce que sympy a CONFIRMÉ, bloc par bloc
+
+| formule | site | verdict |
+|---|---|---|
+| moyenne géométrique `10^(−log10P/n)` | `main.cpp` (vraisemblance) | exacte |
+| borne monolithique `log10(d) − lnπ/ln10 = log10(d/π)` | `ForecastSearchCost` | exacte |
+| log-sum-exp base 10 (somme des bornes par segment) | idem | exacte |
+| gradient NRPA `∂ln π_c/∂w_j = (δ−p_j)/τ` | `AdaptRun` | l'update du code est `α(δ−p)` **sans** `1/τ` : la règle NRPA classique (Rosin 2011), pas le gradient exact — à `τ` constant c'est un rescalage de `α`, COHÉRENT |
+| shrinkage contextuel `s = n/(n+k)` | `EffectiveWeight` | interpolation monotone, limites 0/1 correctes |
+| récurrence `λ/π` (mode `levin_reroot`) | `search.cpp` | **exacte** — égalité rationnelle sur 200 chaînes |
+| récurrence `hu/hv` (mode `reroot_h`) | `search.cpp` | **jamais de sous-estimation** sur 300 chaînes exactes ; écart max ×1,42 contre le min exact sur tous les ancêtres — unilatéral, comme annoncé |
+| arrondi `h = ⌈c'x*⌉` | `SolveOperatorLP` | admissible (coûts entiers) — 500 tirages |
+| théorème 2 sous capacités STATIQUES | §9.30 | **contre-exemple construit** : but 2p, u=1 → `h(s)=∞ > c+h(s')=2`. La réserve de 9.30 est un fait, pas une précaution : admissibilité et th. 3 tiennent (u statique ≥ u restant = relaxation), la consistance NON |
+
+#### (b) Le piège sympy qui a failli accuser le solveur
+
+`lpmin` **ignore l'assomption** `nonnegative=True` des symboles : sans
+`x ≥ 0` explicite il résout le programme à variables LIBRES. La première table
+de fuzz portait des optima négatifs sous coûts positifs (impossible), et le
+solveur C++ a « échoué » 9 cas sur 60 — tous par la faute de la référence. Un
+assert garde désormais le script : optimum négatif avec `c ≥ 0` = appel faux.
+*La leçon est celle du dossier : un juge se prouve avant de juger.*
+
+#### (c) L'auto-test du simplexe passe de 5 à 65 cas — et trois durcissements
+
+**65/65** : les 5 cas à la main plus **60 instances aléatoires résolues en
+rationnels exacts** par sympy (20 infaisables, membres droits négatifs, bornes
+actives, dégénérescence). Trois corrections au passage :
+
+1. **Les artificielles ne peuvent plus ENTRER en base** (`enterable` dans
+   `Optimize`) — remplace le coût punitif 1e12 de la phase 2, qui laissait une
+   réentrée possible sur base dégénérée à coefficient > 1. La preuve de
+   validité est standard (le point faisable `(x*, art=0)` appartient au
+   polyèdre restreint). *C'est vraisemblablement lui qui rendait `h = 12` au
+   banc s20 là où le vrai optimum est 13.*
+2. **Membre droit dans `(0, kEps]`** : écrasé à 0 avant le tri de signe (une
+   base de départ légèrement infaisable sinon).
+3. `worst_violation` mesure l'**excès** au-delà de la borne, plus `|x|`.
+
+#### (d) Trois défauts débusqués en relisant les formules
+
+1. **L'éviction d'archive corrompait l'échelle** (`search.cpp`) : l'entrée
+   évincée était réécrite avec `here.hash` comme clé de cellule au lieu de
+   `cell`. Dès la première éviction sous sérialisation, la carte
+   `archive_cells` gardait une clé morte pointant une entrée d'une AUTRE
+   cellule — l'échelle se corrompait en silence, exactement dans le régime
+   (archive pleine) où vit le run nu.
+2. **`best_log10` était mort** (`ForecastSearchCost`) : il calculait le même
+   max que `worst_log10` et n'était lu nulle part. Retiré.
+3. **Le softmax du finisseur ignorait la température** : la politique est
+   apprise sous `logits/τ` (rollout ET `AdaptRun` divisent), le finisseur la
+   lisait sans diviser — un contresens dès `--nrpa-temp ≠ 1`. Corrigé (arêtes
+   atomiques et macro) ; à `τ = 1` (défaut), inchangé à l'octet près. Les
+   biais d'instantané (`--assign-bias`, `--op-bias`, `--phase-w`) restent
+   absents du finisseur, faute des listes `snap_*` — c'est désormais DIT dans
+   le commentaire au lieu d'un faux « les MÊMES logits ».
+
+#### (e) LA FORME CLOSE, et elle gouverne tout le chantier de sérialisation
+
+Coût d'un run serialisé en `q` blocs égaux sur `L` décisions d'arité `b` :
+`f(q) = q·b^(L/q)`. Dérivée : `d ln f/dq = 1/q − L·ln b/q²`, d'où
+**`q* = L·ln b`**. Avec `L = 110`, `b = 5,9` : `q* = 195 > L` — le coût
+**décroît sur tout le domaine**. Conséquences :
+
+- **le grain le plus fin gagne TOUJOURS** ; le plancher est `q = L`, coût
+  `b·L ≈ 649` tirages ;
+- à 33 blocs égaux : `33 × 5,9^(110/33) ≈ 1,2×10⁴` — trivial ;
+- à blocs INÉGAUX le coût est `Σ b^(ℓᵢ)`, **dominé par `b^(ℓ_max)`** : un seul
+  bloc de 12 décisions vaut 10⁹, un de 20 vaut 10¹⁵. L'échec du run nu à 16-18
+  cellules et ~10⁶ états ne pouvait s'expliquer que par `ℓ_max ≳ 12` — c'est le
+  **profil des écarts** qu'il fallait mesurer, pas un mécanisme de plus.
+
+#### (f) Le profil des écarts, MESURÉ — et les déserts nommés
+
+Nouvel instrument dans le banc du théorème 2 (gratuit, déterministe) : les
+positions où chaque unité de sous-but de `x*` est servie le long de
+`liger.yrpX`, et les écarts entre elles. Avant correction :
+**17 unités, 14 paliers, écarts 73/69/46** en tête — trois déserts dont chacun
+interdit à lui seul le run nu (`b^37 ≈ 10^28,7`). Et ils sont nommés :
+
+- **+69** (réponses 127→196) : du dernier corps au PREMIER Leo Dancer — tout
+  l'assemblage (renommages, fusion) ne sert aucun barreau ;
+- **+73** (239→312) : de Leo 2 à Liger 2 — même désert, deuxième assemblage ;
+- **+46** (72→118) : au milieu de la montée des corps.
+
+*La cause est structurelle* : un renommage produit `+2 (X, @DISPO)` — un
+archétype déjà SATURÉ par les 15 corps. Le travail d'assemblage est invisible
+parce que ses produits retombent dans une place agrégée pleine.
+
+#### (g) Les barreaux de CONSOMMATION : la colonne négative de x* rendue en sous-buts
+
+Chaque tir consommateur **envoie un corps au cimetière**, et cette arrivée-là
+monte régulièrement pendant les déserts. `BalanceModel::ConsumedFrom(x*)` rend
+la consommation totale par identité (zones confondues, place générique exclue)
+en sous-buts `@CIMETIERE` (zone 3 de `SerialReq`, plafond 15 par l'empaquetage).
+C'est le « critère de progrès : consommation de x* » que §9.31 nommait sans
+l'avoir construit. Sur-compter est anodin (une unité jamais atteinte ne crée pas
+de cellule) ; sous-compter laissait les déserts entiers.
+
+**Mesure au banc** (même ligne, mêmes 332 réponses) :
+
+| | production seule (s20) | + consommation (s21) |
+|---|---|---|
+| unités servies | 17 | **30** |
+| paliers distincts | 14 | **33** |
+| ℓ_max | 73 réponses (~37 à choix) | **47 (~24)** |
+| terme dominant | 10^28,7 | **10^18,5** |
+
+Sur l'étalon A la sérialisation passe de 5 à **8 sous-buts** (56 unités) :
+`x15 arch @CIMETIERE, x3 Liger @CIMETIERE, x5 Leo @CIMETIERE` s'ajoutent aux
+cinq de production.
+
+#### (h) Le profil de progression PAR TIRAGE — l'instrument de 9.32, construit
+
+`sp_final[k]` (max de `SerialProgress` par tirage, garde RAII comme Q^),
+agrégé par mode et imprimé avec son verdict. Run nu 90 s, graine 888, 277 584
+mesures :
+
+```
+1-5 unites : 66 %      6-9 : 31 %      10-11 : 3 %      >=12 : 0,07 %
+derniere decision de progres : 13,7 en moyenne ; verdict : DISPERSION
+```
+
+**Pas de verrou unique** : les tirages s'étalent sur les unités 1-11 (la montée
+des corps) et n'atteignent pratiquement jamais les unités Leo/Liger. C'est
+l'arité qui tue, au barreau près — la réponse à la question binaire que §9.32
+posait, rendue par l'outil lui-même.
+
+#### (i) Le run nu, l'archive multipliée — et la lacune qui a montré sa dent
+
+À périmètre s20 (3 Liger, 90 s, graine 888) : archive **68 cellules** (s20 :
+16-18), 30 racines de finisseur, mais toujours **0/3, 5 monstres**. Cohérent
+avec la forme close : 10^18,5 reste ~12 ordres au-dessus du budget.
+
+Avec le 4ᵉ but (`90590304@DEF`), la sérialisation **refuse de s'armer** :
+Bagooska n'a toujours **aucun producteur** (`unresolved_counts` vide pour
+`Xyz.AddProcedure`, lacune nommée en s20 §7) → programme infaisable → « aucun
+sous-but posé ». La garde fait exactement son travail — mais le run nu à 4 buts
+perd TOUTE la sérialisation pour une lacune d'extraction. *L'extraction de
+`Xyz.AddProcedure` n'est plus un nettoyage : elle conditionne l'armement du
+mécanisme central.*
+
+#### (j) Ce qui reste, dans l'ordre que les nombres donnent
+
+1. **L'extraction `Xyz.AddProcedure`** (compte de matériaux → producteur pour
+   Bagooska) : débloque la sérialisation à 4 buts ET un barreau de plus.
+2. **Les deux déserts restants** (+46 aux réponses 72-118, +47 aux 239-286) :
+   nommer ce que la ligne y fait (activations du harnais dans ces fenêtres) et
+   trouver la place qui le rend visible — poursuite du geste de (g).
+3. **`ℓ_max ≤ ~8 décisions à choix** est le seuil que la forme close fixe :
+   tant qu'un écart le dépasse, aucun budget réaliste ne le franchit par
+   échantillonnage uniforme — c'est un critère de CORRECTION du grain, pas un
+   réglage.

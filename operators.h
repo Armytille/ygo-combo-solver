@@ -231,6 +231,16 @@ struct CardOperators {
 	std::unordered_map<std::string, uint64_t> fn_locations;
 	// Verbes `Duel.<Verb>` appeles par fonction — la CONSOMMATION declaree.
 	std::unordered_map<std::string, std::vector<std::string>> fn_verbs;
+	// Archetypes et codes NOMMES par la fonction (`IsSetCard`, `IsCode`). Avec
+	// `fn_locations`, c'est ce qui donne une PLACE a une arete negative :
+	// « une Lunalight de l'EXTRA » au lieu de « quelque chose dans l'extra ».
+	// Sans eux la colonne negative du bilan (9.30) devrait etre inventee.
+	std::unordered_map<std::string, std::vector<uint64_t>> fn_setcodes;
+	std::unordered_map<std::string, std::vector<uint32_t>> fn_codes;
+	// Fonctions locales appelees par une fonction. La contrainte ne vit presque
+	// jamais dans la fonction qui detruit : elle vit dans le FILTRE qu'elle
+	// passe a `SelectMatchingCard`. Un seul niveau suffit sur ce deck.
+	std::unordered_map<std::string, std::vector<std::string>> fn_refs;
 };
 
 // LOCATIONS SYMBOLIQUES. `SetRange(LOCATION_PZONE)` vaut 0x200, mais le message
@@ -272,6 +282,48 @@ public:
 	// ETAT, et lequel. C'est la ligne qui rend les deux pivots.
 	void PrintGrants(const CardDB& db, const ConstantTable& kt) const;
 
+	// LA COLONNE NEGATIVE — ce qu'un operateur DETRUIT (session 20, chantier B).
+	//
+	// Le graphe savait dire ce qu'un operateur EXIGE ; il ne savait pas dire ce
+	// qu'il DETRUIT. La matiere etait extraite depuis la s19 (`fn_verbs`,
+	// `fn_locations`, `count_limit`) et lue par PERSONNE. Ce rapport la lit.
+	//
+	// CE N'EST PAS UNE AMELIORATION, C'EST UNE CONDITION DE CORRECTION :
+	// 9.28 (h) a mesure que DOUZE aretes d'acquisition sur treize decrivaient
+	// des routes qui DETRUISENT le but, et le critere qui les a retirees etait
+	// un pis-aller. Le vrai critere est la consommation, et il se calcule.
+	//
+	// `goal_zone` est la zone dont on veut le bilan (LOCATION_EXTRA pour un but
+	// en monstres d'extra deck) : la synthese finale n'y garde que les aretes
+	// qui consomment DANS cette zone — c'est la ligne `A_p` de l'equation de
+	// bilan, celle dont la faisabilite decide qu'un tirage est mort.
+	void PrintConsumption(const CardDB& db, const ConstantTable& kt,
+						  uint64_t goal_zone) const;
+
+	// MARCHE 1 — LES COMPTES DE TIR, CONFRONTES AUX CAPACITES.
+	//
+	// L'equation de bilan rend trois choses ; la troisieme seulement est une
+	// heuristique. Les deux premieres sont ici : le vecteur `x` (quel operateur,
+	// et COMBIEN DE FOIS) et la FAISABILITE (`x_o <= cap_o` ?). Un but a trois
+	// exemplaires identiques ne demande pas « la recette de Liger » : il demande
+	// que l'invocation tire TROIS FOIS, et que chaque exigence soit servie trois
+	// fois. C'est la multiplicite que `RecipeDistance` n'a jamais portee
+	// (« 2 "Nom" » y est pose comme deux exigences d'une copie) et que le biais
+	// d'operateur ne sait pas designer — il ne nomme qu'UNE carte.
+	//
+	// PORTEE, DITE D'AVANCE. C'est une expansion ET, par la recette DECLAREE :
+	// exacte quand la recette est unique (le cas de Liger), et seulement
+	// NECESSAIRE quand plusieurs voies existent — on ne choisit pas a la place
+	// du jeu, on developpe la voie declaree et on dit qu'on l'a fait. Ni l'ordre
+	// ni la legalite n'y entrent : les conditions sont des fermetures.
+	//
+	// `deck` porte les codes AVEC leurs doublons (c'est le nombre de copies qui
+	// decide d'une capacite « par COPIE ») ; `goal` est (code, exemplaires).
+	void PrintFiringCounts(
+		const CardDB& db, const ConstantTable& kt,
+		const std::vector<uint32_t>& deck,
+		const std::vector<std::pair<uint32_t, uint32_t>>& goal) const;
+
 	size_t Cards() const { return cards.size(); }
 	size_t Missing() const { return missing; }
 	size_t OperatorCount() const;
@@ -286,6 +338,128 @@ private:
 	std::unordered_map<uint64_t, std::pair<uint32_t, size_t>> by_desc;
 	size_t missing = 0;
 };
+
+// --- LE PROGRAMME D'OPERATEURS (9.30) ---------------------------------------
+//
+//     h(s) = min c'x   s.c.  A'x >= M_G - M_s ,  0 <= x <= u
+//
+// Quatre proprietes DEMONTREES en 9.30 : admissibilite (th. 1), consistance —
+// donc gradient — (th. 2), impasses prouvees par infaisabilite (th. 3), et
+// resserrement libre par toute contrainte que tout plan satisfait (th. 4).
+//
+// Aucune des quatre ne vaut si le SOLVEUR ment. C'est le seul point non
+// demontrable du chantier, et il est traite comme tel : `LPResult` porte ses
+// propres gardes, verifiees a chaque appel, et le module s'auto-teste sur des
+// instances a solution connue avant de servir.
+struct OperatorLP {
+	size_t n_ops = 0;
+	std::vector<double> cost;    // c
+	std::vector<double> upper;   // u ; kNoBound = sans borne
+	struct Row {                 // sum coef.x >= rhs
+		std::vector<std::pair<size_t, double>> coef;
+		double rhs = 0.0;
+		std::string label;
+	};
+	std::vector<Row> rows;
+	static constexpr double kNoBound = 1e18;
+};
+
+struct LPResult {
+	bool feasible = false;
+	double value = 0.0;
+	std::vector<double> x;
+	// GARDES. `primal_ok` verifie A'x >= b et 0 <= x <= u sur la solution
+	// rendue ; `optimal_ok` verifie que plus aucun cout reduit n'est negatif.
+	// Un `false` ici invalide la mesure AVANT qu'elle serve, au lieu de la
+	// laisser passer pour une heuristique « un peu optimiste ».
+	bool primal_ok = false;
+	bool optimal_ok = false;
+	double worst_violation = 0.0;
+};
+
+LPResult SolveOperatorLP(const OperatorLP& lp);
+
+// Assemble `A`, `b` et `u` depuis la table, le deck et le but, puis imprime
+// `h` et le vecteur de tirs `x`. Rend `h` (ou -1 si infaisable, th. 3).
+//
+// TROIS ZONES ABSTRAITES, ET PAS UNE DE PLUS. `RESERVE` (deck + extra),
+// `DISPO` (main, terrain, cimetiere, bannie — tout ce qui peut servir de
+// materiau) et `TERRAIN` (le but s'y lit). Une zone de plus serait une
+// hypothese de plus a justifier.
+//
+// LA REGLE QUI GOUVERNE CHAQUE CHOIX DE MODELISATION : au moindre doute, on
+// SOUS-CONTRAINT. Sous-contraindre garde `h <= h*` (theoreme 1 tient, donc
+// `h = infini` reste une PREUVE d'impasse) ; sur-contraindre rendrait `h` plus
+// grand que le vrai cout et transformerait la preuve en mensonge. C'est
+// l'asymetrie de 9.29 (f), appliquee au modele entier.
+class BalanceModel {
+public:
+	bool Build(const OperatorTable& tbl, const CardDB& db,
+			   const ConstantTable& kt, const std::vector<uint32_t>& deck,
+			   const std::vector<std::pair<uint32_t, uint32_t>>& goal);
+	// `res` (deck+extra), `ava` (main, terrain, cimetiere, bannie) et `fld`
+	// (zone monstre) sont les codes PHYSIQUES presents dans chaque zone a
+	// l'etat courant. Rend h, ou -1 si infaisable (theoreme 3).
+	double Solve(const std::vector<uint32_t>& res,
+				 const std::vector<uint32_t>& ava,
+				 const std::vector<uint32_t>& fld,
+				 LPResult* out = nullptr) const;
+	// LES SOUS-BUTS, DERIVES DE x*. Chaque transition qui tire produit des
+	// places : ce sont les etapes que tout plan optimal du programme doit
+	// franchir. C'est la SERIALISATION, calculee et non devinee — et elle porte
+	// les places INTERMEDIAIRES (un corps disponible, un code acquis), la ou
+	// `CommonCodes` ne compte que les cartes cibles POSEES et reste donc plat
+	// sur toute la montee (9.29 (k) : 85 % d'etats muets).
+	struct Need {
+		uint32_t code = 0;    // 0 si l'exigence est un archetype
+		uint64_t arch = 0;
+		uint8_t zone = 0;     // 0 RESERVE, 1 DISPO, 2 TERRAIN, 3 CIMETIERE
+		uint32_t count = 1;
+	};
+	std::vector<Need> NeedsFrom(const LPResult& r) const;
+	// LES BARREAUX DE CONSOMMATION (s21). Le profil des ecarts a montre trois
+	// deserts de 46 a 73 reponses sur la ligne reelle : tout le travail
+	// d'ASSEMBLAGE (renommages, fusions) y est invisible parce que ses produits
+	// retombent dans des places agregees deja saturees — la forme close
+	// (cout ~ Sigma b^(l_i), domine par b^(l_max)) dit que ces deserts seuls
+	// interdisent le run nu. Or chaque tir consommateur ENVOIE un corps au
+	// cimetiere, et cette arrivee-la monte REGULIEREMENT pendant les deserts.
+	// On rend donc la colonne NEGATIVE de x* en sous-buts @CIMETIERE :
+	// « combien de tirs exiges ont eu lieu », lu dans l'etat — le critere de
+	// progres que 9.31 nommait sans l'avoir construit. Sur-compter est ANODIN
+	// (une unite jamais atteinte ne cree pas de cellule) ; sous-compter
+	// laisserait les deserts entiers.
+	std::vector<Need> ConsumedFrom(const LPResult& r) const;
+
+	size_t Places() const { return pname.size(); }
+	size_t Transitions() const { return lp.n_ops; }
+	size_t Renames() const { return n_rename; }
+	const std::vector<std::string>& TrNames() const { return tname; }
+	const std::vector<std::string>& PlaceNames() const { return pname; }
+	// Nom de la premiere place PRODUITE par cette transition (lisibilite).
+	std::string Produces(size_t t) const;
+
+private:
+	size_t PlaceId(int kind, uint64_t key, int zone) const;
+	std::vector<uint64_t> SetcodesOf(uint32_t code) const;
+	const CardDB* db = nullptr;
+	std::unordered_map<uint64_t, size_t> pid;
+	std::vector<std::string> pname;
+	std::vector<std::string> tname;
+	std::vector<double> need;                       // but par place
+	std::vector<std::unordered_map<size_t, double>> col;   // effets par transition
+	OperatorLP lp;                                  // couts et bornes ; rows rebati
+	size_t n_rename = 0;
+	mutable std::unordered_map<uint32_t, std::vector<uint64_t>> sc_cache;
+};
+
+double BuildAndSolveBalance(const OperatorTable& tbl, const CardDB& db,
+							const ConstantTable& kt,
+							const std::vector<uint32_t>& deck,
+							const std::vector<std::pair<uint32_t, uint32_t>>& goal);
+
+// Rend le nombre de cas passes sur le nombre de cas. Doit valoir n/n.
+size_t SelfTestOperatorLP(size_t* total);
 
 // Extraction d'UN script deja lu. Exposee pour le test : elle ne touche ni au
 // disque ni a la base.

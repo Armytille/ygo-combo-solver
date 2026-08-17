@@ -871,6 +871,81 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 					v.push_back(verb);
 				dp = e;
 			}
+			// --- CE QUE LA FONCTION DESIGNE : archetype et code ---------------
+			//
+			// Meme mecanisme que les zones ci-dessus, et il sert les DEUX
+			// colonnes qui manquaient au bilan (9.30) :
+			//
+			//   `IsSetCard(SET_X)` dans un filtre de cout dit QUEL archetype la
+			//   destruction touche — « une Lunalight de l'EXTRA », et non « une
+			//   carte quelconque ». Sans lui, la colonne negative etait typee
+			//   par ZONE seulement, donc inecrivable sans l'inventer.
+			//
+			//   `IsCode(n)` dit quel code exact une recette ou un filtre exige.
+			//
+			// On ne lit pas la semantique du filtre : on releve les CONSTANTES
+			// qu'il nomme. Un filtre qui nommerait deux archetypes rendrait deux
+			// entrees, et c'est a l'appelant de COMPTER l'ambiguite plutot que
+			// de trancher — la regle du dossier depuis le harnais.
+			auto scan_call = [&](const char* fn_name, auto&& sink) {
+				const size_t nlen = std::strlen(fn_name);
+				size_t q = 0;
+				while((q = line.find(fn_name, q)) != std::string::npos) {
+					size_t b = q + nlen;
+					size_t e2 = b;
+					while(e2 < line.size() && line[e2] != ')' && line[e2] != ',')
+						++e2;
+					sink(Trim(line.substr(b, e2 - b)));
+					q = e2;
+				}
+			};
+			// LES FONCTIONS QUE CELLE-CI APPELLE. La contrainte ne vit presque
+			// jamais dans la fonction qui detruit : `descost` fait
+			// `SelectMatchingCard(tp, s.descostfilter, ..., LOCATION_EXTRA, ...)`
+			// et c'est le FILTRE qui porte `IsSetCard(SET_LUNALIGHT)`. Sans ce
+			// saut d'un niveau, toute arete negative reste « place
+			// INDETERMINEE » — mesure faite, les deux du deck l'etaient.
+			{
+				size_t sp = 0;
+				while((sp = line.find("s.", sp)) != std::string::npos) {
+					const bool word_start =
+						sp == 0 || !IsIdentChar(line[sp - 1]);
+					size_t e2 = sp + 2;
+					while(e2 < line.size() && IsIdentChar(line[e2]))
+						++e2;
+					if(word_start && e2 > sp + 2) {
+						const std::string ref = line.substr(sp + 2, e2 - sp - 2);
+						auto& v = co.fn_refs[cur_fn];
+						if(ref != cur_fn &&
+						   std::find(v.begin(), v.end(), ref) == v.end())
+							v.push_back(ref);
+					}
+					sp = e2;
+				}
+			}
+			scan_call("IsSetCard(", [&](const std::string& arg) {
+				uint64_t v = 0;
+				if(!arg.empty() && kt.Eval(arg, v) && v) {
+					auto& s2 = co.fn_setcodes[cur_fn];
+					if(std::find(s2.begin(), s2.end(), v) == s2.end())
+						s2.push_back(v);
+				}
+			});
+			scan_call("IsCode(", [&](const std::string& arg) {
+				uint64_t v = 0;
+				if(arg.empty())
+					return;
+				if(std::isdigit(static_cast<unsigned char>(arg[0])))
+					v = std::strtoull(arg.c_str(), nullptr, 10);
+				else
+					kt.Eval(arg, v);
+				if(v && v < 0xffffffffull) {
+					auto& s2 = co.fn_codes[cur_fn];
+					const uint32_t c32 = static_cast<uint32_t>(v);
+					if(std::find(s2.begin(), s2.end(), c32) == s2.end())
+						s2.push_back(c32);
+				}
+			});
 		}
 	}
 
@@ -1239,6 +1314,235 @@ void OperatorTable::PrintGrants(const CardDB& db, const ConstantTable& kt) const
 				rows.size(), cards.size());
 }
 
+namespace {
+
+// CLASSEMENT DES VERBES, et la nuance qui decide de tout.
+//
+// `Duel.SendtoHand` sur un monstre d'EXTRA ne va pas a la main : le core le
+// remet a l'EXTRA — c'est pourquoi les scripts testent
+// `IsLocation(LOCATION_HAND|LOCATION_EXTRA)` juste apres l'appel. C'est donc un
+// RECYCLEUR, une entree POSITIVE sur la place visee, et non une consommation.
+// Idem `SendtoDeck`. C'est l'objection qui interdit de raisonner en STOCKS :
+// le modele est un modele de FLUX.
+//
+// L'ASYMETRIE DU RISQUE dicte le classement, et elle n'est pas symetrique du
+// tout : oublier une CONSOMMATION rend le bilan trop optimiste — plus mou,
+// jamais faux. Oublier une PRODUCTION le rend NON SONORE — il tuerait une
+// vraie ligne. Au moindre doute un verbe va donc dans « recycle » ou
+// « autre », JAMAIS dans « detruit ». C'est la direction sure de la regle 2.
+enum class VerbKind { kDestroy, kRecycle, kProduce, kOther };
+
+VerbKind ClassifyVerb(const std::string& v) {
+	static const char* kDestroy[] = {
+		"Duel.SendtoGrave", "Duel.Remove", "Duel.Destroy", "Duel.Release",
+		"Duel.DiscardHand", "Duel.DiscardDeck",
+	};
+	static const char* kRecycle[] = {
+		"Duel.SendtoHand", "Duel.SendtoDeck", "Duel.ReturnToField",
+		"Duel.MoveToField",
+	};
+	static const char* kProduce[] = {
+		"Duel.SpecialSummon", "Duel.SpecialSummonStep", "Duel.Summon",
+		"Duel.MSet", "Duel.SSet", "Duel.Draw",
+	};
+	for(const char* s : kDestroy)
+		if(v == s) return VerbKind::kDestroy;
+	for(const char* s : kRecycle)
+		if(v == s) return VerbKind::kRecycle;
+	for(const char* s : kProduce)
+		if(v == s) return VerbKind::kProduce;
+	return VerbKind::kOther;
+}
+
+// LES DEUX CONVENTIONS DE NOM, ET IL FAUT LES REDUIRE A UNE.
+//
+// `cur_fn` (cle de `fn_verbs`) est pose a la DEFINITION et retire le prefixe :
+// `function s.spop(...)` -> « spop ». Les champs `fn_*` d'un effet sont poses a
+// l'USAGE et le gardent : `e2:SetOperation(s.spop)` -> « s.spop ». Comparer les
+// deux tels quels ne rend JAMAIS de correspondance, donc jamais de capacite —
+// et un consommateur sans borne connue est exactement le cas ou le bilan ne dit
+// rien. Piege 42 sous une autre forme : un rapport vivant qui imprime le
+// pessimisme partout.
+std::string NormFn(std::string f) {
+	if(f.compare(0, 2, "s.") == 0)
+		return f.substr(2);
+	if(f.size() > 2 && f[0] == 'c' &&
+	   std::isdigit(static_cast<unsigned char>(f[1]))) {
+		const size_t d = f.find('.');
+		if(d != std::string::npos)
+			return f.substr(d + 1);
+	}
+	return f;
+}
+
+// La capacite declaree de l'operateur dont `fn` est une des fonctions. Rend nul
+// quand aucun effet ne la porte, et l'appelant imprime alors « SANS BORNE » —
+// lecture pessimiste pour un consommateur, optimiste pour un recycleur. On
+// l'imprime plutot que de la supposer.
+const DeclaredEffect* OwnerOf(const CardOperators& co, const std::string& fn) {
+	for(const std::vector<DeclaredEffect>* set : {&co.operators, &co.grants})
+		for(const DeclaredEffect& e : *set)
+			if(NormFn(e.fn_cost) == fn || NormFn(e.fn_condition) == fn ||
+			   NormFn(e.fn_target) == fn || NormFn(e.fn_operation) == fn ||
+			   NormFn(e.fn_value) == fn)
+				return &e;
+	return nullptr;
+}
+
+}   // namespace
+
+void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
+									 uint64_t goal_zone) const {
+	std::printf("\n--- LA COLONNE NEGATIVE : ce que chaque operateur DETRUIT "
+				"---\n");
+	// Une ligne du bilan matiere : (carte, fonction) -> verbes classes, zones
+	// touchees, capacite declaree.
+	struct Edge {
+		uint32_t code = 0;
+		std::string fn;
+		std::vector<std::string> destroy, recycle, produce;
+		uint64_t locs = 0;
+		uint32_t cap = 0;
+		bool cap_by_name = false;
+		bool has_cap = false;
+	};
+	std::vector<Edge> edges;
+	for(const auto& [c, co] : cards) {
+		for(const auto& [fn, verbs] : co.fn_verbs) {
+			Edge e;
+			e.code = c;
+			e.fn = fn;
+			for(const std::string& v : verbs) {
+				switch(ClassifyVerb(v)) {
+				case VerbKind::kDestroy: e.destroy.push_back(v); break;
+				case VerbKind::kRecycle: e.recycle.push_back(v); break;
+				case VerbKind::kProduce: e.produce.push_back(v); break;
+				default: break;
+				}
+			}
+			if(e.destroy.empty() && e.recycle.empty() && e.produce.empty())
+				continue;
+			auto it = co.fn_locations.find(fn);
+			e.locs = it == co.fn_locations.end() ? 0 : it->second;
+			if(const DeclaredEffect* owner = OwnerOf(co, fn)) {
+				e.has_cap = owner->has_count_limit;
+				e.cap = owner->count_limit;
+				e.cap_by_name = owner->count_by_name;
+			}
+			edges.push_back(std::move(e));
+		}
+	}
+	std::sort(edges.begin(), edges.end(), [&](const Edge& a, const Edge& b) {
+		if(a.code != b.code) return db.Name(a.code) < db.Name(b.code);
+		return a.fn < b.fn;
+	});
+
+	auto join = [](const std::vector<std::string>& v) {
+		std::string s;
+		for(const std::string& x : v) {
+			if(!s.empty()) s += " ";
+			s += x.substr(5);   // sans le prefixe "Duel."
+		}
+		return s;
+	};
+	uint32_t last = 0;
+	for(const Edge& e : edges) {
+		if(e.code != last) {
+			std::printf("  %s\n", db.Name(e.code).c_str());
+			last = e.code;
+		}
+		std::printf("    %-22s", e.fn.c_str());
+		if(!e.destroy.empty()) std::printf("  DETRUIT %s", join(e.destroy).c_str());
+		if(!e.recycle.empty()) std::printf("  RECYCLE %s", join(e.recycle).c_str());
+		if(!e.produce.empty()) std::printf("  PRODUIT %s", join(e.produce).c_str());
+		if(e.locs)
+			std::printf("  @ %s", kt.MaskNames("LOCATION_", e.locs).c_str());
+		if(e.has_cap)
+			std::printf("  [cap %u/tour %s]", e.cap,
+						e.cap_by_name ? "par NOM" : "par COPIE");
+		std::printf("\n");
+	}
+
+	// LA SYNTHESE, ET C'EST ELLE LE JUGE. On ne garde que les aretes qui
+	// consomment DANS la zone du but : c'est la ligne `A_p` de l'equation de
+	// bilan, celle dont la faisabilite decide qu'un tirage est mort.
+	const std::string zname = kt.MaskNames("LOCATION_", goal_zone);
+	std::printf("\n  --- CE QUI CONSOMME DANS %s (la ligne du but) ---\n",
+				zname.empty() ? "<zone>" : zname.c_str());
+	size_t n_destroy = 0, n_recycle = 0;
+	for(const Edge& e : edges) {
+		if(!(e.locs & goal_zone))
+			continue;
+		// LA CAPACITE EST LE CHIFFRE QUI DECIDE, des deux cotes du signe : sur un
+		// consommateur elle borne combien de jetons peuvent partir, sur un
+		// recycleur combien peuvent revenir. « par NOM » vaut 1 quel que soit le
+		// nombre de copies ; « par COPIE » vaut autant que de copies posables.
+		// C'est la borne `Y_o <= cap` du cadre operator-counting, et sans elle
+		// le bilan ne serre rien.
+		char cap[48];
+		if(e.has_cap)
+			std::snprintf(cap, sizeof cap, "[cap %u/tour par %s]", e.cap,
+						  e.cap_by_name ? "NOM" : "COPIE");
+		else
+			std::snprintf(cap, sizeof cap, "[SANS BORNE declaree]");
+		if(!e.destroy.empty()) {
+			++n_destroy;
+			// LA PLACE, ET NON PLUS SEULEMENT LA ZONE. `IsSetCard`/`IsCode` du
+			// filtre disent CE QUE la destruction touche ; sans eux l'arete
+			// negative n'etait attribuable a aucune place (9.30).
+			std::string what;
+			auto cit = cards.find(e.code);
+			if(cit != cards.end()) {
+				// La fonction, PUIS les fonctions qu'elle appelle (le filtre).
+				std::vector<std::string> scope{ e.fn };
+				auto rit = cit->second.fn_refs.find(e.fn);
+				if(rit != cit->second.fn_refs.end())
+					for(const std::string& r : rit->second)
+						scope.push_back(r);
+				for(const std::string& f : scope) {
+				auto sit = cit->second.fn_setcodes.find(f);
+				if(sit != cit->second.fn_setcodes.end())
+					for(uint64_t sc : sit->second) {
+						char b[48];
+						std::snprintf(b, sizeof b, "%sarch 0x%llx",
+									  what.empty() ? "" : "|",
+									  (unsigned long long)sc);
+						what += b;
+					}
+				auto kit = cit->second.fn_codes.find(f);
+				if(kit != cit->second.fn_codes.end())
+					for(uint32_t cc : kit->second) {
+						char b[64];
+						std::snprintf(b, sizeof b, "%s%s",
+									  what.empty() ? "" : "|",
+									  db.Name(cc).c_str());
+						what += b;
+					}
+				}
+			}
+			std::printf("  -1  %-30s %-20s %-14s %s  %s\n",
+						db.Name(e.code).c_str(), e.fn.c_str(),
+						join(e.destroy).c_str(), cap,
+						what.empty() ? "(place INDETERMINEE)" : what.c_str());
+		}
+		if(!e.recycle.empty()) {
+			++n_recycle;
+			std::printf("  +1  %-30s %-20s %-14s %s\n", db.Name(e.code).c_str(),
+						e.fn.c_str(), join(e.recycle).c_str(), cap);
+		}
+	}
+	std::printf("\n  %zu arete(s) NEGATIVE(S), %zu RECYCLEUR(S) sur cette "
+				"zone.\n", n_destroy, n_recycle);
+	std::printf("  Lecture : une place dont le but exige plus de jetons qu'il "
+				"n'en reste, et dont\n"
+				"  AUCUNE arete positive n'est servie, rend la ligne du bilan "
+				"INFAISABLE — donc\n"
+				"  le tirage est mort, prouve. Un recycleur BORNE ne repousse "
+				"ce mur que de sa\n"
+				"  capacite : c'est la borne `Y_o <= cap`, et sans elle le "
+				"bilan ne dit jamais rien.\n");
+}
+
 // --- LE TYPE DE NŒUD MANQUANT ------------------------------------------------
 
 std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
@@ -1562,6 +1866,1058 @@ void PrintVerdict(const HarnessVerdict& v) {
 		: "LA TABLE NE SUFFIT PAS. Le chantier suivant est SANS OBJET tant que "
 		  "cet ecart\n     n'est pas explique — c'est exactement ce qu'on voulait "
 		  "savoir en premier.");
+}
+
+// --- LE SIMPLEXE (9.30) ------------------------------------------------------
+//
+// Deux phases, regle de BLAND. Bland est plus lent que la regle du cout le plus
+// negatif, et c'est exactement pourquoi elle est retenue : elle **garantit la
+// terminaison** (aucun cyclage), et nos instances sont minuscules. Un solveur
+// qui boucle sur une instance degeneree serait indetectable dans un run de
+// recherche ; un solveur lent ne l'est pas.
+//
+// Forme resolue, apres normalisation :   min c'x   s.c.  Ex = f,  x >= 0
+//   - contrainte `a.x >= b` avec b >= 0  ->  a.x - surplus = b, + artificielle
+//   - contrainte `a.x >= b` avec b <  0  ->  (-a).x + ecart = -b   (base fournie)
+//   - borne `x_j <= u_j`                 ->  x_j + ecart = u_j     (base fournie)
+namespace {
+
+constexpr double kEps = 1e-9;
+
+struct Tableau {
+	size_t m = 0, n = 0;                 // lignes, colonnes (hors membre droit)
+	std::vector<double> a;               // m x (n+1), membre droit en derniere
+	std::vector<size_t> basis;           // variable de base par ligne
+	double& At(size_t i, size_t j) { return a[i * (n + 1) + j]; }
+	double At(size_t i, size_t j) const { return a[i * (n + 1) + j]; }
+};
+
+void Pivot(Tableau& t, size_t row, size_t col) {
+	const double p = t.At(row, col);
+	for(size_t j = 0; j <= t.n; ++j)
+		t.At(row, j) /= p;
+	for(size_t i = 0; i < t.m; ++i) {
+		if(i == row)
+			continue;
+		const double f = t.At(i, col);
+		if(std::fabs(f) < kEps)
+			continue;
+		for(size_t j = 0; j <= t.n; ++j)
+			t.At(i, j) -= f * t.At(row, j);
+	}
+	t.basis[row] = col;
+}
+
+// Rend faux si le programme est non borne (impossible ici : x est borne ou le
+// cout est positif, mais on ne le SUPPOSE pas).
+//
+// `enterable` (s21) : seules les colonnes j < enterable peuvent ENTRER en base.
+// Les artificielles en sont exclues dans les DEUX phases — c'est le resultat
+// standard (Chvatal) qui remplace l'ancien cout 1e12 de la phase 2 : le point
+// faisable (x*, art = 0) appartient au polyedre restreint, donc l'optimum
+// restreint egale l'optimum plein, et une artificielle ne peut jamais rentrer.
+// Le cout 1e12 laissait une reentree possible quand une base degeneree portait
+// un coefficient > 1 sur la colonne artificielle.
+bool Optimize(Tableau& t, std::vector<double>& cost, std::vector<double>& red,
+			  size_t enterable) {
+	for(;;) {
+		// Couts reduits : c_j - c_B B^-1 A_j, calcules en soustrayant les lignes
+		// de base (le tableau est deja sous forme canonique).
+		red.assign(t.n, 0.0);
+		for(size_t j = 0; j < t.n; ++j)
+			red[j] = cost[j];
+		for(size_t i = 0; i < t.m; ++i) {
+			const double cb = cost[t.basis[i]];
+			if(std::fabs(cb) < kEps)
+				continue;
+			for(size_t j = 0; j < t.n; ++j)
+				red[j] -= cb * t.At(i, j);
+		}
+		// BLAND : premiere colonne (plus petit indice) a cout reduit negatif.
+		size_t enter = t.n;
+		for(size_t j = 0; j < enterable; ++j)
+			if(red[j] < -kEps) { enter = j; break; }
+		if(enter == t.n)
+			return true;   // optimal
+		size_t leave = t.m;
+		double best = 0.0;
+		for(size_t i = 0; i < t.m; ++i) {
+			const double aij = t.At(i, enter);
+			if(aij <= kEps)
+				continue;
+			const double ratio = t.At(i, t.n) / aij;
+			// BLAND aussi sur la sortie : a ratio egal, plus petit indice de
+			// base. C'est ce couple qui interdit le cyclage.
+			if(leave == t.m || ratio < best - kEps ||
+			   (ratio < best + kEps && t.basis[i] < t.basis[leave])) {
+				leave = i;
+				best = ratio;
+			}
+		}
+		if(leave == t.m)
+			return false;   // non borne
+		Pivot(t, leave, enter);
+	}
+}
+
+}   // namespace
+
+LPResult SolveOperatorLP(const OperatorLP& lp) {
+	LPResult res;
+	const size_t N = lp.n_ops;
+	// Comptage des colonnes : x, puis un surplus/ecart par contrainte, puis un
+	// ecart par borne finie, puis les artificielles.
+	std::vector<size_t> bound_of;   // indices d'operateurs a borne finie
+	for(size_t j = 0; j < N; ++j)
+		if(lp.upper[j] < OperatorLP::kNoBound * 0.5)
+			bound_of.push_back(j);
+	const size_t R = lp.rows.size(), B = bound_of.size();
+	// Un membre droit dans (0, kEps] serait traite comme <= 0 et produirait une
+	// base de depart LEGEREMENT infaisable (ecart basique negatif). Les membres
+	// droits du modele sont entiers ; on ecrase le bruit avant de trier (s21).
+	std::vector<double> rhs(R);
+	for(size_t i = 0; i < R; ++i)
+		rhs[i] = std::fabs(lp.rows[i].rhs) <= kEps ? 0.0 : lp.rows[i].rhs;
+	std::vector<char> needs_art(R, 0);
+	for(size_t i = 0; i < R; ++i)
+		needs_art[i] = rhs[i] > kEps ? 1 : 0;
+	size_t n_art = 0;
+	for(char c : needs_art)
+		n_art += c;
+
+	Tableau t;
+	t.m = R + B;
+	t.n = N + R + B + n_art;
+	t.a.assign(t.m * (t.n + 1), 0.0);
+	t.basis.assign(t.m, 0);
+
+	size_t art = N + R + B;
+	for(size_t i = 0; i < R; ++i) {
+		const double sgn = needs_art[i] ? 1.0 : -1.0;
+		for(const auto& [j, v] : lp.rows[i].coef)
+			t.At(i, j) += sgn * v;
+		t.At(i, N + i) = needs_art[i] ? -1.0 : 1.0;   // surplus ou ecart
+		t.At(i, t.n) = sgn * rhs[i];
+		if(needs_art[i]) {
+			t.At(i, art) = 1.0;
+			t.basis[i] = art++;
+		} else {
+			t.basis[i] = N + i;
+		}
+	}
+	for(size_t k = 0; k < B; ++k) {
+		const size_t i = R + k;
+		t.At(i, bound_of[k]) = 1.0;
+		t.At(i, N + R + k) = 1.0;
+		t.At(i, t.n) = lp.upper[bound_of[k]];
+		t.basis[i] = N + R + k;
+	}
+
+	std::vector<double> cost(t.n, 0.0), red;
+	// PHASE 1 : minimiser la somme des artificielles.
+	if(n_art) {
+		for(size_t j = N + R + B; j < t.n; ++j)
+			cost[j] = 1.0;
+		if(!Optimize(t, cost, red, N + R + B))
+			return res;
+		double inf = 0.0;
+		for(size_t i = 0; i < t.m; ++i)
+			if(t.basis[i] >= N + R + B)
+				inf += t.At(i, t.n);
+		if(inf > 1e-6)
+			return res;   // INFAISABLE : theoreme 3, impasse PROUVEE
+		// Chasser les artificielles residuelles de la base (pivot sur toute
+		// colonne non artificielle non nulle) ; sinon la phase 2 pourrait les
+		// reintroduire.
+		for(size_t i = 0; i < t.m; ++i) {
+			if(t.basis[i] < N + R + B)
+				continue;
+			for(size_t j = 0; j < N + R + B; ++j)
+				if(std::fabs(t.At(i, j)) > kEps) { Pivot(t, i, j); break; }
+		}
+	}
+	// PHASE 2 : le vrai cout. Les artificielles sont interdites de retour par
+	// `enterable` — et celles restees en base apres la chasse ont une ligne
+	// nulle sur toute colonne non artificielle (sinon la chasse aurait pivote),
+	// donc leur valeur reste a zero quoi qu'il arrive : aucun cout punitif
+	// n'est necessaire (s21, derivation en B10).
+	std::fill(cost.begin(), cost.end(), 0.0);
+	for(size_t j = 0; j < N; ++j)
+		cost[j] = lp.cost[j];
+	if(!Optimize(t, cost, red, N + R + B))
+		return res;
+
+	res.feasible = true;
+	res.x.assign(N, 0.0);
+	for(size_t i = 0; i < t.m; ++i)
+		if(t.basis[i] < N)
+			res.x[t.basis[i]] = t.At(i, t.n);
+	res.value = 0.0;
+	for(size_t j = 0; j < N; ++j)
+		res.value += lp.cost[j] * res.x[j];
+	// L'ARRONDI SUPERIEUR EST DANS L'ENONCE, PAS UN EMBELLISSEMENT.
+	// `h = ceil(c'x*)` (Bonet, def. et th. 2) : les couts sont entiers, donc le
+	// cout de tout plan est entier et minore par `c'x*` ; l'arrondi superieur
+	// reste donc <= h*, et resserre gratuitement. Le solveur rend des `x`
+	// FRACTIONNAIRES (la relaxation continue de l'entier) — mesure sur l'etalon
+	// A : `x1.5 renommer`. Sans l'arrondi, `h` annoncerait une valeur qu'aucun
+	// plan ne peut realiser.
+	// `+ 0.0` : ceil(0 - 1e-9) rend -0.0, qui s'imprime « -0 » ; l'addition le
+	// normalise en +0.0 (IEEE, arrondi au plus proche).
+	res.value = std::ceil(res.value - 1e-9) + 0.0;
+
+	// --- LES GARDES, ET ELLES SONT LA RAISON D'ETRE DE CE BLOC ---------------
+	// Theoremes 1 a 4 ne valent que si CE solveur ne ment pas. On verifie donc
+	// la solution rendue contre l'enonce, a chaque appel : faisabilite primale
+	// (A'x >= b, 0 <= x <= u) et optimalite (plus aucun cout reduit negatif).
+	res.primal_ok = true;
+	res.worst_violation = 0.0;
+	for(size_t j = 0; j < N; ++j) {
+		// La violation est l'EXCES au-dela de la borne, pas la valeur absolue de
+		// x : |x| melait « x = 3 pour u = 2 » (violation 1) et « x = 3 sans
+		// borne atteinte » (violation 0) dans le meme nombre (s21).
+		const double v = (std::max)(-res.x[j], res.x[j] - lp.upper[j]);
+		if(v > 1e-6) {
+			res.primal_ok = false;
+			res.worst_violation = (std::max)(res.worst_violation, v);
+		}
+	}
+	for(const auto& row : lp.rows) {
+		double lhs = 0.0;
+		for(const auto& [j, v] : row.coef)
+			lhs += v * res.x[j];
+		if(lhs < row.rhs - 1e-6) {
+			res.primal_ok = false;
+			res.worst_violation = (std::max)(res.worst_violation,
+											 row.rhs - lhs);
+		}
+	}
+	res.optimal_ok = true;
+	for(size_t j = 0; j < t.n; ++j)
+		if(j < N + R + B && red[j] < -1e-6)
+			res.optimal_ok = false;
+	return res;
+}
+
+namespace {
+enum BZone { kRes = 0, kAva = 1, kFld = 2 };
+const char* ZoneName(int z) {
+	return z == kRes ? "RESERVE" : z == kAva ? "DISPO" : "TERRAIN";
+}
+}   // namespace
+
+std::vector<uint64_t> BalanceModel::SetcodesOf(uint32_t code) const {
+	auto it = sc_cache.find(code);
+	if(it != sc_cache.end())
+		return it->second;
+	std::vector<uint64_t> out;
+	if(const CardRow* r = db->Find(code))
+		for(uint16_t sc : r->setcodes)
+			if(sc)
+				out.push_back(sc & 0x0fffu);   // archetype, sous-type ignore
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	sc_cache.emplace(code, out);
+	return out;
+}
+
+size_t BalanceModel::PlaceId(int kind, uint64_t key, int zone) const {
+	const uint64_t k = (uint64_t(kind) << 62) | (key << 2) | uint64_t(zone);
+	auto it = pid.find(k);
+	return it == pid.end() ? size_t(-1) : it->second;
+}
+
+std::string BalanceModel::Produces(size_t t) const {
+	if(t >= col.size())
+		return std::string();
+	for(const auto& kv : col[t])
+		if(kv.second > 0)
+			return pname[kv.first];
+	return std::string();
+}
+
+// L'ALIAS, QUE `Canonical` NE REDUIT PAS TOUJOURS. `card::get_code()` du core
+// resout `alias` (card.cpp:236) : 90590304 (Bagooska couche) et 90590303 sont la
+// MEME carte, et le board le montre. Comparer les codes bruts fabrique deux
+// places pour un seul objet — donc un but sans producteur.
+static uint32_t AliasOf(const CardDB& db, uint32_t c) {
+	const CardRow* r = db.Find(c);
+	if(r && r->alias)
+		return r->alias;
+	return db.Canonical(c);
+}
+
+bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
+						 const ConstantTable& kt,
+						 const std::vector<uint32_t>& deck,
+						 const std::vector<std::pair<uint32_t, uint32_t>>& goal) {
+	db = &cdb;
+	if(goal.empty())
+		return false;
+	auto place = [&](int kind, uint64_t key, int z) -> size_t {
+		const uint64_t k = (uint64_t(kind) << 62) | (key << 2) | uint64_t(z);
+		auto it = pid.find(k);
+		if(it != pid.end())
+			return it->second;
+		const size_t id = pname.size();
+		pid.emplace(k, id);
+		char b[96];
+		if(kind == 0)
+			std::snprintf(b, sizeof b, "%s @%s",
+						  cdb.Name(static_cast<uint32_t>(key)).c_str(),
+						  ZoneName(z));
+		else
+			std::snprintf(b, sizeof b, "arch 0x%llx @%s",
+						  (unsigned long long)key, ZoneName(z));
+		pname.push_back(b);
+		need.push_back(0.0);
+		return id;
+	};
+	std::unordered_map<uint32_t, uint32_t> copies;
+	for(uint32_t c : deck)
+		++copies[AliasOf(cdb, c)];
+	// Les places existent des la CONSTRUCTION : le marquage change d'un etat a
+	// l'autre, la structure non. C'est ce qui permet de resoudre le meme modele
+	// le long d'une ligne sans le rebatir a chaque decision.
+	// PLACE GENERIQUE « un monstre disponible » (kind 2, cle 0).
+	//
+	// `Xyz.AddProcedure(c, nil, 4, 2)` = « 2 monstres de Niveau 4 » : une
+	// exigence CARDINALE qui ne nomme ni carte ni archetype, donc invisible aux
+	// deux premiers grains. Sans elle, Bagooska n'a AUCUN producteur et le
+	// programme entier devient infaisable — mesure faite, et c'est ce que la
+	// garde « place SANS PRODUCTEUR » a nomme.
+	//
+	// Le niveau lui-meme n'est pas porte par `DeclaredRecipe` (seul le COMPTE
+	// l'est) : on exige donc « N monstres », pas « N monstres de niveau 4 ».
+	// C'est plus FAIBLE que la verite, donc `h` est plus petit, donc
+	// l'admissibilite tient. Exiger le niveau sans le lire l'aurait cassee.
+	place(2, 0, kRes);
+	place(2, 0, kAva);
+	for(const auto& kv : copies) {
+		place(0, kv.first, kRes);
+		place(0, kv.first, kAva);
+		place(0, kv.first, kFld);
+		for(uint64_t sc : SetcodesOf(kv.first)) {
+			place(1, sc, kRes);
+			place(1, sc, kAva);
+		}
+	}
+	auto add_tr = [&](const char* what, double cap) {
+		lp.cost.push_back(1.0);
+		lp.upper.push_back(cap);
+		tname.push_back(what);
+		return lp.n_ops++;
+	};
+	auto eff = [&](size_t t, size_t p, double v) {
+		if(col.size() <= t)
+			col.resize(t + 1);
+		col[t][p] += v;
+	};
+	// (1) LES EFFETS DECLARES, ET RIEN D'AUTRE.
+	//
+	// LA CORRECTION QUI A COUTE UN ALLER-RETOUR (seance s20). La premiere
+	// version portait une transition INVENTEE, `mobiliser` : « toute carte du
+	// deck est a une action de la zone disponible ». Elle achetait
+	// l'admissibilite par l'optimisme, et le banc a mesure ce qu'elle coutait —
+	// 5 % de descentes contre 15 % pour la nouveaute, c'est-a-dire un gradient
+	// PIRE que celui qu'elle devait remplacer. La reponse n'est pas de la
+	// borner par des regles (« une Invocation Normale par tour ») : ces regles
+	// ne portent pas sur elle, et « une carte ne sort du deck que par un effet
+	// qui la nomme » est FAUX — une recherche par niveau ne nomme rien, donc la
+	// contrainte interdirait de vrais plans et casserait l'admissibilite.
+	//
+	// SEULS LES EFFETS REELS DES CARTES PRIMENT. Chaque `Duel.SetOperationInfo`
+	// declare une paire (categorie, zone source) : c'est une transition, avec sa
+	// zone d'origine, sa destination lue dans la categorie, et la capacite de
+	// l'effet qui la porte. La place vient du filtre (`IsSetCard`/`IsCode`, via
+	// `fn_refs`), sinon des `listed_series`/`listed_names` de la carte, sinon de
+	// l'archetype de la carte elle-meme. Aucune de ces sources n'est une regle
+	// que nous ajoutons : toutes sont declarees dans le script.
+	//
+	// CE QUE CELA CHANGE POUR LE THEOREME 1. `h` devient admissible RELATIVEMENT
+	// AU MODELE DECLARE : si un effet echappait a l'extraction, un plan reel
+	// pourrait violer une ligne. Ce n'est pas une hypothese en l'air — c'est
+	// exactement ce que le harnais MESURE (44 activations, 0 non appariee sur
+	// `liger.yrpX`). La garantie est donc conditionnee a un nombre qu'on relit
+	// a chaque run, et non a une croyance.
+	uint64_t c_tohand = 0, c_spsummon = 0, c_tograve = 0, c_todeck = 0,
+			 c_search = 0, c_remove = 0;
+	kt.Lookup("CATEGORY_TOHAND", c_tohand);
+	kt.Lookup("CATEGORY_SPECIAL_SUMMON", c_spsummon);
+	kt.Lookup("CATEGORY_TOGRAVE", c_tograve);
+	kt.Lookup("CATEGORY_TODECK", c_todeck);
+	kt.Lookup("CATEGORY_SEARCH", c_search);
+	kt.Lookup("CATEGORY_REMOVE", c_remove);
+	for(const auto& kv : tbl.All()) {
+		const uint32_t host = kv.first;
+		const CardOperators& co = kv.second;
+		for(const DeclaredProduct& pr : co.products) {
+			// Destination, lue dans la CATEGORIE.
+			int dst = -1;
+			bool also_field = false;
+			if(c_spsummon && (pr.category & c_spsummon)) {
+				dst = kAva; also_field = true;
+			} else if((c_tohand && (pr.category & c_tohand)) ||
+					  (c_search && (pr.category & c_search)) ||
+					  (c_tograve && (pr.category & c_tograve)) ||
+					  (c_remove && (pr.category & c_remove))) {
+				dst = kAva;
+			} else if(c_todeck && (pr.category & c_todeck)) {
+				dst = kRes;
+			}
+			if(dst < 0)
+				continue;   // categorie qui ne DEPLACE rien : pas une transition
+			// Source, lue dans la ZONE declaree. `0` = non declaree : on prend
+			// la RESERVE, la lecture la plus utile — donc la plus optimiste,
+			// donc celle qui ne peut pas rendre `h` trop grand.
+			const int src = (pr.location == 0 || (pr.location & 0x41u))
+								? kRes
+								: kAva;
+			if(src == dst && !also_field)
+				continue;   // ne bouge rien dans nos trois zones
+			// La PLACE : le filtre d'abord, la carte ensuite. Jamais une
+			// supposition.
+			std::vector<uint64_t> arch;
+			std::vector<uint32_t> named;
+			std::vector<std::string> scope{ pr.in_function };
+			auto rit = co.fn_refs.find(pr.in_function);
+			if(rit != co.fn_refs.end())
+				for(const std::string& r : rit->second)
+					scope.push_back(r);
+			for(const std::string& f : scope) {
+				auto sit = co.fn_setcodes.find(f);
+				if(sit != co.fn_setcodes.end())
+					for(uint64_t v : sit->second)
+						arch.push_back(v & 0x0fffull);
+				auto cit2 = co.fn_codes.find(f);
+				if(cit2 != co.fn_codes.end())
+					for(uint32_t v : cit2->second)
+						named.push_back(cdb.Canonical(v));
+			}
+			if(arch.empty() && named.empty()) {
+				for(uint64_t v : co.listed_series)
+					arch.push_back(v & 0x0fffull);
+				for(uint32_t v : co.listed_names)
+					named.push_back(cdb.Canonical(v));
+			}
+			if(arch.empty() && named.empty())
+				for(uint64_t v : SetcodesOf(host))
+					arch.push_back(v);
+			if(arch.empty() && named.empty())
+				continue;
+			// Capacite : celle de l'effet qui porte cette fonction, multipliee
+			// par les copies quand elle est « par COPIE ».
+			double cap = OperatorLP::kNoBound;
+			for(const std::vector<DeclaredEffect>* set :
+				{ &co.operators, &co.grants }) {
+				for(const DeclaredEffect& e : *set) {
+					const bool mine =
+						e.fn_cost == pr.in_function ||
+						e.fn_condition == pr.in_function ||
+						e.fn_target == pr.in_function ||
+						e.fn_operation == pr.in_function ||
+						("s." + pr.in_function) == e.fn_target ||
+						("s." + pr.in_function) == e.fn_operation;
+					if(mine && e.has_count_limit) {
+						const double n = copies.count(host)
+											 ? double(copies.at(host))
+											 : 1.0;
+						cap = e.count_by_name ? double(e.count_limit)
+											  : double(e.count_limit) * n;
+					}
+				}
+			}
+			const size_t t = add_tr("effet", cap);
+			for(uint32_t nc : named) {
+				eff(t, place(0, nc, src), -1.0);
+				eff(t, place(0, nc, dst), +1.0);
+				if(also_field)
+					eff(t, place(0, nc, kFld), +1.0);
+			}
+			if(named.empty())
+				for(uint64_t a : arch) {
+					eff(t, place(1, a, src), -1.0);
+					eff(t, place(1, a, dst), +1.0);
+				}
+		}
+	}
+	// (2) INVOQUER : la recette DECLAREE, avec sa MULTIPLICITE.
+	for(const auto& kv : tbl.All()) {
+		const uint32_t c = kv.first;
+		const CardOperators& co = kv.second;
+		if(co.recipes.empty())
+			continue;
+		const DeclaredRecipe& r = co.recipes.front();
+		// `unresolved_counts` COMPTE : « 2 monstres de Niveau 4 » est une
+		// recette complete. L'omettre du garde privait Bagooska — et tout Xyz —
+		// de producteur, donc rendait le programme entier infaisable.
+		if(r.named.empty() && r.setcode.empty() && r.unresolved_counts.empty())
+			continue;
+		// LE PRODUIT SE CANONISE, comme le but. `--target 90590304` nomme la
+		// forme couchee de Bagooska ; la table indexe `90590303`. Sans cette
+		// reduction les deux places sont distinctes, la recette ne produit rien
+		// pour le but, et le programme entier devient infaisable — mesure faite.
+		const uint32_t cc = AliasOf(cdb, c);
+		const size_t t = add_tr("invoquer", OperatorLP::kNoBound);
+		eff(t, place(0, cc, kRes), -1.0);
+		eff(t, place(0, cc, kFld), +1.0);
+		eff(t, place(0, cc, kAva), +1.0);
+		for(const auto& m : r.named)
+			eff(t, place(0, cdb.Canonical(m.first), kAva),
+				-static_cast<double>(m.second));
+		for(const auto& sc : r.setcode)
+			eff(t, place(1, sc.first & 0x0fffull, kAva),
+				-static_cast<double>(sc.second));
+		for(uint32_t k : r.unresolved_counts)
+			eff(t, place(2, 0, kAva), -static_cast<double>(k));
+	}
+	// (3) RENOMMER : la famille parametree d'EFFECT_ADD_CODE. Le code accorde
+	// est `e:GetLabel()`, pose au COUT depuis la carte envoyee au cimetiere —
+	// d'ou +2 en DISPO : le porteur renomme compte comme X pour une Fusion, ET
+	// la carte envoyee y est rendue materiau par EFFECT_EXTRA_FUSION_MATERIAL.
+	uint64_t add_code = 0;
+	kt.Lookup("EFFECT_ADD_CODE", add_code);
+	for(const auto& kv : tbl.All()) {
+		const uint32_t host = kv.first;
+		bool grants = false;
+		for(const DeclaredEffect& g : kv.second.grants)
+			grants = grants || (g.code_is_effect && add_code &&
+								g.code_value == add_code);
+		if(!grants)
+			continue;
+		const double cap = copies.count(host)
+							   ? static_cast<double>(copies.at(host))
+							   : 0.0;
+		if(cap <= 0.0)
+			continue;
+		const std::vector<uint64_t> hsc = SetcodesOf(host);
+		for(const auto& cx : copies) {
+			const uint32_t x = cx.first;
+			if(x == host)
+				continue;
+			bool share = false;
+			for(uint64_t sc : SetcodesOf(x))
+				share = share ||
+						std::find(hsc.begin(), hsc.end(), sc) != hsc.end();
+			if(!share)
+				continue;
+			const size_t t = add_tr("renommer", cap);
+			eff(t, place(0, x, kRes), -1.0);
+			eff(t, place(0, x, kAva), +2.0);
+			++n_rename;
+		}
+	}
+	{
+		const size_t gen = place(2, 0, kAva);
+		for(size_t t = 0; t < col.size(); ++t) {
+			double pos = 0.0;
+			for(const auto& kv : col[t])
+				if(kv.first != gen && kv.second > 0)
+					pos = (std::max)(pos, kv.second);
+			if(pos > 0)
+				col[t][gen] += pos;
+		}
+	}
+	for(const auto& g : goal)
+		need[place(0, AliasOf(cdb, g.first), kFld)] += g.second;
+	col.resize(lp.n_ops);
+	return true;
+}
+
+double BalanceModel::Solve(const std::vector<uint32_t>& res,
+						   const std::vector<uint32_t>& ava,
+						   const std::vector<uint32_t>& fld,
+						   LPResult* out) const {
+	std::vector<double> mark(pname.size(), 0.0);
+	auto put = [&](const std::vector<uint32_t>& codes, int z) {
+		for(uint32_t raw : codes) {
+			const uint32_t c = db->Canonical(raw);
+			size_t p = PlaceId(0, c, z);
+			if(p != static_cast<size_t>(-1))
+				mark[p] += 1.0;
+			if(z == kFld)
+				continue;   // les archetypes ne sont suivis qu'en RES et AVA
+			if(const CardRow* row = db->Find(c))
+				if(row->type & 0x1u) {   // TYPE_MONSTER
+					p = PlaceId(2, 0, z);
+					if(p != static_cast<size_t>(-1))
+						mark[p] += 1.0;
+				}
+			for(uint64_t sc : SetcodesOf(c)) {
+				p = PlaceId(1, sc, z);
+				if(p != static_cast<size_t>(-1))
+					mark[p] += 1.0;
+			}
+		}
+	};
+	put(res, kRes);
+	put(ava, kAva);
+	put(fld, kFld);
+
+	OperatorLP inst;
+	inst.n_ops = lp.n_ops;
+	inst.cost = lp.cost;
+	inst.upper = lp.upper;
+	for(size_t p = 0; p < pname.size(); ++p) {
+		OperatorLP::Row row;
+		for(size_t t = 0; t < col.size(); ++t) {
+			auto it = col[t].find(p);
+			if(it != col[t].end() && std::fabs(it->second) > 1e-12)
+				row.coef.emplace_back(t, it->second);
+		}
+		const double b = need[p] - mark[p];
+		if(row.coef.empty() && b <= 0.0)
+			continue;
+		row.rhs = b;
+		row.label = pname[p];
+		inst.rows.push_back(std::move(row));
+	}
+	// DEUX INFAISABILITES QU'IL NE FAUT PAS CONFONDRE, et les confondre rendrait
+	// le theoreme 3 inutilisable.
+	//
+	//   « ce but est PROUVE hors d'atteinte »  (copies, capacites : un fait)
+	//   « je ne sais pas fabriquer cette place » (aucune transition ne la
+	//                                             produit : une LACUNE du modele)
+	//
+	// La seconde se detecte avant de resoudre, et coute une boucle : une ligne a
+	// membre droit positif dont AUCUN coefficient n'est positif n'a pas de
+	// producteur. L'annoncer comme une preuve serait un mensonge ; l'annoncer
+	// comme un trou d'extraction en fait une liste de travail.
+	for(const OperatorLP::Row& row : inst.rows) {
+		if(row.rhs <= 1e-9)
+			continue;
+		bool producible = false;
+		for(const auto& kv : row.coef)
+			producible = producible || kv.second > 0;
+		if(!producible)
+			std::printf("!! place SANS PRODUCTEUR : %s (exige %.0f) — lacune "
+						"d'extraction, PAS une preuve d'impossibilite\n",
+						row.label.c_str(), row.rhs);
+	}
+	LPResult r = SolveOperatorLP(inst);
+	if(out)
+		*out = r;
+	if(!r.feasible || !r.primal_ok || !r.optimal_ok)
+		return -1.0;
+	return r.value;
+}
+
+std::vector<BalanceModel::Need> BalanceModel::NeedsFrom(
+	const LPResult& r) const {
+	std::vector<Need> out;
+	if(!r.feasible)
+		return out;
+	// Agrege par place PRODUITE : combien de jetons chaque transition qui tire
+	// doit y deposer. L'arrondi est SUPERIEUR — une demi-invocation n'existe
+	// pas, et sous-compter un sous-but le rendrait franchissable a moitie.
+	std::unordered_map<size_t, double> want;
+	for(size_t t = 0; t < r.x.size() && t < col.size(); ++t) {
+		if(r.x[t] <= 1e-6)
+			continue;
+		for(const auto& kv : col[t])
+			if(kv.second > 0)
+				want[kv.first] += kv.second * r.x[t];
+	}
+	for(const auto& kv : pid) {
+		auto it = want.find(kv.second);
+		if(it == want.end() || it->second < 0.5)
+			continue;
+		Need n;
+		const uint64_t key = kv.first;
+		const int kind = static_cast<int>(key >> 62);
+		n.zone = static_cast<uint8_t>(key & 3u);
+		const uint64_t k = (key >> 2) & ((1ull << 60) - 1);
+		if(kind == 0)
+			n.code = static_cast<uint32_t>(k);
+		else
+			n.arch = k;
+		n.count = static_cast<uint32_t>(std::ceil(it->second - 1e-9));
+		out.push_back(n);
+	}
+	return out;
+}
+
+std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
+	const LPResult& r) const {
+	std::vector<Need> out;
+	if(!r.feasible)
+		return out;
+	// Consommation totale par place : Sigma_t x_t * (-coef negatif).
+	std::unordered_map<size_t, double> eaten;
+	for(size_t t = 0; t < r.x.size() && t < col.size(); ++t) {
+		if(r.x[t] <= 1e-6)
+			continue;
+		for(const auto& kv : col[t])
+			if(kv.second < 0)
+				eaten[kv.first] += -kv.second * r.x[t];
+	}
+	// Agregee par IDENTITE (kind, cle), zones confondues : un corps consomme
+	// depuis la RESERVE (renommage : deck -> cimetiere) et un corps consomme
+	// depuis DISPO (materiau de fusion) atterrissent au meme endroit. La place
+	// generique (kind 2) est ecartee : « un monstre quelconque au cimetiere »
+	// ne se compte pas sans double emploi avec les identites nommees.
+	std::unordered_map<uint64_t, double> merged;
+	for(const auto& kv : pid) {
+		auto it = eaten.find(kv.second);
+		if(it == eaten.end())
+			continue;
+		if(static_cast<int>(kv.first >> 62) == 2)
+			continue;
+		merged[kv.first & ~3ull] += it->second;
+	}
+	for(const auto& kv : merged) {
+		if(kv.second < 0.5)
+			continue;
+		Need n;
+		const int kind = static_cast<int>(kv.first >> 62);
+		const uint64_t k = (kv.first >> 2) & ((1ull << 60) - 1);
+		if(kind == 0)
+			n.code = static_cast<uint32_t>(k);
+		else
+			n.arch = k;
+		n.zone = 3;   // CIMETIERE
+		// Plafond a 15 : l'empaquetage de SerialProgress porte 4 bits par
+		// exigence, et un barreau au-dela du plafond n'existerait pas.
+		n.count = (std::min)(
+			static_cast<uint32_t>(std::ceil(kv.second - 1e-9)), 15u);
+		out.push_back(n);
+	}
+	return out;
+}
+
+double BuildAndSolveBalance(
+	const OperatorTable& tbl, const CardDB& db, const ConstantTable& kt,
+	const std::vector<uint32_t>& deck,
+	const std::vector<std::pair<uint32_t, uint32_t>>& goal) {
+	std::printf("\n=== LE BILAN MATIERE : h(depart) ===\n");
+	BalanceModel m;
+	if(!m.Build(tbl, db, kt, deck, goal)) {
+		std::printf("  (aucun but donne)\n");
+		return -1.0;
+	}
+	std::printf("  places %zu, transitions %zu (dont %zu renommages)\n",
+				m.Places(), m.Transitions(), m.Renames());
+	LPResult r;
+	// Etat de depart : tout le deck est en RESERVE. C'est l'etat AVANT la
+	// pioche, celui qui repond a « ce deck peut-il, en principe ? ».
+	const double h = m.Solve(deck, std::vector<uint32_t>(),
+							 std::vector<uint32_t>(), &r);
+	if(!r.feasible) {
+		std::printf("  h = INFINI  —  IMPASSE PROUVEE (theoreme 3) : aucun "
+					"plan n'atteint ce but depuis ce deck.\n");
+		return -1.0;
+	}
+	std::printf("  h(depart) = %.0f   [gardes : primal %s, optimal %s]\n",
+				r.value, r.primal_ok ? "OK" : "VIOLE",
+				r.optimal_ok ? "OK" : "VIOLE");
+	if(h < 0) {
+		std::printf("!! LE SOLVEUR S'EST CONTREDIT — valeur a jeter "
+					"(garde 9.30)\n");
+		return -1.0;
+	}
+	std::printf("  --- le vecteur de tirs x (non nuls) ---\n");
+	std::vector<std::pair<double, size_t>> nz;
+	for(size_t t = 0; t < m.Transitions(); ++t)
+		if(r.x[t] > 1e-6)
+			nz.emplace_back(r.x[t], t);
+	std::sort(nz.rbegin(), nz.rend());
+	for(size_t i = 0; i < nz.size() && i < 20; ++i)
+		std::printf("   x%-5.1f %-11s %s\n", nz[i].first,
+					m.TrNames()[nz[i].second].c_str(),
+					m.Produces(nz[i].second).c_str());
+	return h;
+}
+
+size_t SelfTestOperatorLP(size_t* total) {
+	// CINQ INSTANCES A SOLUTION CONNUE A LA MAIN. Elles couvrent exactement les
+	// quatre theoremes : multiplicite (le but a 3 exemplaires), consommation
+	// (une transition qui detruit), capacite (theoreme 4) et infaisabilite
+	// (theoreme 3). Un solveur qui les passe toutes n'est pas prouve juste ;
+	// un solveur qui en rate une est prouve faux, et c'est ce qu'on veut.
+	struct Case { OperatorLP lp; bool feas; double val; };
+	std::vector<Case> cs;
+	auto mk = [](size_t n) {
+		OperatorLP lp;
+		lp.n_ops = n;
+		lp.cost.assign(n, 1.0);
+		lp.upper.assign(n, OperatorLP::kNoBound);
+		return lp;
+	};
+	{   // 1. un seul operateur produit le but : x >= 3  ->  h = 3
+		Case c; c.lp = mk(1);
+		c.lp.rows.push_back({ { { 0, 1.0 } }, 3.0, "but" });
+		c.feas = true; c.val = 3.0; cs.push_back(c);
+	}
+	{   // 2. consommation : o1 produit p et consomme q, o2 produit q.
+		//    but p >= 2  =>  x1 = 2, et q descend a -2 donc x2 >= 2  =>  h = 4.
+		Case c; c.lp = mk(2);
+		c.lp.rows.push_back({ { { 0, 1.0 } }, 2.0, "p" });
+		c.lp.rows.push_back({ { { 0, -1.0 }, { 1, 1.0 } }, 0.0, "q" });
+		c.feas = true; c.val = 4.0; cs.push_back(c);
+	}
+	{   // 3. capacite (th. 4) : deux voies, la moins chere plafonnee a 1.
+		Case c; c.lp = mk(2);
+		c.lp.cost = { 1.0, 5.0 };
+		c.lp.upper = { 1.0, OperatorLP::kNoBound };
+		c.lp.rows.push_back({ { { 0, 1.0 }, { 1, 1.0 } }, 3.0, "but" });
+		c.feas = true; c.val = 1.0 + 2.0 * 5.0; cs.push_back(c);
+	}
+	{   // 4. infaisable (th. 3) : le but exige 3, la seule voie est plafonnee a 2.
+		Case c; c.lp = mk(1);
+		c.lp.upper = { 2.0 };
+		c.lp.rows.push_back({ { { 0, 1.0 } }, 3.0, "but" });
+		c.feas = false; c.val = 0.0; cs.push_back(c);
+	}
+	{   // 5. contrainte deja satisfaite (membre droit negatif) : n'impose rien.
+		Case c; c.lp = mk(1);
+		c.lp.rows.push_back({ { { 0, 1.0 } }, 1.0, "but" });
+		c.lp.rows.push_back({ { { 0, -1.0 } }, -4.0, "reserve" });
+		c.feas = true; c.val = 1.0; cs.push_back(c);
+	}
+	// LE FUZZ (s21) : 60 instances aleatoires de la meme forme, resolues en
+	// rationnels EXACTS par sympy.lpmin (verify_formulas.py, B10) — dont 20
+	// infaisables. Cinq cas a la main prouvent la couverture des theoremes ;
+	// soixante cas tires au sort prouvent le SOLVEUR, membre droit negatif,
+	// bornes actives et degenerescence compris. La valeur attendue est
+	// ceil(optimum exact), ce que rend SolveOperatorLP.
+	#include "lp_fuzz_cases.inc"
+	for(const FuzzCase& f : kFuzzCases) {
+		Case c;
+		c.lp.n_ops = f.n;
+		c.lp.cost.assign(f.cost, f.cost + f.n);
+		for(size_t j = 0; j < f.n; ++j)
+			c.lp.upper.push_back(f.upper[j] < 0 ? OperatorLP::kNoBound
+												: f.upper[j]);
+		for(size_t i = 0; i < f.nrows; ++i) {
+			OperatorLP::Row row;
+			for(size_t j = 0; j < f.n; ++j)
+				if(f.coef[i][j] != 0.0)
+					row.coef.emplace_back(j, f.coef[i][j]);
+			row.rhs = f.rhs[i];
+			row.label = "fuzz";
+			c.lp.rows.push_back(std::move(row));
+		}
+		c.feas = f.feas;
+		c.val = f.val;
+		cs.push_back(std::move(c));
+	}
+	size_t pass = 0;
+	for(size_t ci = 0; ci < cs.size(); ++ci) {
+		const Case& c = cs[ci];
+		LPResult r = SolveOperatorLP(c.lp);
+		bool ok = r.feasible == c.feas;
+		if(ok && c.feas)
+			ok = std::fabs(r.value - c.val) < 1e-6 && r.primal_ok &&
+				 r.optimal_ok;
+		if(ok)
+			++pass;
+		else
+			std::printf("!! AUTO-TEST LP : cas #%zu « %s » attendu %s %.2f, rendu "
+						"%s %.2f (primal %d, optimal %d)\n", ci,
+						c.lp.rows.empty() ? "?" : c.lp.rows[0].label.c_str(),
+						c.feas ? "faisable" : "INFAISABLE", c.val,
+						r.feasible ? "faisable" : "INFAISABLE", r.value,
+						r.primal_ok ? 1 : 0, r.optimal_ok ? 1 : 0);
+	}
+	if(total)
+		*total = cs.size();
+	return pass;
+}
+
+void OperatorTable::PrintFiringCounts(
+	const CardDB& db, const ConstantTable& kt,
+	const std::vector<uint32_t>& deck,
+	const std::vector<std::pair<uint32_t, uint32_t>>& goal) const {
+	std::printf("\n=== MARCHE 1 : LES COMPTES DE TIR (multiplicite x capacite) "
+				"===\n");
+	if(goal.empty()) {
+		std::printf("  (aucun but donne : ajouter --target)\n");
+		return;
+	}
+	// Copies PHYSIQUES par code. C'est ce nombre, et non la presence, qui
+	// decide d'une capacite « par COPIE » : trois Kaleido Chick valent trois
+	// activations par tour, un seul n'en vaut qu'une.
+	std::unordered_map<uint32_t, uint32_t> copies;
+	for(uint32_t c : deck)
+		++copies[db.Canonical(c)];
+
+	// Ce qu'il faut PRODUIRE, et combien de fois. `fire[code]` est le nombre de
+	// tirs de l'operateur d'invocation de `code` : c'est le `x_o` du bilan.
+	std::unordered_map<uint32_t, uint32_t> fire, need_named;
+	std::map<uint64_t, uint32_t> need_setcode;
+	// LE BUT SE CANONISE A L'ENTREE. `--target 90590304` nomme la forme
+	// « couchee » de Bagooska ; la table est batie sur les codes du deck, donc
+	// sur `90590303`. Sans cette reduction, la carte ne trouve aucune recette et
+	// disparait des comptes EN SILENCE — un but sur deux non compte, sans un
+	// mot. C'est le meme piege que partout ailleurs dans ce dossier : ce qui ne
+	// s'apparie pas doit se VOIR, et ici il suffit de ne pas creer l'ecart.
+	std::vector<std::pair<uint32_t, uint32_t>> work;
+	for(const auto& [gc, gn] : goal)
+		work.emplace_back(db.Canonical(gc), gn);
+	std::unordered_map<uint32_t, uint32_t> seen_depth;
+	for(size_t guard = 0; !work.empty() && guard < 4096; ++guard) {
+		const auto [code, n] = work.back();
+		work.pop_back();
+		if(!n)
+			continue;
+		if(++seen_depth[code] > 8)   // graphe cyclique : on borne, on le dit
+			continue;
+		need_named[code] += n;
+		auto it = cards.find(code);
+		if(it == cards.end() || it->second.recipes.empty())
+			continue;   // carte de base : rien a fabriquer
+		// UNE SEULE VOIE DEVELOPPEE, et c'est dit dans l'en-tete : on prend la
+		// recette declaree, on ne choisit pas a la place du jeu.
+		const DeclaredRecipe& r = it->second.recipes.front();
+		if(r.named.empty() && r.setcode.empty() && r.unresolved_counts.empty())
+			continue;
+		fire[code] += n;
+		for(const auto& [m, k] : r.named)
+			work.emplace_back(db.Canonical(m), n * k);
+		for(const auto& [s, k] : r.setcode)
+			need_setcode[s] += n * k;
+	}
+
+	std::printf("\n  --- CE QUI DOIT TIRER, ET COMBIEN DE FOIS ---\n");
+	std::vector<std::pair<uint32_t, uint32_t>> rows(fire.begin(), fire.end());
+	std::sort(rows.begin(), rows.end(),
+			  [&](const auto& a, const auto& b) { return a.second > b.second; });
+	for(const auto& [code, n] : rows)
+		std::printf("  x%-3u  invocation de %-34s (%u copie(s) au deck)\n", n,
+					db.Name(code).c_str(), copies[code]);
+	for(const auto& [s, n] : need_setcode)
+		std::printf("  x%-3u  CORPS d'archetype 0x%llx  (exigence cardinale)\n",
+					n, (unsigned long long)s);
+
+	// CE QUI N'ENTRE PAS DANS LES COMPTES DOIT SE VOIR. Un but dont aucune
+	// recette n'a ete extraite disparaissait SANS UN MOT du bilan — et un bilan
+	// qui compte la moitie d'un but se lit comme un bilan complet. La cause est
+	// dite, pas devinee : ou la carte n'a pas de recette declaree, ou son code
+	// ne se reduit pas a celui du deck.
+	for(const auto& [gc, gn] : goal) {
+		const uint32_t c = db.Canonical(gc);
+		if(fire.count(c))
+			continue;
+		auto it = cards.find(c);
+		std::printf("  --    %-34s x%u : HORS COMPTES (%s)\n",
+					db.Name(c).c_str(), gn,
+					it == cards.end()
+						? "code absent de la table — alias non reduit"
+						: "aucune recette declaree extraite");
+	}
+
+	// LA LIGNE DU BILAN, PAR PRODUIT — et c'est ICI que l'objection « le deck
+	// RECYCLE » devient un NOMBRE au lieu d'un argument.
+	//
+	// Un monstre d'extra ne peut etre invoque qu'autant de fois qu'il en existe
+	// de copies... PLUS ce que les recycleurs remettent dans la zone. Compter
+	// les seules copies serait un raisonnement de STOCK, c'est-a-dire l'erreur
+	// exacte que l'equation de bilan existe pour ne pas commettre. On compte
+	// donc un FLUX : copies + capacite de recyclage >= tirs exiges.
+	uint64_t zextra = 0;
+	kt.Lookup("LOCATION_EXTRA", zextra);
+	uint32_t recyc = 0;
+	bool recyc_unbounded = false;
+	for(const auto& [host, co] : cards) {
+		for(const auto& [fn, verbs] : co.fn_verbs) {
+			auto lit = co.fn_locations.find(fn);
+			if(lit == co.fn_locations.end() || !(lit->second & zextra))
+				continue;
+			bool rec = false;
+			for(const std::string& v : verbs)
+				rec = rec || ClassifyVerb(v) == VerbKind::kRecycle;
+			if(!rec)
+				continue;
+			const DeclaredEffect* owner = OwnerOf(co, fn);
+			if(!owner || !owner->has_count_limit) {
+				recyc_unbounded = true;   // direction SURE : jamais d'elagage
+				continue;
+			}
+			const uint32_t nb = copies.count(host) ? copies.at(host) : 0u;
+			recyc += owner->count_by_name ? owner->count_limit
+										  : owner->count_limit * nb;
+		}
+	}
+	std::printf("\n  --- LA LIGNE DU BILAN, PAR PRODUIT (copies + recyclage "
+				">= tirs) ---\n");
+	std::printf("  capacite de RECYCLAGE sur l'extra : %u/tour%s\n", recyc,
+				recyc_unbounded ? " + au moins un recycleur SANS BORNE declaree"
+								  " (garde par une fermeture : on ne conclut"
+								  " pas)" : "");
+	size_t n_tight = 0, n_dead = 0;
+	for(const auto& [code, n] : rows) {
+		const uint32_t have = copies.count(code) ? copies.at(code) : 0u;
+		if(have >= n)
+			continue;
+		const uint32_t manque = n - have;
+		const bool dead = !recyc_unbounded && recyc < manque;
+		if(dead) ++n_dead; else ++n_tight;
+		std::printf("  %-34s tirs x%u, copies %u  =>  il MANQUE %u, "
+					"a servir par recyclage   %s\n",
+					db.Name(code).c_str(), n, have, manque,
+					dead ? "<<< LIGNE INFAISABLE" : "TENDU");
+	}
+	if(!n_tight && !n_dead)
+		std::printf("  (aucun produit ne depasse ses copies : la ligne ne "
+					"contraint rien ici)\n");
+
+	// LES ACQUISITIONS, ET C'EST LA QUE LA CAPACITE TRANCHE. Un materiau NOMME
+	// absent du deck ne peut venir que d'un etat accorde `EFFECT_ADD_CODE` — et
+	// l'operateur qui l'accorde a une capacite DECLAREE. Trois exemplaires du
+	// but demandent trois acquisitions ; une capacite « par NOM » en autorise
+	// UNE, quelles que soient les copies. C'est une ligne du bilan, et elle se
+	// tranche sans un seul tirage.
+	uint64_t add_code = 0;
+	kt.Lookup("EFFECT_ADD_CODE", add_code);
+	std::printf("\n  --- LES ACQUISITIONS (materiau NOMME absent du deck) ---\n");
+	size_t n_acq = 0, n_bad = 0;
+	for(const auto& [code, n] : need_named) {
+		// Present au deck (main OU extra) : il existe physiquement, rien a
+		// acquerir. S'il est present mais NON INVOCABLE, c'est la recursion qui
+		// le dira — en butant sur SON materiau nomme, absent lui.
+		if(copies.count(code))
+			continue;
+		++n_acq;
+		bool served = false;
+		for(const auto& [host, co] : cards) {
+			for(const DeclaredEffect& g : co.grants) {
+				if(!g.code_is_effect || g.code_value != add_code || !add_code)
+					continue;
+				const DeclaredEffect* owner = OwnerOf(co, NormFn(g.in_function));
+				const uint32_t nb = copies.count(host) ? copies.at(host) : 0u;
+				uint32_t cap = 0;
+				const char* how = "SANS BORNE";
+				if(owner && owner->has_count_limit) {
+					cap = owner->count_by_name ? owner->count_limit
+											   : owner->count_limit * nb;
+					how = owner->count_by_name ? "par NOM" : "par COPIE";
+				}
+				const bool ok = !owner || !owner->has_count_limit || cap >= n;
+				std::printf("  %-30s <- %-28s  requis x%u,  capacite %u %s"
+							" (%u copie(s))   %s\n",
+							db.Name(code).c_str(), db.Name(host).c_str(), n,
+							cap, how, nb, ok ? "OK" : "<<< INFAISABLE");
+				if(!ok)
+					++n_bad;
+				served = true;
+			}
+		}
+		if(!served)
+			std::printf("  %-30s <- AUCUN etat accorde ne le rend  requis x%u"
+						"   <<< INFAISABLE (ligne vide)\n",
+						db.Name(code).c_str(), n);
+	}
+	if(!n_acq)
+		std::printf("  (aucune : tout materiau nomme est au deck)\n");
+
+	std::printf("\n  VERDICT DE LA LIGNE : %zu acquisition(s) exigee(s), "
+				"%zu au-dela de la capacite declaree.\n", n_acq, n_bad);
+	std::printf("  Ce verdict est NECESSAIRE, jamais suffisant : une voie "
+				"declaree est developpee,\n"
+				"  les conditions restent des fermetures, et l'ordre n'y entre "
+				"pas. Un `INFAISABLE`\n"
+				"  est donc une preuve ; un `OK` n'est qu'une absence de "
+				"preuve du contraire.\n");
 }
 
 } // namespace solver

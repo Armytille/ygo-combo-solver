@@ -272,10 +272,50 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 //   gratuit, et une permutation locale (echanger les invocations #4/#5, ~17
 //   decisions d'ecart mesure) coute UNE deviation au lieu d'une par decision.
 // Le duel doit etre au depart ; il est laisse ou la ligne s'arrete.
+//
+// `stats` (optionnel) : par decision DU JOUEUR, l'arite enumeree et si le coup
+// de la reference a ete RETROUVE parmi les choix. Ces deux nombres repondent a
+// deux questions que « N/M coups identifies » CONFOND depuis toujours :
+//
+//   - `matched` = le coup joue est-il DANS l'espace d'actions du solveur ?
+//     C'est la COUVERTURE, et un seul « non » suffit a rendre la ligne
+//     inatteignable quel que soit le budget.
+//   - `keys[i] != 0` = ce coup est-il au REPERTOIRE ? C'est autre chose, et un
+//     coup retrouve mais sans plan_key etait compte comme non identifie.
+//
+// L'arite, elle, donne la vraisemblance : a politique NEUVE tous les logits
+// sont egaux (les poids partent a zero), donc la probabilite qu'un tirage
+// uniforme reproduise la ligne est exactement le produit des inverses d'arites.
+// C'est le seul chiffre qui dise si l'echantillonnage a une chance.
+struct RefLineStats {
+	std::vector<uint32_t> arity;    // 0 = decision adverse (non enumeree)
+	std::vector<uint8_t> matched;   // 1 = coup de la reference retrouve
+	// TYPE de prompt par decision. Sans lui, `log10 P` est un seul nombre et ne
+	// dit pas OU part l'improbabilite : une decision de POSITION ne peut pas
+	// affecter le but, une decision IDLECMD le decide. Ventiler les 105 ordres
+	// de grandeur par type departage deux chantiers opposes (quotient contre
+	// serialisation) pour le prix d'un octet par decision.
+	std::vector<uint8_t> prompt;
+	// LE DETAIL DES MANQUES. Un trou de couverture qu'on ne peut pas LIRE ne se
+	// repare pas : on garde le prompt, la reponse REELLE et les reponses
+	// OFFERTES, pour que la comparaison octet a octet tranche entre « le coup
+	// n'est pas enumere » et « il l'est, mais sous une autre forme » (l'ordre
+	// d'une selection, ou une copie physique differente que `dedup_by_code`
+	// aurait repliee).
+	struct Miss {
+		size_t index = 0;
+		uint8_t prompt = 0;
+		std::vector<uint8_t> recorded;
+		std::vector<std::vector<uint8_t>> offered;
+	};
+	std::vector<Miss> misses;
+	static constexpr size_t kMaxMisses = 8;
+};
 void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 				 size_t stop_after, const EnumOptions& eo,
 				 std::unordered_map<uint64_t, size_t>& digests,
-				 std::vector<uint64_t>& keys);
+				 std::vector<uint64_t>& keys,
+				 RefLineStats* stats = nullptr);
 
 // --- politique NRPA : partage entre workers --------------------------------
 //
@@ -2005,6 +2045,24 @@ struct SearchConfig {
 	// Partitionner les atomes par nombre de sous-buts atteints : la table se
 	// rouvre a chaque carte cible posee (serialisation du but).
 	bool novelty_serialize = true;
+	// SERIALISATION PAR LES SOUS-BUTS DU BILAN MATIERE (session 20, 9.31).
+	//
+	// L'ARITHMETIQUE QUI L'IMPOSE, et c'est la seule voie que la mesure laisse
+	// ouverte : la ligne reelle porte ~110 decisions reelles d'arite geometrique
+	// 5,9. En UN bloc c'est `5,9^110 ~ 10^85` — impossible a tout budget. En 14
+	// blocs de 8 c'est `14 x 5,9^8 ~ 2x10^7` — atteignable. La difference n'est
+	// ni la politique, ni le budget, ni le quotient : c'est la SERIALISATION.
+	//
+	// Le critere actuel (`CommonCodes` : cartes CIBLES posees) ne bouge qu'a la
+	// toute fin. Celui-ci compte les places du vecteur `x*` deja servies — donc
+	// les etapes INTERMEDIAIRES, celles qui existent des la premiere brique.
+	struct SerialReq {
+		uint32_t code = 0;    // 0 = exigence d'archetype
+		uint64_t arch = 0;
+		uint8_t zone = 0;     // 1 = DISPO (terrain+main+cimetiere+bannie), 2 = TERRAIN
+		uint32_t count = 1;
+	};
+	std::vector<SerialReq> serial_reqs;
 	// Nouveaute stricte : seul un fait jamais vu compte (cf. NoveltyTable).
 	bool novelty_strict = false;
 	// Couper aussi les tirages gloutons. MESURE et desactive par defaut : la
@@ -2028,6 +2086,17 @@ struct SearchConfig {
 	// Hot Red Abyss") entre dans l'echantillonnage sans rien remodeliser.
 	std::vector<uint32_t> hint_cards;
 	float hint_bias = 2.0f;
+	// BIAIS CONTRE LA FIN DE TOUR (session 20, mesure de 9.32 (c)).
+	//
+	// LE FAIT : 683 044 tirages sur 683 044 — CENT POUR CENT — se terminent par
+	// « tour », aucun par contrainte ni par garde. Terminer le tour est
+	// IRREVERSIBLE et se tire uniformement parmi ~10 choix idle : la survie a
+	// 32 decisions idle vaut `0,9^32 ~ 3 %`. Le solveur ne cherche donc pas dans
+	// un espace de 331 decisions, il cherche dans les cinq premieres.
+	//
+	// C'est un BIAIS, jamais un elagage (regle 2) : le choix reste tirable, sa
+	// masse baisse. A 3,0 la survie passe de 3 % a ~85 %.
+	float phase_w = 0.0f;
 	// Persistance partielle de la politique entre redemarrages : les poids sont
 	// attenues par ce facteur au lieu de repartir de zero. Les redemarrages a
 	// politique vierge oubliaient les sous-lignes apprises (mesure : 6/8 avec
@@ -2941,6 +3010,20 @@ struct SearchStats {
 	uint64_t rollout_count = 0;
 	uint64_t turn_cuts = 0;         // tirages arretes au changement de tour
 	uint64_t nrpa_adapts = 0;
+	// --- PROFIL DE PROGRESSION PAR TIRAGE (s21) -----------------------------
+	// La forme close derivee en s21 sur l'arithmetique de 9.31 : a blocs
+	// inegaux, le cout d'un run serialise est Sigma b^(l_i), DOMINE par le plus
+	// grand ecart entre barreaux (5,9^12 ~ 10^9 la ou 5,9^8 ~ 10^6). Ce profil
+	// est l'instrument que 9.32 nommait : ou les tirages s'arretent-ils sur
+	// l'echelle de x* ? Un pic unique = un VERROU nommable ; une dispersion =
+	// c'est l'ARITE qui tue et seul un grain plus fin peut aider.
+	// `sp_final[k]` : tirages dont le MAX de SerialProgress a atteint k unites.
+	// `sp_at_sum` : somme des indices de decision du dernier progres.
+	// `sp_lines` : tirages mesures — le compteur ne vit que si serialisation ET
+	// nouveaute sont actives, car c'est la que SerialProgress est calcule.
+	uint64_t sp_final[40] = {};
+	uint64_t sp_at_sum = 0;
+	uint64_t sp_lines = 0;
 	// VIE DE --adapt-to-peak (audit 18, piege 52) : pas RETIRES du gradient
 	// parce qu'ils suivaient le pic du score. A zero, le mecanisme est INERTE et
 	// aucun juge de recherche ne le concerne — soit les lignes culminent a leur
