@@ -223,6 +223,13 @@ struct EnumOptions {
 	// « Ne pas chainer » reste toujours propose, les declenchements FORCES
 	// (chaines obligatoires) sont exempts, les commandes idle aussi.
 	const std::vector<uint32_t>* no_chain = nullptr;
+	// CONTRAINTE MP1 SEULE (s22quater, demande operateur) : l'entree en
+	// Battle Phase est retiree de l'enumeration (la Main 2 n'existe qu'apres
+	// la BP — la retirer aussi n'est que ceinture pour les prefixes
+	// enregistres avant la contrainte). « -> End Phase » reste toujours : le
+	// tour doit se fermer, et retirer la derniere reponse legale serait une
+	// corruption de l'espace, pas une contrainte.
+	bool mp1_only = false;
 };
 
 // Remplit `out` (reutilise, cf. ChoiceList) avec les reponses legales. Vide si

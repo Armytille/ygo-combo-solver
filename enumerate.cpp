@@ -347,7 +347,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// commande jouable garde ses sorties de phase, sinon le drapeau
 		// fabriquerait une impasse la ou le jeu en offrait une.
 		{
-			if(to_bp) {
+			// --mp1-only : la BP disparait tant que la sortie EP existe (ne
+			// jamais retirer la derniere reponse legale d'un prompt).
+			if(to_bp && !(opt.mp1_only && to_ep)) {
 				Choice& c = out.Emit();
 				PutInt32(c.response, 6);
 				c.edge = EdgeOf(message, { 6 });
@@ -422,7 +424,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// propose RIEN d'autre, elles restent emises — retirer la derniere
 		// reponse legale transformerait un prompt en impasse, ce qui n'est pas
 		// un elagage mais une corruption de l'espace.
-		if(to_m2) {
+		if(to_m2 && !(opt.mp1_only && to_ep)) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 2);
 			c.edge = EdgeOf(message, { 2 });

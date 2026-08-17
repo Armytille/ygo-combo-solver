@@ -1359,6 +1359,10 @@ struct Options {
 	// contrainte choisie, pas un elagage de qualite. Les effets vises se
 	// derivent de la table declaree (categories NEGATE/DISABLE), zero nom.
 	bool no_self_negate = false;
+	// DISCIPLINE (s22quater, demande operateur) : tout le combo vit en MAIN
+	// PHASE 1 — l'entree en Battle Phase (donc la Main 2) est retiree de
+	// l'enumeration, « -> End Phase » reste.
+	bool mp1_only = false;
 	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3) : re-serialisation depuis la
 	// meilleure cellule-frontiere quand sp_max stagne depuis N tirages
 	// mesures. 0 = eteint — un mecanisme est un drapeau le temps de le
@@ -2119,6 +2123,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--op-recipes",       &Options::op_recipes },
 				{ "--quota-legacy",     &Options::quota_legacy },
 				{ "--no-self-negate",   &Options::no_self_negate },
+				{ "--mp1-only",         &Options::mp1_only },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -4291,6 +4296,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		cfg.enumeration.no_chain = &cons.no_chain;
 	if(!cons.self_negate.empty())
 		cfg.self_negate = &cons.self_negate;   // s22ter : discipline choisie
+	cfg.enumeration.mp1_only = opt.mp1_only;   // s22quater : combo en MP1 seule
 	const bool ref_meets_cons = ReportConstraints(cons, ref, db);
 
 	// Ligne de reference relevee une fois pour tous les workers : digests
@@ -7732,6 +7738,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.enumeration.no_chain = &cons.no_chain;
 	if(!cons.self_negate.empty())
 		cfg.self_negate = &cons.self_negate;   // s22ter : discipline choisie
+	cfg.enumeration.mp1_only = opt.mp1_only;   // s22quater : combo en MP1 seule
 	// Verdict informatif : ici la reference joue sur un AUTRE deck, sa
 	// conformite ne conditionne aucun invariant — mais elle dit si le plan
 	// servi en repertoire respecte lui-meme la contrainte demandee.
@@ -10355,6 +10362,10 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 
+	if(opt.mp1_only)
+		std::printf("  contrainte : combo en MAIN PHASE 1 seule — l'entree en "
+					"Battle Phase (donc la Main 2) est retiree de "
+					"l'enumeration ; -> End Phase reste.\n");
 	ScriptProvider scripts;
 	scripts.Init(opt.workdir, opt.scriptdirs);
 	std::printf("  dossiers scripts  : %zu%s\n", scripts.Dirs().size(),
