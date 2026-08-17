@@ -396,6 +396,15 @@ La règle, en trois lignes :
 3. **Un drapeau qui n'a jamais été jugé est une dette, pas une option.** Il y en
    a 27 (`docs/drapeaux.md`) ; chacun doit être jugé ou retiré.
 
+*Fait en session 22* : la dérivation des hôtes à quota et des habilitants par
+les **duaux du LP** (certifiés à chaque exécution) est **le défaut** ; la
+dérivation s21 par classes d'effets se rejoue par `--quota-legacy` (témoin,
+A/B : ≥1 Liger 1/3 = 1/3 sur les mêmes graines — l'acquis tenu sans un choix
+à la main). L'extraction cardinale Synchro/Xyz/Lien, la spécialisation des
+produits d'invocation et le couplage d'ignition sont **inconditionnels** (des
+correctifs de modèle, pas des mécanismes) ; `--refine-after <n>` (l'échelle
+auto-raffinante) est un mécanisme **à mesurer**, éteint par défaut.
+
 *Fait en session 19* : `--adapt-to-peak` et `--hindsight 0.5` sont **le défaut**.
 L'étalon B, **dix runs par bras** lus en proportion, porte `>=2` de **3/10 à
 9/10**. Ils s'éteignent par `--no-adapt-to-peak` et `--no-hindsight`, pour

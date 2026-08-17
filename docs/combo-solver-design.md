@@ -8191,3 +8191,83 @@ et 0/3, parce que les déserts +46/+47 sont intacts tant que les véhicules ne
 sont pas dans le modèle. La chaîne causale est complète et chaque maillon est
 mesuré : forme close → profil des écarts → retour au barreau (frontière ×12) →
 le grain restant, nommé, avec son extraction.
+
+### 9.34 Session 22 : l'universalité se CALCULE — extraction cardinale, duaux certifiés, et l'échelle qui se raffine
+
+*Le détail est dans `docs/rapport-session-22.md` ; cette section fixe ce qui
+gouverne les sessions suivantes.*
+
+#### (a) Le modèle couvre les invocations non-Fusion, et ce que cela a exigé
+
+L'extraction cardinale (Synchro = min1+min2, Xyz = ct, Lien = min → 
+`unresolved_counts` ; comptes seulement, minimum des fourchettes — règle de
+sous-contrainte de 9.30) n'a PAS suffi : la sonde B rendait h fini mais **22
+états h = INFINI au milieu d'une ligne qui aboutit**. Deux pièces manquaient,
+toutes deux générales :
+
+1. **Le diagnostic d'infaisabilité** (`LPResult::infeasible_rows`) : les
+   artificielles positives de la phase 1 NOMMENT leurs lignes. « h = INFINI »
+   au milieu d'une ligne réelle est devenu une liste de travail — c'est lui
+   qui a désigné « Abyss @TERRAIN » et le ranimeur à filtre RACE/TYPE.
+2. **La spécialisation des produits d'invocation** (pool + conversions à coût
+   nul) : un produit met UNE carte précise en jeu ; candidats = nommés ∪
+   archétype ∪ TYPE/RACE lus dans la portée du filtre (`fn_types`/`fn_races`,
+   garde de début de jeton), à défaut tout monstre du deck — une UNION, jamais
+   une restriction (les codes de portée peuvent être NÉGUÉS : Crimson Dragon).
+   **Le poison attrapé au banc** : sans l'exclusion de la famille
+   `AddMustBe...Summoned` (déclarée, pas choisie), les ranimeurs posaient
+   Liger à coût 1 — h(départ) de l'étalon A tombait de 14 à 3. Avec elle :
+   h = 13 (l'optimum vrai, 9.33 (c)), échelle 60 unités / ℓ_max 33 INTACTE.
+
+Et le **couplage d'ignition** : `invoquer` d'une recette `Fusion.AddProcMix*`
+consomme une ignition ; les opérateurs à CATEGORY_FUSION_SUMMON en produisent
+(coût 0 — l'ignition et l'invocation sont UNE action, l'admissibilité
+l'exige ; capacité déclarée ; kNoBound dès qu'une transition peut reproduire
+le sort). **Garde d'asymétrie : zéro igniteur lu = pas de couplage.** C'est ce
+qui rend le quota de Wolf VISIBLE au plan relaxé.
+
+#### (b) Les duaux, exposés et deux fois prouvés — et la dérivation qu'ils remplacent
+
+`row_dual[i]` = coût réduit du surplus de la ligne i ; `bound_dual[j]` = coût
+réduit de l'écart de borne (la valeur d'UNE unité de capacité en plus). Le
+certificat (y, w ≥ 0 ; faisabilité duale ; dualité forte contre les optima
+sympy exacts) tourne dans l'auto-test 65/65 À CHAQUE exécution ;
+`tools/s22_verify_duals.py` fonde la suffisance du certificat (dualité forte
+primal = dual, 141 instances).
+
+`BalanceModel::QuotaHostsFrom` : hôte à quota = borne FINIE ∧ (tirée ∨ saturée
+∨ dual > 0 ∨ **productrice d'une place que x* consomme**). La dernière clause
+est la robustesse à la dégénérescence — trois igniteurs à coût nul sont
+interchangeables pour le simplexe, pas pour le chemin ; c'est ELLE qui fait
+entrer Wolf. Habilitants = hôtes des transitions TIRÉES par x* qui persistent
+en jeu (Chick ressort par son renommage, Wolf par son ignition) + les hôtes
+EFM tant que x* tire une ignition (l'agrégat DISPO ⊇ cimetière n'est optimiste
+que par leur concession — hypothèse de STRUCTURE, écrite, pas un nom :
+Masquerade en ressort). Étalon B : « Starjunk Synchron ; Crimson Dragon
+Quetzacoatl » — dérivés par le même calcul, zéro ligne spécifique.
+
+**L'A/B en proportion (3 graines × 600 s par bras, binaire figé)** : ≥1 Liger
+**1/3 = 1/3, même graine** (duals : 500 tirages à ≥1 sur 1234 ; témoin : 77) ;
+≥2 : 0 partout. La dérivation calculée tient l'acquis de la dérivation à la
+main — l'universalité ne coûte rien sur l'étalon A, et le témoin
+`--quota-legacy` peut être retiré après une confirmation à N plus grand.
+
+#### (c) L'échelle auto-raffinante (écrite, non jugée) et le reste
+
+- `--refine-after <n>` : stagnation de sp_max depuis n tirages (seuil imprimé)
+  → le retour au barreau vise la MEILLEURE cellule, LP à l'état même de la
+  cellule (le membre droit déjà diminué du marquage = « ce qu'il reste à
+  faire »), sous-barreaux = places non servies du x* résiduel, clé étendue
+  d'un niveau au-delà de la porte, sous-progrès dans le score. Vie complète
+  (ligne au déclenchement + relevé agrégé, dont « états archivés au-delà de la
+  porte » — à zéro, la sous-échelle est posée mais jamais foulée). Un LP
+  infaisable à la cellule ne raffine pas (th. 3) et relance le détecteur.
+- Chantier 4 (capacités dynamiques) : resté infrastructure — un bit
+  MSG_CHAINING ne dit pas QUEL effet de l'hôte a tiré ; réduire toutes ses
+  transitions bornées sur-contraint, et une fausse preuve de mort est la pire
+  famille du dossier. Préalable nommé : la marche du théorème 2 avec compteurs
+  de quota (0 infaisable exigé sur les deux étalons).
+- Plafond PAR RACINE du finisseur (restitution comprise) ; balises des
+  constantes calées ; ventilation hindsight par « quota dépensé oui/non »
+  (mesure avant correctif) ; l'observable « cimetière » de ConsumedFrom balisé
+  hypothèse de JEU.

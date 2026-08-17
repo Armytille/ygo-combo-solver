@@ -1,8 +1,11 @@
 #include "search.h"
 
+#include "operators.h"
+
 #include <cstdio>
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1265,6 +1268,16 @@ void Search::HindsightCommit(const NrpaRun& run,
 							 const std::vector<HindsightHit>& hits) {
 	if(hits.empty() || run.steps.empty())
 		return;
+	// VENTILATION (s22, chantier 5) : le prompt s22 soupconne hindsight de
+	// renforcer les fusions PRECOCES — celles qui depensent le quota de Wolf
+	// sur Tiger, le piege de choix nomme par le script. On MESURE avant de
+	// corriger : buts de substitution retenus avec un quota suivi deja
+	// depense, contre quotas frais. Si le biais est reel, le correctif sera
+	// un conditionnement du credit — jamais un elagage (regle 2).
+	if(QuotaKey())
+		stats.hindsight_quota_spent += hits.size();
+	else
+		stats.hindsight_quota_fresh += hits.size();
 	for(const auto& h : hits) {
 		const double s = 1e12 - static_cast<double>(h.depth) * 1e5 -
 						 static_cast<double>(run.steps.size());
@@ -1683,6 +1696,20 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 									   static_cast<uint8_t>(cfg.target_player),
 									   cfg.serial_reqs, duel.Db(), serial_res0,
 									   &sp_vec);
+	// L'ECHELLE RAFFINEE (s22, chantier 3) : au-dela de la porte, les
+	// sous-barreaux comptent dans le score et la cle s'etend d'un niveau —
+	// deux etats au meme palier de base mais a sous-progres different cessent
+	// de partager un representant. Cout : un second SerialProgress, seulement
+	// pres de la frontiere.
+	uint32_t sp2 = 0;
+	uint64_t sp2_vec = 0;
+	if(refined && sp >= refine_gate_sp && !refine_reqs.empty()) {
+		sp2 = SerialProgress(duel, static_cast<uint8_t>(cfg.target_player),
+							 refine_reqs, duel.Db(), serial_res0, &sp2_vec);
+		if(sp2)
+			++stats.refine_top_hits;
+	}
+	const uint32_t sp_eff = (std::min)(sp + sp2, 127u);
 	// Score : sous --resolve, les RESOLUTIONS d'abord — le verrou mesure est
 	// la jonction rips+board, et les racines qui la franchissent sont les
 	// etats deja rippes, pas les 8/8 muets. A egalite, le chemin le plus
@@ -1717,12 +1744,31 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	// mecanisme ne peut donc pas degrader le bras temoin.
 	auto pack_sp = [&](uint32_t b) -> uint64_t {
 		const uint64_t base = pack(b);
+		if(cfg.serial_reqs.empty())
+			return base;
+		// LE REPRESENTANT A RESSOURCES FRAICHES (s22, chantier 2.3). A
+		// progres et overlap EGAUX, une cellule qui n'a pas depense ses
+		// quotas domine : les memes barreaux atteints avec plus d'options
+		// restantes. C'est le meme defaut que le « chemin court » de s21, vu
+		// cote SCORE : la cle (board, quotas) separe les cellules, mais
+		// l'eviction et le tournoi de re-entree comparaient encore sans
+		// regarder ce qui reste a depenser. 4 bits entre le progres (56-62)
+		// et le reste du score (base >> 8 culmine au bit 43) : aucune
+		// collision. Compare deux etats d'une MEME cellule : quotas egaux
+		// par construction de la cle — le critere y est neutre.
+		uint64_t fresh = 0;
+		if(cfg.quota_fresh_pref && !cfg.quota_hosts.empty()) {
+			const uint64_t used_mask =
+				(1ull << (std::min)(cfg.quota_hosts.size(), size_t(12))) - 1;
+			fresh = (std::min<uint64_t>)(
+				std::bitset<12>((~QuotaKey()) & used_mask).count(), 15u);
+		}
 		// 7 bits (s21) : le total servi depasse 63 avec les tranches de
-		// departs de reserve ; 127 << 56 tient dans les 63 bits bas.
-		return cfg.serial_reqs.empty()
-				   ? base
-				   : (static_cast<uint64_t>((std::min)(sp, 127u)) << 56) |
-						 (base >> 8);
+		// departs de reserve ; 127 << 56 tient dans les 63 bits bas. `sp_eff`
+		// inclut les sous-barreaux raffines (s22) : la frontiere raffinee
+		// DOIT surclasser la frontiere de base.
+		return (static_cast<uint64_t>((std::min)(sp_eff, 127u)) << 56) |
+			   (fresh << 52) | (base >> 8);
 	};
 	uint64_t score = pack_sp(0);
 	if(uint64_t fl = floor_of(); fl && score <= fl)
@@ -1742,7 +1788,8 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	const uint64_t cell =
 		cfg.serial_reqs.empty()
 			? here.hash
-			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52));
+			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
+			   (sp2_vec * 0x9E3779B97F4A7C15ull));
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
@@ -2645,6 +2692,16 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			++self->stats.sp_final[(std::min)(*mx, 71u)];
 			self->stats.sp_at_sum += *at;
 			++self->stats.sp_lines;
+			// s22 : le detecteur de STAGNATION de la frontiere — le
+			// declencheur du raffinement (chantier 3). Un gain de palier
+			// remet le compteur a zero ; sinon il monte, et ReenterMaybe
+			// compare au seuil cfg.refine_after (imprime).
+			if(*mx > self->max_sp_seen) {
+				self->max_sp_seen = *mx;
+				self->rollouts_since_gain = 0;
+			} else {
+				++self->rollouts_since_gain;
+			}
 		}
 	} sp_guard{ this, &sp_max, &sp_max_at,
 				!cfg.serial_reqs.empty() && cfg.novelty_patience != 0 };
@@ -3739,6 +3796,11 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	if(static_cast<double>(next() & 0xffff) >=
 	   static_cast<double>(cfg.reenter) * 65536.0)
 		return;
+	// LE RAFFINEMENT ARME (s22, chantier 3) : quand la frontiere stagne, ce
+	// retour-ci vise la MEILLEURE cellule — c'est d'elle que la sous-echelle
+	// se derive, et le duel y sera exactement dans l'etat voulu.
+	const bool want_refine = cfg.refine_after && cfg.balance && !refined &&
+							 rollouts_since_gain >= cfg.refine_after;
 	// TOURNOI DE 2 (s21, apres la mesure a 359 cellules) : l'uniforme pur
 	// diluait le budget — les cellules-frontiere, celles dont le bloc suivant
 	// est le travail, ne recevaient que 1/N des retours. Deux tirages, on
@@ -3749,6 +3811,13 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	const ArchiveEntry* other = &archive[next() % archive.size()];
 	if(other->score > pick->score)
 		pick = other;
+	if(want_refine) {
+		size_t best_i = 0;
+		for(size_t i = 1; i < archive.size(); ++i)
+			if(archive[i].score > archive[best_i].score)
+				best_i = i;
+		pick = &archive[best_i];
+	}
 	const ArchiveEntry& e = *pick;
 	if(e.path.empty())
 		return;
@@ -3793,6 +3862,77 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	stats.reenter_base_sum += SerialProgress(
 		duel, static_cast<uint8_t>(cfg.target_player), cfg.serial_reqs,
 		duel.Db(), serial_res0);
+	// Le duel est a l'etat de la cellule : c'est ICI que la sous-echelle se
+	// pose (s22, chantier 3).
+	if(want_refine)
+		RefineLadderHere();
+}
+
+// LA RE-SERIALISATION DEPUIS LA FRONTIERE (s22, chantier 3). Le run nu n'a
+// pas de ligne de reference — le banc du profil des ecarts ne peut pas le
+// guider. Mais le LP se resout DU DUEL, ou qu'on soit : ses places non encore
+// servies (le membre droit deja diminue du marquage) sont exactement « ce
+// qu'il reste a faire depuis ce barreau », et la forme close dit que couper
+// la plus fin est toujours gagnant. Un niveau de raffinement ; la cle de
+// cellule s'etend au-dela de la porte (le palier de la cellule raffinee), le
+// retour au barreau et le tournoi travaillent inchanges.
+void Search::RefineLadderHere() {
+	const auto con = static_cast<uint8_t>(cfg.target_player);
+	const CardDB& db = duel.Db();
+	static thread_local std::vector<uint32_t> scratch;
+	std::vector<uint32_t> zres, zava, zfld;
+	for(uint32_t loc : { 0x01u, 0x40u }) {
+		duel.QueryCodes(con, loc, scratch);
+		for(uint32_t c : scratch)
+			zres.push_back(db.Canonical(c));
+	}
+	for(uint32_t loc : { 0x02u, 0x04u, 0x08u, 0x10u, 0x20u }) {
+		duel.QueryCodes(con, loc, scratch);
+		for(uint32_t c : scratch)
+			zava.push_back(db.Canonical(c));
+		if(loc == 0x04u)
+			for(uint32_t c : scratch)
+				zfld.push_back(db.Canonical(c));
+	}
+	LPResult r;
+	const double h2 = cfg.balance->Solve(zres, zava, zfld, &r);
+	// Un LP infaisable ICI serait une cellule morte au sens du theoreme 3 —
+	// on ne raffine pas dessus, et on laisse le compteur de stagnation armer
+	// le prochain retour au sommet.
+	if(h2 < 0 || !r.feasible) {
+		rollouts_since_gain = 0;
+		return;
+	}
+	refine_reqs.clear();
+	auto push = [&](const BalanceModel::Need& n) {
+		if(n.zone == 0 || refine_reqs.size() >= 16)
+			return;
+		SearchConfig::SerialReq rq;
+		rq.code = n.code;
+		rq.arch = n.arch;
+		rq.zone = n.zone;
+		rq.count = n.count;
+		refine_reqs.push_back(rq);
+	};
+	for(const BalanceModel::Need& n : cfg.balance->NeedsFrom(r))
+		push(n);
+	for(const BalanceModel::Need& n : cfg.balance->ConsumedFrom(r))
+		push(n);
+	if(refine_reqs.empty()) {
+		rollouts_since_gain = 0;
+		return;
+	}
+	refine_gate_sp = SerialProgress(duel, con, cfg.serial_reqs, db,
+									serial_res0);
+	refined = true;
+	stats.refine_done = 1;
+	stats.refine_subrungs = refine_reqs.size();
+	stats.refine_gate = refine_gate_sp;
+	std::printf("  RAFFINEMENT (s22) : frontiere stagnante (%u tirages sans "
+				"gain, seuil %u) — LP a la cellule h=%.0f, %zu sous-barreau(x) "
+				"poses, porte sp=%u\n",
+				rollouts_since_gain, cfg.refine_after, h2, refine_reqs.size(),
+				refine_gate_sp);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {

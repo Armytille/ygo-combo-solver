@@ -35,6 +35,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -237,6 +238,14 @@ struct CardOperators {
 	// Sans eux la colonne negative du bilan (9.30) devrait etre inventee.
 	std::unordered_map<std::string, std::vector<uint64_t>> fn_setcodes;
 	std::unordered_map<std::string, std::vector<uint32_t>> fn_codes;
+	// TYPES et RACES mentionnes par la fonction (`IsType(TYPE_SYNCHRO)`,
+	// `IsRace(RACE_DRAGON)`) — le vocabulaire des filtres qui ne nomment ni
+	// code ni archetype (s22). Sans lui, « invoque 1 Synchro Dragon » n'a
+	// aucun candidat lisible et la carte precise remise en jeu par un
+	// ranimeur est une place sans producteur (mesure : 22 etats h = INFINI
+	// au milieu de la ligne reelle de l'etalon B).
+	std::unordered_map<std::string, uint64_t> fn_types;
+	std::unordered_map<std::string, uint64_t> fn_races;
 	// Fonctions locales appelees par une fonction. La contrainte ne vit presque
 	// jamais dans la fonction qui detruit : elle vit dans le FILTRE qu'elle
 	// passe a `SelectMatchingCard`. Un seul niveau suffit sur ce deck.
@@ -375,6 +384,22 @@ struct LPResult {
 	bool primal_ok = false;
 	bool optimal_ok = false;
 	double worst_violation = 0.0;
+	// LES DUAUX (s22, chantier 2). Ils sont deja dans le tableau final — les
+	// exposer ne coute rien, et ils remplacent des CHOIX faits a la main :
+	//   row_dual[i]  : valeur marginale de la contrainte i (>= 0 a l'optimum) ;
+	//   bound_dual[j]: valeur d'une unite de capacite EN PLUS sur l'operateur j
+	//                  (> 0 <=> la borne u_j LIE le plan — son hote est un hote
+	//                  a quota CALCULE, pas selectionne).
+	// Convention de signe derivee en s22 (tools/s22_verify_duals.py) : dans le
+	// tableau normalise, dual de ligne = cout reduit de son surplus/ecart,
+	// dual de borne = cout reduit de l'ecart de borne.
+	std::vector<double> row_dual;
+	std::vector<double> bound_dual;
+	// PHASE 1 EN ECHEC : les contraintes dont l'artificielle reste positive —
+	// le diagnostic exact de « quelle ligne est insatisfaisable ICI ». Sans ce
+	// champ, « h = INFINI » au milieu d'une ligne reelle est muet (s22 : 22
+	// etats infaisables sur l'etalon B, cause invisible).
+	std::vector<std::string> infeasible_rows;
 };
 
 LPResult SolveOperatorLP(const OperatorLP& lp);
@@ -430,12 +455,39 @@ public:
 	// (une unite jamais atteinte ne cree pas de cellule) ; sous-compter
 	// laisserait les deserts entiers.
 	std::vector<Need> ConsumedFrom(const LPResult& r) const;
+	// LES HOTES A QUOTA, DERIVES DES DUAUX (s22, chantier 2). Remplace la
+	// derivation a la main de s21 (classes d'effets + series croisees, trois
+	// versions iterees « jusqu'a ce que Wolf apparaisse » — le piege 2 du
+	// dossier). Un hote entre ici par CALCUL :
+	//   - sa transition a une borne FINIE declaree, et
+	//   - elle est tiree par x* (x_t > 0), saturee (x_t = u_t), de dual
+	//     positif (la capacite LIE le plan), ou produit une place que x*
+	//     consomme (robustesse a la degenerescence : trois igniteurs a cout
+	//     nul sont interchangeables pour le simplexe, pas pour le chemin).
+	// `presence` recoit les hotes des transitions TIREES par x* : les
+	// habilitants — c'est d'eux que les barreaux @EN JEU se derivent.
+	std::vector<uint32_t> QuotaHostsFrom(const LPResult& r,
+										 std::vector<uint32_t>* presence) const;
 
 	size_t Places() const { return pname.size(); }
 	size_t Transitions() const { return lp.n_ops; }
 	size_t Renames() const { return n_rename; }
+	// Igniteurs de Fusion lus (s22). A zero avec des recettes Fusion au deck,
+	// le couplage d'ignition est DESARME (garde d'asymetrie) — le dire est la
+	// vie du mecanisme.
+	size_t FusionIgniters() const { return n_igniter; }
 	const std::vector<std::string>& TrNames() const { return tname; }
 	const std::vector<std::string>& PlaceNames() const { return pname; }
+	// L'HOTE de chaque transition (s22) : la carte qui porte l'effet. C'est la
+	// cle qui traduit un dual de borne en HOTE A QUOTA — la derivation
+	// calculee qui remplace les regles a la main du chantier 2.
+	uint32_t HostOf(size_t t) const {
+		return t < thost.size() ? thost[t] : 0;
+	}
+	// La borne superieure declaree de chaque transition (kNoBound = sans).
+	double UpperOf(size_t t) const {
+		return t < lp.upper.size() ? lp.upper[t] : OperatorLP::kNoBound;
+	}
 	// Nom de la premiere place PRODUITE par cette transition (lisibilite).
 	std::string Produces(size_t t) const;
 
@@ -446,6 +498,7 @@ private:
 	std::unordered_map<uint64_t, size_t> pid;
 	std::vector<std::string> pname;
 	std::vector<std::string> tname;
+	std::vector<uint32_t> thost;   // hote (carte) de chaque transition, 0 si n/a
 	std::vector<double> need;                       // but par place
 	std::vector<std::unordered_map<size_t, double>> col;   // effets par transition
 	OperatorLP lp;                                  // couts et bornes ; rows rebati
@@ -455,6 +508,10 @@ private:
 	// cellules « en progres » qui avaient detruit leurs pieces de but).
 	std::vector<uint32_t> goal_codes;
 	size_t n_rename = 0;
+	size_t n_igniter = 0;
+	// Le cache est MUTABLE sous const : depuis s22 les workers appellent
+	// Solve() en parallele (RefineLadderHere) — le verrou est obligatoire.
+	mutable std::mutex sc_mx;
 	mutable std::unordered_map<uint32_t, std::vector<uint64_t>> sc_cache;
 };
 

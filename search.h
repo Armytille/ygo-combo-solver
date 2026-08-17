@@ -2101,6 +2101,22 @@ struct SearchConfig {
 	// a quotas differents cessent de partager un representant. Codes
 	// canoniques ; au plus 12 suivis, un bit chacun (depense / frais).
 	std::vector<uint32_t> quota_hosts;
+	// s22, chantier 2.3 : a progres egal le score d'archive prefere les
+	// quotas FRAIS (4 bits du score, eviction et tournoi de re-entree). Faux
+	// par defaut : cable en un seul point avec quota_hosts.
+	bool quota_fresh_pref = false;
+	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3). Le run nu n'a pas de ligne
+	// de reference : quand la frontiere STAGNE (aucun gain de sp_max depuis
+	// `refine_after` tirages mesures — le seuil est IMPRIME), le prochain
+	// retour au barreau vise la MEILLEURE cellule, y resout le LP (le
+	// marquage se lit du duel), et les places non encore servies de son x*
+	// residuel deviennent les sous-barreaux d'une sous-echelle : la cle de
+	// cellule s'etend d'un niveau au-dela de la porte, le retour au barreau
+	// et le tournoi travaillent inchanges sur l'echelle raffinee. UN niveau
+	// pour commencer, mesure. 0 = eteint (drapeau le temps de la mesure).
+	uint32_t refine_after = 0;
+	// Le modele de bilan (racine du LP), prete par main.cpp — nul sinon.
+	const class BalanceModel* balance = nullptr;
 	// Nouveaute stricte : seul un fait jamais vu compte (cf. NoveltyTable).
 	bool novelty_strict = false;
 	// Couper aussi les tirages gloutons. MESURE et desactive par defaut : la
@@ -3073,6 +3089,21 @@ struct SearchStats {
 	uint64_t reenter_rollouts = 0;
 	uint64_t reenter_fail = 0;
 	uint64_t reenter_base_sum = 0;
+	// LA VIE DU RAFFINEMENT (s22, chantier 3). `refine_done` : ce worker a
+	// re-serialise depuis sa cellule-frontiere (0 ou 1) ; `refine_subrungs` :
+	// sous-barreaux poses ; `refine_gate` : palier de base a partir duquel la
+	// cle s'etend ; `refine_top_hits` : etats archives au-dela de la porte
+	// (l'echelle raffinee a ete FOULEE, pas seulement posee).
+	uint64_t refine_done = 0;
+	uint64_t refine_subrungs = 0;
+	uint64_t refine_gate = 0;
+	uint64_t refine_top_hits = 0;
+	// Ventilation hindsight (s22, chantier 5) : buts de substitution commis
+	// avec un quota suivi deja depense / avec tous les quotas frais. La
+	// question mesuree : hindsight renforce-t-il les fusions precoces qui
+	// depensent le quota de Wolf sur Tiger ?
+	uint64_t hindsight_quota_spent = 0;
+	uint64_t hindsight_quota_fresh = 0;
 	// VIE DE --adapt-to-peak (audit 18, piege 52) : pas RETIRES du gradient
 	// parce qu'ils suivaient le pic du score. A zero, le mecanisme est INERTE et
 	// aucun juge de recherche ne le concerne — soit les lignes culminent a leur
@@ -3661,6 +3692,15 @@ private:
 			k |= static_cast<uint64_t>((std::min)(quota_uses[i], 1u)) << i;
 		return k;
 	}
+	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3) — etat par worker. La
+	// stagnation se lit sur le max de sp_final ; le raffinement se fait AU
+	// PROCHAIN retour au barreau (le duel y est deja a l'etat de la cellule).
+	bool refined = false;
+	uint32_t refine_gate_sp = 0;
+	std::vector<SearchConfig::SerialReq> refine_reqs;
+	uint32_t max_sp_seen = 0;
+	uint32_t rollouts_since_gain = 0;
+	void RefineLadderHere();
 	// Politique finale du run NRPA (exportee pour le finisseur).
 	Policy final_policy;
 	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).

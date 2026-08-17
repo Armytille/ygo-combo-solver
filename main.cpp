@@ -1343,6 +1343,15 @@ struct Options {
 	// que si chaque bloc est fouille depuis le barreau precedent. Ne mord que
 	// sous serialisation armee. 0 = temoin de l'A/B.
 	double reenter = 0.5;
+	// TEMOIN de l'A/B des quotas (s22) : rejoue la derivation s21 par classes
+	// d'effets a la place de la derivation par les duaux du LP. Un drapeau le
+	// temps d'une mesure — les deux derivations s'impriment dans tous les cas.
+	bool quota_legacy = false;
+	// L'ECHELLE AUTO-RAFFINANTE (s22, chantier 3) : re-serialisation depuis la
+	// meilleure cellule-frontiere quand sp_max stagne depuis N tirages
+	// mesures. 0 = eteint — un mecanisme est un drapeau le temps de le
+	// mesurer.
+	uint64_t refine_after = 0;
 	// Poids soustrait au logit d'un changement de phase. 0 = eteint (le temoin).
 	double phase_w = 0.0;
 	// CHANTIER 2 (session 19) : LE CHAINAGE ARRIERE COMME BIAIS.
@@ -2092,6 +2101,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--adapt-to-peak",    &Options::adapt_to_peak },
 				{ "--operators",        &Options::operators },
 				{ "--op-recipes",       &Options::op_recipes },
+				{ "--quota-legacy",     &Options::quota_legacy },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -2126,6 +2136,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			kU64Flags[] = {
 				{ "--max-rollouts", &Options::max_rollouts },
 				{ "--max-nodes",    &Options::max_nodes },
+				{ "--refine-after", &Options::refine_after },
 			};
 			bool matched = false;
 			for(const auto& f : kU64Flags)
@@ -3713,6 +3724,10 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 	// volontairement inerte. Le dire ici evite un bras d'A/B mort-ne.
 	if(cfg.reenter > 0.0f)
 		dep(!cfg.serial_reqs.empty(), "reenter %.2f", cfg.reenter);
+	// Le raffinement (s22) exige l'echelle ET le modele de bilan prete.
+	if(cfg.refine_after)
+		dep(!cfg.serial_reqs.empty() && cfg.balance != nullptr,
+			"refine-after %u", cfg.refine_after);
 
 	std::printf("  MECANISMES [%s] : %s\n", mode,
 				on.empty() ? "aucun (defauts du moteur)" : on.c_str());
@@ -6551,6 +6566,12 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 // une : les reponses enregistrees ne designent rien dans un duel dont ni le
 // deck, ni la main, ni la graine ne coincident. Ce qu'on transporte, c'est
 // l'INTENTION de la ligne (LiftPlan), et on s'en sert comme ordre de visite.
+// s22, chantier 3 : le modele de bilan est PRETE a la recherche (cfg.balance)
+// pour la re-serialisation depuis la frontiere — il doit survivre au bloc qui
+// le construit. Statique de process, comme le graphe de landmarks.
+static BalanceModel g_balance_model;
+static bool g_balance_armed = false;
+
 void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_yrp,
 						const Options& opt, Arena& arena, const LineResult& ref,
 						CardDB& db, ScriptProvider& scripts, uint32_t patience,
@@ -6994,12 +7015,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				for(const auto* l : { &sd.main, &sd.extra })
 					for(uint32_t c : *l)
 						deck_mult.push_back(c);
-				BalanceModel bm;
+				BalanceModel& bm = g_balance_model;
+				g_balance_armed = false;
 				if(opt.serial && !gc2.empty() &&
 				   bm.Build(tbl, db, kt, deck_mult, gc2)) {
 					LPResult lr;
 					const double h0 = bm.Solve(deck_mult, {}, {}, &lr);
 					if(lr.feasible && lr.primal_ok && lr.optimal_ok) {
+						g_balance_armed = true;
 						for(const BalanceModel::Need& n : bm.NeedsFrom(lr)) {
 							if(n.zone == 0)
 								continue;   // la RESERVE n'est pas un progres
@@ -7048,26 +7071,23 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							rq.count = 15;
 							serial_from_balance.push_back(rq);
 						}
-						// LES HOTES DES EFFETS ACCORDES, EN ZONE (s21, apres
-						// le run 600 s). Le but exige une CONJONCTION :
-						// Leo-materiau ET la concession de Masquerade active
-						// ET le renommeur en zone. L'echelle etait AVEUGLE aux
-						// habilitants — ils ne sont pas dans x* — donc une
-						// cellule « 40 unites avec l'hote pose » et une
-						// « sans » avaient la meme cle, et le score (chemin
-						// court d'abord) gardait systematiquement la mauvaise.
-						// Derivation GENERALE (regle 3, aucun nom compile) :
-						// tout hote d'un EFFECT_ADD_CODE ou d'un
-						// EFFECT_EXTRA_FUSION_MATERIAL present au deck devient
-						// un barreau de PRESENCE @TERRAIN, a hauteur de ses
-						// copies (plafond 3, sur-compter anodin).
+						// LES HABILITANTS ET LES QUOTAS : DEUX DERIVATIONS,
+						// l'une CALCULEE (s22, les duaux — le defaut), l'autre
+						// par CLASSES d'effets (s21 — le temoin, gardee le
+						// temps d'une mesure : --quota-legacy).
+						std::vector<uint32_t> quota_legacy;
+						std::vector<SearchConfig::SerialReq> presence_legacy;
+						std::unordered_map<uint32_t, uint32_t> dcop;
+						for(uint32_t c : deck_mult)
+							++dcop[db.Canonical(c)];
+						uint64_t k_add = 0, k_efm = 0;
+						kt.Lookup("EFFECT_ADD_CODE", k_add);
+						kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL", k_efm);
+						// (a) LE TEMOIN s21 : tout hote d'un EFFECT_ADD_CODE
+						// ou d'un EFFECT_EXTRA_FUSION_MATERIAL present au deck
+						// devient un barreau de PRESENCE @EN JEU et un hote a
+						// quota.
 						{
-							uint64_t k_add = 0, k_efm = 0;
-							kt.Lookup("EFFECT_ADD_CODE", k_add);
-							kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL", k_efm);
-							std::unordered_map<uint32_t, uint32_t> dcop;
-							for(uint32_t c : deck_mult)
-								++dcop[db.Canonical(c)];
 							for(const auto& kvv : tbl.All()) {
 								const uint32_t host = db.Canonical(kvv.first);
 								auto dit = dcop.find(host);
@@ -7088,9 +7108,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								rq.code = host;
 								rq.zone = 6;   // EN JEU (MZONE + SZONE)
 								rq.count = (std::min)(dit->second, 3u);
-								serial_from_balance.push_back(rq);
+								presence_legacy.push_back(rq);
 								// Un habilitant est aussi un hote a QUOTA.
-								quota_hosts_wiring.push_back(host);
+								quota_legacy.push_back(host);
 							}
 						}
 						// LES HOTES A QUOTA (s21, l'etude des briques) : aux
@@ -7174,24 +7194,121 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											  (hrow->type & t_cont)));
 								if(!persists)
 									continue;
-								quota_hosts_wiring.push_back(host);
+								quota_legacy.push_back(host);
 							}
-							std::sort(quota_hosts_wiring.begin(),
-									  quota_hosts_wiring.end());
-							quota_hosts_wiring.erase(
-								std::unique(quota_hosts_wiring.begin(),
-											quota_hosts_wiring.end()),
-								quota_hosts_wiring.end());
-							if(quota_hosts_wiring.size() > 12)
-								quota_hosts_wiring.resize(12);
-							if(!quota_hosts_wiring.empty()) {
-								std::printf("  QUOTAS suivis (cle de cellule) "
-											": ");
-								for(uint32_t qh : quota_hosts_wiring)
-									std::printf("%s ; ",
-												db.Name(qh).c_str());
-								std::printf("\n");
+						}
+						// (b) LA DERIVATION PAR LES DUAUX (s22) — le defaut.
+						// Quotas : hotes a borne FINIE tires par x*, satures,
+						// a dual positif, ou produisant une place que x*
+						// consomme (robustesse a la degenerescence des
+						// igniteurs a cout nul). Habilitants : hotes des
+						// transitions TIREES par x* qui PERSISTENT en jeu —
+						// Chick RESSORT par son renommage, Wolf par son
+						// ignition ; personne ne les a pousses. Les hotes
+						// d'un EFFECT_EXTRA_FUSION_MATERIAL s'y ajoutent tant
+						// que x* tire une ignition de Fusion : l'agregat
+						// DISPO (qui contient le cimetiere) n'est optimiste
+						// que PAR leur concession — hypothese de STRUCTURE du
+						// modele, ecrite ici, pas un nom de carte.
+						std::vector<uint32_t> presence_hosts;
+						std::vector<uint32_t> quota_duals =
+							bm.QuotaHostsFrom(lr, &presence_hosts);
+						bool fusion_pulled = false;
+						for(size_t t2 = 0; t2 < bm.Transitions(); ++t2)
+							fusion_pulled =
+								fusion_pulled ||
+								(t2 < lr.x.size() && lr.x[t2] > 1e-6 &&
+								 bm.TrNames()[t2] == "igniter");
+						if(fusion_pulled && k_efm)
+							for(const auto& kvv : tbl.All()) {
+								const uint32_t host = db.Canonical(kvv.first);
+								if(!dcop.count(host))
+									continue;
+								for(const DeclaredEffect& g :
+									kvv.second.grants)
+									if(g.code_is_effect &&
+									   g.code_value == k_efm)
+										presence_hosts.push_back(host);
 							}
+						// Presence @EN JEU : seuls les hotes du deck qui
+						// RESTENT en jeu portent un barreau (un sort a usage
+						// unique laisse deja sa trace en zone).
+						uint64_t t_cont2 = 0;
+						kt.Lookup("TYPE_CONTINUOUS", t_cont2);
+						std::vector<SearchConfig::SerialReq> presence_duals;
+						{
+							std::sort(presence_hosts.begin(),
+									  presence_hosts.end());
+							presence_hosts.erase(
+								std::unique(presence_hosts.begin(),
+											presence_hosts.end()),
+								presence_hosts.end());
+							for(uint32_t host : presence_hosts) {
+								auto dit = dcop.find(host);
+								if(dit == dcop.end())
+									continue;
+								const CardRow* hrow = db.Find(host);
+								const bool persists2 =
+									hrow && ((hrow->type & 0x1u) ||
+											 (t_cont2 &&
+											  (hrow->type & t_cont2)));
+								if(!persists2)
+									continue;
+								SearchConfig::SerialReq rq;
+								rq.code = host;
+								rq.zone = 6;
+								rq.count = (std::min)(dit->second, 3u);
+								presence_duals.push_back(rq);
+							}
+						}
+						auto finish_hosts = [](std::vector<uint32_t>& v) {
+							std::sort(v.begin(), v.end());
+							v.erase(std::unique(v.begin(), v.end()), v.end());
+							if(v.size() > 12)
+								v.resize(12);
+						};
+						finish_hosts(quota_legacy);
+						finish_hosts(quota_duals);
+						// LA VIE DES DEUX DERIVATIONS, toujours imprimee :
+						// les trois derivations fausses de s21 n'ont ete
+						// vues QUE par cette ligne.
+						auto print_hosts = [&db](const char* tag,
+												 const std::vector<uint32_t>&
+													 v) {
+							std::printf("  %s : ", tag);
+							if(v.empty())
+								std::printf("(aucun)");
+							for(uint32_t qh : v)
+								std::printf("%s ; ", db.Name(qh).c_str());
+							std::printf("\n");
+						};
+						print_hosts("QUOTAS suivis (duaux)", quota_duals);
+						print_hosts("QUOTAS (temoin s21, classes)",
+									quota_legacy);
+						{
+							std::string ph;
+							for(const auto& rq : presence_duals)
+								ph += db.Name(rq.code) + " ; ";
+							std::printf("  PRESENCE @EN JEU (x*) : %s\n",
+										ph.empty() ? "(aucune)" : ph.c_str());
+							std::string pl;
+							for(const auto& rq : presence_legacy)
+								pl += db.Name(rq.code) + " ; ";
+							std::printf("  PRESENCE (temoin s21) : %s\n",
+										pl.empty() ? "(aucune)" : pl.c_str());
+						}
+						if(opt.quota_legacy) {
+							quota_hosts_wiring = quota_legacy;
+							for(const auto& rq : presence_legacy)
+								serial_from_balance.push_back(rq);
+							std::printf("  (cablage : TEMOIN s21 — "
+										"--quota-legacy)\n");
+						} else {
+							quota_hosts_wiring = quota_duals;
+							for(const auto& rq : presence_duals)
+								serial_from_balance.push_back(rq);
+							std::printf("  (cablage : DUAUX s22 — temoin via "
+										"--quota-legacy)\n");
 						}
 						std::printf("  SERIALISATION par le bilan matiere : "
 									"h(depart) = %.0f, %zu sous-but(s)\n",
@@ -7318,6 +7435,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	ApplyMechanisms(opt, cfg);   // chantier D : UN SEUL POINT DE CABLAGE
 	cfg.serial_reqs = serial_from_balance;   // 9.31 : les sous-buts calcules
 	cfg.quota_hosts = quota_hosts_wiring;    // s21 : (board, quotas) en cle
+	// s22, chantier 2.3 : a progres egal, le score d'archive prefere la
+	// cellule aux quotas FRAIS. Fait partie du paquet « duaux » ; le temoin
+	// --quota-legacy rejoue s21 a l'identique (cle sans preference).
+	cfg.quota_fresh_pref = !opt.quota_legacy;
+	// s22, chantier 3 : l'echelle auto-raffinante. Le modele n'est prete que
+	// si la serialisation s'est armee — sans echelle, il n'y a rien a
+	// raffiner, et le mecanisme s'annonce inerte via ReportMechanisms.
+	cfg.refine_after = static_cast<uint32_t>(opt.refine_after);
+	cfg.balance = g_balance_armed ? &g_balance_model : nullptr;
 	// Le plan compte 273 etapes ; un autre deck en demandera davantage pour
 	// arriver au meme endroit. On laisse de la marge, sans quoi la borne
 	// couperait avant le board.
@@ -7743,6 +7869,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// Vie du retour au barreau (--reenter, s21) : additif.
 			uint64_t reenter_rollouts = 0, reenter_fail = 0,
 					 reenter_base_sum = 0;
+			// Vie du raffinement (s22, chantier 3) : workers raffines, sous-
+			// barreaux, etats archives au-dela de la porte.
+			uint64_t refine_done = 0, refine_subrungs = 0, refine_top_hits = 0;
 			uint64_t hint_seen = 0, hint_taken = 0;
 			// Ventilation (audit 18) : `sel` = prompts de SOUS-ENSEMBLE, ou
 			// l'identite de carte est approximative et n'existe que sous
@@ -7785,6 +7914,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			double backward_sum = 0.0;
 			uint64_t backward_count = 0;
 			uint64_t hindsight_goals = 0, hindsight_adapts = 0;
+			uint64_t hindsight_quota_spent = 0, hindsight_quota_fresh = 0;
 			uint64_t recipe_snaps = 0, snap_products = 0, snap_useful = 0,
 					 snap_backward = 0;
 		// Vie du biais d'operateur (--op-bias, chantier 2 de la session 19).
@@ -8014,6 +8144,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.reenter_rollouts += s.Stats().reenter_rollouts;
 					m.reenter_fail += s.Stats().reenter_fail;
 					m.reenter_base_sum += s.Stats().reenter_base_sum;
+					m.refine_done += s.Stats().refine_done;
+					m.refine_subrungs += s.Stats().refine_subrungs;
+					m.refine_top_hits += s.Stats().refine_top_hits;
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
@@ -8059,6 +8192,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.backward_sum += s.Stats().backward_sum;
 					m.backward_count += s.Stats().backward_count;
 					m.hindsight_goals += s.Stats().hindsight_goals;
+					m.hindsight_quota_spent += s.Stats().hindsight_quota_spent;
+					m.hindsight_quota_fresh += s.Stats().hindsight_quota_fresh;
 					m.hindsight_adapts += s.Stats().hindsight_adapts;
 					m.recipe_snaps += s.Stats().recipe_snaps;
 					// Instantanes : la TAILLE est la meme pour tous les workers
@@ -8387,6 +8522,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				std::printf(", %llu rejeu(x) ECHOUE(S) <-- defaut\n",
 							(unsigned long long)m.reenter_fail);
 		}
+		// Vie du raffinement (s22, chantier 3). `top_hits` a zero avec des
+		// workers raffines = la sous-echelle est posee mais jamais foulee.
+		if(greedy.refine_done + nrpa.refine_done)
+			std::printf("      raffinement : %llu worker(s) re-serialise(s), "
+						"%llu sous-barreau(x) au total, %llu etat(s) "
+						"archive(s) au-dela de la porte\n",
+						(unsigned long long)(greedy.refine_done +
+											 nrpa.refine_done),
+						(unsigned long long)(greedy.refine_subrungs +
+											 nrpa.refine_subrungs),
+						(unsigned long long)(greedy.refine_top_hits +
+											 nrpa.refine_top_hits));
 		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
 					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
 					best_monsters);
@@ -8523,6 +8670,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(nrpa.hindsight_goals + greedy.hindsight_goals) == 0
 							? "  <-- AUCUN : aucun monstre d'extra deck invoque"
 							: "");
+			// Ventilation s22 (chantier 5.4) : hindsight renforce-t-il les
+			// fusions qui ont DEPENSE un quota suivi ? Mesure, pas correctif.
+			const uint64_t hq_sp = nrpa.hindsight_quota_spent +
+								   greedy.hindsight_quota_spent;
+			const uint64_t hq_fr = nrpa.hindsight_quota_fresh +
+								   greedy.hindsight_quota_fresh;
+			if(hq_sp + hq_fr)
+				std::printf("      ventiles par quota suivi : %llu commis "
+							"quota DEPENSE (%.0f %%), %llu quotas frais\n",
+							(unsigned long long)hq_sp,
+							100.0 * double(hq_sp) / double(hq_sp + hq_fr),
+							(unsigned long long)hq_fr);
 		}
 		// SONDE DE REPETITION (session 16) : l'instrument qui separe « le 2e
 		// exemplaire n'est JAMAIS TENTE » (le materiau etait la — panne
@@ -8798,6 +8957,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// verrouille — et le quota 1/tour de Wolf, INVISIBLE au vecteur,
 			// se depense ~30-50 reponses avant la fin. Il faut reculer
 			// jusqu'AVANT la depense.
+			// BALISE (s22, chantier 5) : les reculs {15,30,45,60} et le TOP-12
+			// sont CALES SUR L'ETALON A et jamais balayes — comme les tranches
+			// de departs (2 x 15), le tournoi de 2 et le plafond de 12 hotes a
+			// quota. Aucun n'est faux ; aucun n'est derive. Ne les balayer QUE
+			// si un juge gratuit le demande.
 			for(size_t i = 0; i < ents.size() && i < 12; ++i)
 				for(uint32_t back : { 15u, 30u, 45u, 60u })
 					if(ents[i]->path.size() > back) {
@@ -9403,7 +9567,22 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											  (unsigned long long)pk);
 							}
 							SearchConfig fcfg = cfg;
-							fcfg.time_limit_ms = left;
+							// PLAFOND PAR RACINE, avec restitution (s22,
+							// chantier 5). La premiere racine de recul
+							// mangeait tout le budget (138-399 s mesures en
+							// s21) et les racines suivantes ne tournaient
+							// JAMAIS. Chaque racine recoit le restant divise
+							// par les racines restantes (plancher 2 s) ; une
+							// racine qui s'epuise tot RESTITUE son solde aux
+							// suivantes par la re-lecture de `left`. Sous
+							// plusieurs workers le denominateur est
+							// approximatif — la restitution reste exacte.
+							const size_t roots_left =
+								roots.size() > i ? roots.size() - i : 1;
+							fcfg.time_limit_ms = (std::min)(
+								left,
+								(std::max)(2000.0,
+										   left / double(roots_left)));
 							fcfg.max_decisions = FinisherDepth(
 								cfg.max_decisions, roots[i].pre.size());
 							fcfg.initial_summons = pc.summons;
@@ -10504,6 +10683,11 @@ int main(int argc, char** argv) {
 						size_t at = 0, steps = 0, down = 0, up = 0, bad = 0;
 						double prev = -1.0, first_h = -1.0, last_h = -1.0;
 						size_t infeasible = 0;
+						// LE DIAGNOSTIC (s22) : un « h = INFINI » au milieu d'une
+						// ligne qui aboutit est une SUR-CONTRAINTE du modele, et
+						// un compte seul ne dit pas laquelle. On garde les
+						// premieres occurrences avec leurs lignes de phase 1.
+						std::vector<std::pair<size_t, std::string>> inf_diag;
 						while(at < yrp->responses.size()) {
 							const size_t used = Advance(duel, *yrp, at, 1);
 							if(!used)
@@ -10527,8 +10711,25 @@ int main(int argc, char** argv) {
 								if(sv > max_served)
 									max_served = sv;
 							}
-							const double h = bm.Solve(res, ava, fld);
-							if(h < 0) { ++infeasible; continue; }
+							LPResult lrx;
+							const double h = bm.Solve(res, ava, fld, &lrx);
+							if(h < 0) {
+								++infeasible;
+								if(inf_diag.size() < 6) {
+									std::string rows;
+									for(const std::string& lb :
+										lrx.infeasible_rows) {
+										if(!rows.empty())
+											rows += " ; ";
+										rows += lb;
+									}
+									if(rows.empty())
+										rows = "(solveur en defaut, pas une "
+											   "preuve)";
+									inf_diag.emplace_back(steps, rows);
+								}
+								continue;
+							}
 							if(first_h < 0)
 								first_h = h;
 							if(prev >= 0) {
@@ -10583,11 +10784,15 @@ int main(int argc, char** argv) {
 											? "— le modele RECONNAIT le but"
 											: "<<< le but est atteint et h ne "
 											  "le voit pas : modele INCOMPLET");
-						if(infeasible)
+						if(infeasible) {
 							std::printf("  etats ou h = INFINI : %zu   <<< le "
 										"modele declare morte une ligne qui "
 										"ABOUTIT : sur-contrainte\n",
 										infeasible);
+							for(const auto& [st, rows] : inf_diag)
+								std::printf("      decision %zu : %s\n", st,
+											rows.c_str());
+						}
 						// --- le profil, et son verdict en forme close ---------
 						if(!needs.empty() && !unit_at.empty()) {
 							std::sort(rung_vals.begin(), rung_vals.end());

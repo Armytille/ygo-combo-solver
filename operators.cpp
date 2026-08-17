@@ -789,6 +789,37 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 				first = 3;
 			else if(pn == "Fusion.AddProcMix" || pn == "Fusion.AddProcMixRep")
 				first = 3;
+			// L'EXTRACTION CARDINALE (s22). Synchro/Xyz/Lien ne portent pas de
+			// paires : elles portent des COMPTES de materiaux a position fixe,
+			// lus dans la signature des proc_*.lua contemporains :
+			//   Synchro.AddProcedure(c, f1,min1,max1, f2,min2,max2, ...) -> min1+min2
+			//   Xyz.AddProcedure(c, f, lv, ct, alterf, desc, maxct, ...) -> ct
+			//   Link.AddProcedure(c, f, min, max, ...)                   -> min
+			// On n'extrait QUE le compte, jamais le niveau/type qu'on ne sait
+			// pas lire : « N monstres » est PLUS FAIBLE que la verite, donc h
+			// reste admissible (regle de sous-contrainte de 9.30). Quand la
+			// procedure declare une fourchette, on prend le MINIMUM — meme
+			// regle. Sans cette lecture, tout monstre d'extra non-Fusion est
+			// une place SANS PRODUCTEUR : l'armement de la serialisation tombe
+			// (Bagooska, s21 (i)) et les vehicules d'extra restent hors de A.
+			auto mat_count = [&](size_t idx, uint64_t& out) {
+				return idx < a.size() && kt.Eval(a[idx], out) &&
+					   out >= 1 && out <= 15;
+			};
+			if(pn == "Xyz.AddProcedure") {
+				uint64_t ct = 0;
+				if(mat_count(3, ct))
+					rc.unresolved_counts.push_back(static_cast<uint32_t>(ct));
+			} else if(pn == "Link.AddProcedure") {
+				uint64_t mn = 0;
+				if(mat_count(2, mn))
+					rc.unresolved_counts.push_back(static_cast<uint32_t>(mn));
+			} else if(pn == "Synchro.AddProcedure") {
+				uint64_t m1 = 0, m2 = 0;
+				if(mat_count(2, m1))
+					rc.unresolved_counts.push_back(static_cast<uint32_t>(
+						mat_count(5, m2) ? m1 + m2 : m1));
+			}
 			for(size_t i = first; i + 1 < a.size(); i += 2) {
 				const std::string& f = a[i];
 				uint64_t cnt = 1;
@@ -818,8 +849,13 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 				}
 			}
 		}
-		if(line.find("AddMustBeFusionSummoned") != std::string::npos &&
-		   !co.recipes.empty())
+		// TOUTE la famille « MustBe...Summoned » (s22) : Fusion, Synchro, Xyz,
+		// Lien, Rituel. Le script declare que la carte n'entre en jeu QUE par
+		// sa procedure — c'est ce qui interdit a une conversion « choisir »
+		// de la poser (le puits de l'etat de l'art : un Liger au cimetiere ne
+		// revient jamais).
+		if(line.find("AddMustBe") != std::string::npos &&
+		   line.find("Summoned") != std::string::npos && !co.recipes.empty())
 			co.recipes.back().must_be_fusion_summoned = true;
 
 		// --- listes declarees -------------------------------------------------
@@ -871,6 +907,30 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 					v.push_back(verb);
 				dp = e;
 			}
+			// TYPES et RACES nommes par la fonction (s22). La garde de DEBUT de
+			// jeton est obligatoire : « EFFECT_TYPE_FIELD » contient « TYPE_ »
+			// et « SUMMON_TYPE_SYNCHRO » aussi — sans elle, tout SetType
+			// polluerait le masque et le filtre deviendrait « n'importe quoi ».
+			auto scan_mask = [&](const char* prefix,
+								 std::unordered_map<std::string, uint64_t>& out) {
+				const size_t plen = std::strlen(prefix);
+				size_t tp2 = 0;
+				while((tp2 = line.find(prefix, tp2)) != std::string::npos) {
+					if(tp2 > 0 && IsIdentChar(line[tp2 - 1])) {
+						tp2 += plen;
+						continue;
+					}
+					size_t e2 = tp2;
+					while(e2 < line.size() && IsIdentChar(line[e2]))
+						++e2;
+					uint64_t v = 0;
+					if(kt.Lookup(line.substr(tp2, e2 - tp2), v))
+						out[cur_fn] |= v;
+					tp2 = e2;
+				}
+			};
+			scan_mask("TYPE_", co.fn_types);
+			scan_mask("RACE_", co.fn_races);
 			// --- CE QUE LA FONCTION DESIGNE : archetype et code ---------------
 			//
 			// Meme mecanisme que les zones ci-dessus, et il sert les DEUX
@@ -2024,8 +2084,26 @@ LPResult SolveOperatorLP(const OperatorLP& lp) {
 		for(size_t i = 0; i < t.m; ++i)
 			if(t.basis[i] >= N + R + B)
 				inf += t.At(i, t.n);
-		if(inf > 1e-6)
+		if(inf > 1e-6) {
+			// LE DIAGNOSTIC DE L'INFAISABILITE (s22). L'artificielle restee
+			// positive appartient a UNE ligne d'origine : c'est elle qui est
+			// insatisfaisable depuis cet etat. La nommer transforme
+			// « h = INFINI » en une liste de travail — et c'est la condition
+			// pour que l'elagage d'impasse (chantier 4) soit auditable.
+			// L'artificielle de la ligne i est la (Sigma needs_art[0..i])-ieme.
+			std::vector<size_t> art_row;
+			for(size_t i = 0; i < R; ++i)
+				if(needs_art[i])
+					art_row.push_back(i);
+			for(size_t i = 0; i < t.m; ++i)
+				if(t.basis[i] >= N + R + B && t.At(i, t.n) > 1e-6) {
+					const size_t k = t.basis[i] - (N + R + B);
+					if(k < art_row.size())
+						res.infeasible_rows.push_back(
+							lp.rows[art_row[k]].label);
+				}
 			return res;   // INFAISABLE : theoreme 3, impasse PROUVEE
+		}
 		// Chasser les artificielles residuelles de la base (pivot sur toute
 		// colonne non artificielle non nulle) ; sinon la phase 2 pourrait les
 		// reintroduire.
@@ -2065,6 +2143,19 @@ LPResult SolveOperatorLP(const OperatorLP& lp) {
 	// `+ 0.0` : ceil(0 - 1e-9) rend -0.0, qui s'imprime « -0 » ; l'addition le
 	// normalise en +0.0 (IEEE, arrondi au plus proche).
 	res.value = std::ceil(res.value - 1e-9) + 0.0;
+
+	// LES DUAUX, LUS DANS LE TABLEAU FINAL (s22). Dual d'une ligne = cout
+	// reduit de son surplus/ecart (le signe de la normalisation et celui de la
+	// negation des lignes a membre droit negatif se compensent : y_i =
+	// red[N+i] uniformement, >= 0 a l'optimum). Dual d'une borne = cout reduit
+	// de l'ecart de borne : la valeur d'UNE unite de capacite en plus.
+	// Derivation et verification numerique : tools/s22_verify_duals.py.
+	res.row_dual.assign(R, 0.0);
+	for(size_t i = 0; i < R; ++i)
+		res.row_dual[i] = red[N + i];
+	res.bound_dual.assign(N, 0.0);
+	for(size_t k = 0; k < B; ++k)
+		res.bound_dual[bound_of[k]] = red[N + R + k];
 
 	// --- LES GARDES, ET ELLES SONT LA RAISON D'ETRE DE CE BLOC ---------------
 	// Theoremes 1 a 4 ne valent que si CE solveur ne ment pas. On verifie donc
@@ -2107,9 +2198,12 @@ const char* ZoneName(int z) {
 }   // namespace
 
 std::vector<uint64_t> BalanceModel::SetcodesOf(uint32_t code) const {
-	auto it = sc_cache.find(code);
-	if(it != sc_cache.end())
-		return it->second;
+	{
+		std::lock_guard<std::mutex> lock(sc_mx);
+		auto it = sc_cache.find(code);
+		if(it != sc_cache.end())
+			return it->second;
+	}
 	std::vector<uint64_t> out;
 	if(const CardRow* r = db->Find(code))
 		for(uint16_t sc : r->setcodes)
@@ -2117,6 +2211,7 @@ std::vector<uint64_t> BalanceModel::SetcodesOf(uint32_t code) const {
 				out.push_back(sc & 0x0fffu);   // archetype, sous-type ignore
 	std::sort(out.begin(), out.end());
 	out.erase(std::unique(out.begin(), out.end()), out.end());
+	std::lock_guard<std::mutex> lock(sc_mx);
 	sc_cache.emplace(code, out);
 	return out;
 }
@@ -2166,6 +2261,16 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 			std::snprintf(b, sizeof b, "%s @%s",
 						  cdb.Name(static_cast<uint32_t>(key)).c_str(),
 						  ZoneName(z));
+		else if(kind == 3 && key >= (1ull << 40))
+			// La place d'IGNITION de Fusion (s22) : chaque invocation par
+			// recette Fusion.AddProcMix* en consomme une ; les operateurs a
+			// CATEGORY_FUSION_SUMMON la produisent, a leur capacite declaree.
+			std::snprintf(b, sizeof b, "ignitions de Fusion");
+		else if(kind == 3)
+			// Pool de CHOIX d'un produit d'invocation (s22) : l'effet y depose
+			// une unite, les conversions la specialisent vers UNE carte.
+			std::snprintf(b, sizeof b, "choix de l'effet #%llu",
+						  (unsigned long long)key);
 		else
 			std::snprintf(b, sizeof b, "arch 0x%llx @%s",
 						  (unsigned long long)key, ZoneName(z));
@@ -2202,10 +2307,12 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 			place(1, sc, kAva);
 		}
 	}
-	auto add_tr = [&](const char* what, double cap) {
-		lp.cost.push_back(1.0);
+	auto add_tr = [&](const char* what, double cap, double cost = 1.0,
+					  uint32_t host = 0) {
+		lp.cost.push_back(cost);
 		lp.upper.push_back(cap);
 		tname.push_back(what);
+		thost.push_back(host);
 		return lp.n_ops++;
 	};
 	auto eff = [&](size_t t, size_t p, double v) {
@@ -2284,6 +2391,7 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 			if(rit != co.fn_refs.end())
 				for(const std::string& r : rit->second)
 					scope.push_back(r);
+			uint64_t type_mask = 0, race_mask = 0;
 			for(const std::string& f : scope) {
 				auto sit = co.fn_setcodes.find(f);
 				if(sit != co.fn_setcodes.end())
@@ -2293,6 +2401,12 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 				if(cit2 != co.fn_codes.end())
 					for(uint32_t v : cit2->second)
 						named.push_back(cdb.Canonical(v));
+				auto tit = co.fn_types.find(f);
+				if(tit != co.fn_types.end())
+					type_mask |= tit->second;
+				auto rit2 = co.fn_races.find(f);
+				if(rit2 != co.fn_races.end())
+					race_mask |= rit2->second;
 			}
 			if(arch.empty() && named.empty()) {
 				for(uint64_t v : co.listed_series)
@@ -2300,10 +2414,15 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 				for(uint32_t v : co.listed_names)
 					named.push_back(cdb.Canonical(v));
 			}
-			if(arch.empty() && named.empty())
+			if(arch.empty() && named.empty() && !type_mask && !race_mask)
 				for(uint64_t v : SetcodesOf(host))
 					arch.push_back(v);
-			if(arch.empty() && named.empty())
+			// Un produit qui ne met RIEN en jeu et dont le filtre ne nomme ni
+			// code ni archetype reste hors modele (rien a placer). Un produit
+			// d'INVOCATION, lui, est garde des qu'un vocabulaire est lisible —
+			// et a defaut de tout vocabulaire, il reste « un monstre du deck »
+			// (sous-contrainte : on ELARGIT, on ne devine pas en restreignant).
+			if(!also_field && arch.empty() && named.empty())
 				continue;
 			// Capacite : celle de l'effet qui porte cette fonction, multipliee
 			// par les copies quand elle est « par COPIE ».
@@ -2327,41 +2446,147 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 					}
 				}
 			}
-			const size_t t = add_tr("effet", cap);
-			for(uint32_t nc : named) {
-				eff(t, place(0, nc, src), -1.0);
-				eff(t, place(0, nc, dst), +1.0);
-				if(also_field)
-					eff(t, place(0, nc, kFld), +1.0);
+			const size_t t = add_tr("effet", cap, 1.0, host);
+			if(!also_field) {
+				for(uint32_t nc : named) {
+					eff(t, place(0, nc, src), -1.0);
+					eff(t, place(0, nc, dst), +1.0);
+				}
+				if(named.empty())
+					for(uint64_t a : arch) {
+						eff(t, place(1, a, src), -1.0);
+						eff(t, place(1, a, dst), +1.0);
+					}
+				continue;
 			}
+			// LE CHOIX DU PRODUIT (s22). Un produit d'INVOCATION met UNE carte
+			// PRECISE en jeu ; le modeliser « en archetype » laissait la carte
+			// remise en jeu par un ranimeur SANS producteur — mesure : 22 etats
+			// h = INFINI au milieu de la ligne reelle de l'etalon B, nommes
+			// « Abyss @TERRAIN » par le diagnostic de phase 1 (le ranimeur
+			// filtre par RACE/TYPE, invisible aux codes et archetypes).
+			//
+			// Forme : l'effet depose UNE unite dans un pool (sa capacite est
+			// PRESERVEE : les conversions se partagent le pool), et une
+			// conversion a cout NUL (c'est un choix, pas une action de plus —
+			// l'admissibilite l'exige) la specialise vers chaque candidat.
+			// Candidats : les codes nommes PLUS les monstres du deck portant
+			// l'archetype ou le TYPE/RACE que le filtre nomme — une UNION,
+			// jamais une restriction : un code de portee peut etre cite en
+			// NEGATION (`not IsCode(...)`, Crimson Dragon), et restreindre sur
+			// lui fabriquerait la sur-contrainte qu'on corrige. A defaut de
+			// tout vocabulaire : tout monstre du deck (regle 9.30).
 			if(named.empty())
 				for(uint64_t a : arch) {
 					eff(t, place(1, a, src), -1.0);
 					eff(t, place(1, a, dst), +1.0);
 				}
+			std::vector<uint32_t> cand = named;
+			for(const auto& cx : copies) {
+				const CardRow* row = cdb.Find(cx.first);
+				if(!row || !(row->type & 0x1u))
+					continue;   // un produit d'invocation est un MONSTRE
+				bool okc = false;
+				for(uint64_t a : arch) {
+					for(uint64_t sc : SetcodesOf(cx.first))
+						okc = okc || sc == (a & 0x0fffull);
+				}
+				if(!okc && (type_mask || race_mask))
+					okc = (type_mask && (row->type & type_mask) != 0) ||
+						  (race_mask && (row->race & race_mask) != 0);
+				if(!okc && arch.empty() && named.empty() &&
+				   !type_mask && !race_mask)
+					okc = true;   // filtre illisible : tout monstre du deck
+				// JAMAIS un « MustBe...Summoned » par conversion (s22). Le
+				// script de la carte declare qu'elle n'entre en jeu QUE par sa
+				// procedure d'invocation : un ranimeur ne peut pas la choisir.
+				// Sans cette exclusion — declaree, pas choisie — les ranimeurs
+				// d'archetype posaient Liger a cout 1 et h(depart) de l'etalon
+				// A tombait de 14 a 3 : le modele entier devenait mou.
+				if(okc)
+					if(const CardOperators* co2 = tbl.Find(cx.first))
+						for(const DeclaredRecipe& r2 : co2->recipes)
+							if(r2.must_be_fusion_summoned)
+								okc = false;
+				if(okc)
+					cand.push_back(cx.first);
+			}
+			std::sort(cand.begin(), cand.end());
+			cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+			if(cand.empty())
+				continue;
+			const size_t pool = place(3, t, 0);
+			eff(t, pool, +1.0);
+			for(uint32_t c2 : cand) {
+				const size_t tc =
+					add_tr("choisir", OperatorLP::kNoBound, 0.0, host);
+				eff(tc, pool, -1.0);
+				eff(tc, place(0, c2, src), -1.0);
+				eff(tc, place(0, c2, dst), +1.0);
+				eff(tc, place(0, c2, kFld), +1.0);
+			}
 		}
 	}
+	// LE COUPLAGE D'IGNITION (s22, chantier 2). Le LP « fusionnait
+	// directement » : la recette invoquait sans igniteur, donc le quota de
+	// Wolf (SetCountLimit(1), PZONE) etait INVISIBLE au plan relaxe — et les
+	// duaux ne pouvaient pas le designer. Chaque invocation par recette
+	// `Fusion.AddProcMix*` consomme desormais UNE ignition ; les operateurs
+	// declares a CATEGORY_FUSION_SUMMON en produisent, a cout NUL (l'ignition
+	// et l'invocation sont UNE action — l'admissibilite l'exige) et a leur
+	// capacite DECLAREE. Garde d'asymetrie (etat de l'art, regle 1) : si
+	// AUCUN igniteur n'est lisible alors que des recettes Fusion existent, on
+	// ne couple PAS — une colonne de production incomplete ferait d'une
+	// lacune d'extraction une fausse preuve d'impasse.
+	uint64_t c_fusion_summon = 0;
+	kt.Lookup("CATEGORY_FUSION_SUMMON", c_fusion_summon);
+	struct Igniter { uint32_t host; const DeclaredEffect* e; };
+	std::vector<Igniter> igniters;
+	if(c_fusion_summon)
+		for(const auto& kv : tbl.All()) {
+			const uint32_t host = AliasOf(cdb, kv.first);
+			if(!copies.count(host))
+				continue;   // un igniteur hors deck n'existe pas
+			for(const DeclaredEffect& e : kv.second.operators)
+				if(e.at_init && (e.category & c_fusion_summon))
+					igniters.push_back({ host, &e });
+		}
+	n_igniter = igniters.size();
+	const size_t p_ign = igniters.empty() ? size_t(-1)
+										  : place(3, 1ull << 40, 0);
 	// (2) INVOQUER : la recette DECLAREE, avec sa MULTIPLICITE.
 	for(const auto& kv : tbl.All()) {
 		const uint32_t c = kv.first;
 		const CardOperators& co = kv.second;
 		if(co.recipes.empty())
 			continue;
-		const DeclaredRecipe& r = co.recipes.front();
+		// LA PREMIERE RECETTE NON VIDE, pas front() : une carte Pendule appelle
+		// `Pendulum.AddProcedure` avant sa procedure d'invocation, et cette
+		// recette-la est vide — elle masquerait la vraie (s22).
 		// `unresolved_counts` COMPTE : « 2 monstres de Niveau 4 » est une
 		// recette complete. L'omettre du garde privait Bagooska — et tout Xyz —
 		// de producteur, donc rendait le programme entier infaisable.
-		if(r.named.empty() && r.setcode.empty() && r.unresolved_counts.empty())
+		const DeclaredRecipe* rp = nullptr;
+		for(const DeclaredRecipe& cand : co.recipes)
+			if(!cand.named.empty() || !cand.setcode.empty() ||
+			   !cand.unresolved_counts.empty()) {
+				rp = &cand;
+				break;
+			}
+		if(!rp)
 			continue;
+		const DeclaredRecipe& r = *rp;
 		// LE PRODUIT SE CANONISE, comme le but. `--target 90590304` nomme la
 		// forme couchee de Bagooska ; la table indexe `90590303`. Sans cette
 		// reduction les deux places sont distinctes, la recette ne produit rien
 		// pour le but, et le programme entier devient infaisable — mesure faite.
 		const uint32_t cc = AliasOf(cdb, c);
-		const size_t t = add_tr("invoquer", OperatorLP::kNoBound);
+		const size_t t = add_tr("invoquer", OperatorLP::kNoBound, 1.0, cc);
 		eff(t, place(0, cc, kRes), -1.0);
 		eff(t, place(0, cc, kFld), +1.0);
 		eff(t, place(0, cc, kAva), +1.0);
+		if(p_ign != size_t(-1) && r.proc.rfind("Fusion.AddProcMix", 0) == 0)
+			eff(t, p_ign, -1.0);
 		for(const auto& m : r.named)
 			eff(t, place(0, cdb.Canonical(m.first), kAva),
 				-static_cast<double>(m.second));
@@ -2401,15 +2626,58 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 						std::find(hsc.begin(), hsc.end(), sc) != hsc.end();
 			if(!share)
 				continue;
-			const size_t t = add_tr("renommer", cap);
+			const size_t t = add_tr("renommer", cap, 1.0, host);
 			eff(t, place(0, x, kRes), -1.0);
 			eff(t, place(0, x, kAva), +2.0);
 			++n_rename;
 		}
 	}
+	// (4) LES IGNITEURS DE FUSION (s22) — construits en DERNIER : la capacite
+	// d'un igniteur sans SetCountLimit se derive de ses copies, mais SEULEMENT
+	// si aucune transition deja construite ne peut le reproduire (un sort
+	// recyclable n'a pas de borne prouvable — regle de sous-contrainte).
+	if(p_ign != size_t(-1)) {
+		for(const Igniter& ig : igniters) {
+			double cap;
+			if(ig.e->has_count_limit) {
+				cap = ig.e->count_by_name
+						  ? double(ig.e->count_limit)
+						  : double(ig.e->count_limit) *
+								double(copies.at(ig.host));
+			} else {
+				cap = double(copies.at(ig.host));
+				std::vector<size_t> host_places;
+				for(int z : { kRes, kAva }) {
+					size_t p = PlaceId(0, ig.host, z);
+					if(p != size_t(-1))
+						host_places.push_back(p);
+					for(uint64_t sc : SetcodesOf(ig.host)) {
+						p = PlaceId(1, sc, z);
+						if(p != size_t(-1))
+							host_places.push_back(p);
+					}
+				}
+				for(size_t t2 = 0; t2 < col.size() && cap < OperatorLP::kNoBound;
+					++t2)
+					for(size_t hp : host_places) {
+						auto itp = col[t2].find(hp);
+						if(itp != col[t2].end() && itp->second > 0)
+							cap = OperatorLP::kNoBound;   // reproduisible
+					}
+			}
+			const size_t t = add_tr("igniter", cap, 0.0, ig.host);
+			eff(t, p_ign, +1.0);
+		}
+	}
 	{
 		const size_t gen = place(2, 0, kAva);
 		for(size_t t = 0; t < col.size(); ++t) {
+			// Les conversions « choisir » ne nourrissent PAS la place
+			// generique (le corps qu'elles specialisent est deja compte par
+			// l'effet qui a rempli le pool), et une IGNITION n'est pas un
+			// corps (s22).
+			if(tname[t] == "choisir" || tname[t] == "igniter")
+				continue;
 			double pos = 0.0;
 			for(const auto& kv : col[t])
 				if(kv.first != gen && kv.second > 0)
@@ -2527,6 +2795,8 @@ std::vector<BalanceModel::Need> BalanceModel::NeedsFrom(
 		Need n;
 		const uint64_t key = kv.first;
 		const int kind = static_cast<int>(key >> 62);
+		if(kind == 3)
+			continue;   // les pools de choix (s22) ne sont pas des sous-buts
 		n.zone = static_cast<uint8_t>(key & 3u);
 		const uint64_t k = (key >> 2) & ((1ull << 60) - 1);
 		if(kind == 0)
@@ -2541,6 +2811,14 @@ std::vector<BalanceModel::Need> BalanceModel::NeedsFrom(
 
 std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 	const LPResult& r) const {
+	// BALISE (s22, chantier 5.1) : « ce que x* consomme atterrit au
+	// CIMETIERE » est une hypothese de JEU (YGO-generale : materiaux et couts
+	// y finissent par defaut), PAS une regle universelle — un cout BANNI ou
+	// MELANGE AU DECK y echappe. La destination serait derivable de la
+	// categorie du cout quand elle est declaree ; tant que ce n'est pas fait,
+	// l'hypothese reste ECRITE ici et le troisieme deck est son juge. Les
+	// barreaux @BANNIE ont ete retires pour POISON mesure (Silver, s21) — ne
+	// pas les remettre sans le passage oblige du plan.
 	std::vector<Need> out;
 	if(!r.feasible)
 		return out;
@@ -2563,8 +2841,8 @@ std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 		auto it = eaten.find(kv.second);
 		if(it == eaten.end())
 			continue;
-		if(static_cast<int>(kv.first >> 62) == 2)
-			continue;
+		if(static_cast<int>(kv.first >> 62) >= 2)
+			continue;   // place generique, et pools de choix (s22)
 		merged[kv.first & ~3ull] += it->second;
 	}
 	for(const auto& kv : merged) {
@@ -2609,6 +2887,59 @@ std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 	return out;
 }
 
+std::vector<uint32_t> BalanceModel::QuotaHostsFrom(
+	const LPResult& r, std::vector<uint32_t>* presence) const {
+	std::vector<uint32_t> out;
+	if(!r.feasible)
+		return out;
+	// Les places que le plan relaxe CONSOMME (coef < 0 d'une transition
+	// tiree) : tout producteur BORNE de l'une d'elles est un quota pertinent,
+	// meme si le simplexe a route par un jumeau a cout nul.
+	std::vector<char> consumed(pname.size(), 0);
+	for(size_t t = 0; t < lp.n_ops && t < r.x.size(); ++t) {
+		if(r.x[t] <= 1e-6)
+			continue;
+		for(const auto& kv : col[t])
+			if(kv.second < 0)
+				consumed[kv.first] = 1;
+		// Jamais une carte DU BUT (s21) : son quota est le produit du plan,
+		// pas une ressource — et sa presence est deja un sous-but @TERRAIN.
+		if(presence && t < thost.size() && thost[t] &&
+		   std::find(goal_codes.begin(), goal_codes.end(), thost[t]) ==
+			   goal_codes.end())
+			presence->push_back(thost[t]);
+	}
+	for(size_t t = 0; t < lp.n_ops; ++t) {
+		const uint32_t host = t < thost.size() ? thost[t] : 0;
+		if(!host)
+			continue;
+		if(std::find(goal_codes.begin(), goal_codes.end(), host) !=
+		   goal_codes.end())
+			continue;
+		if(lp.upper[t] >= OperatorLP::kNoBound * 0.5)
+			continue;   // sans borne declaree : pas un quota
+		const bool pulled = t < r.x.size() && r.x[t] > 1e-6;
+		const bool saturated =
+			t < r.x.size() && r.x[t] >= lp.upper[t] - 1e-6;
+		const bool priced =
+			t < r.bound_dual.size() && r.bound_dual[t] > 1e-6;
+		bool feeds = false;
+		if(!pulled && !saturated && !priced)
+			for(const auto& kv : col[t])
+				feeds = feeds || (kv.second > 0 && consumed[kv.first]);
+		if(pulled || saturated || priced || feeds)
+			out.push_back(host);
+	}
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	if(presence) {
+		std::sort(presence->begin(), presence->end());
+		presence->erase(std::unique(presence->begin(), presence->end()),
+						presence->end());
+	}
+	return out;
+}
+
 double BuildAndSolveBalance(
 	const OperatorTable& tbl, const CardDB& db, const ConstantTable& kt,
 	const std::vector<uint32_t>& deck,
@@ -2649,6 +2980,25 @@ double BuildAndSolveBalance(
 		std::printf("   x%-5.1f %-11s %s\n", nz[i].first,
 					m.TrNames()[nz[i].second].c_str(),
 					m.Produces(nz[i].second).c_str());
+	// LA SONDE DE GENERALITE (s22) : les quotas et habilitants DERIVES, sur
+	// n'importe quel deck, par le meme calcul que le run — c'est le juge du
+	// chantier 2 (« la meme commande rend h fini, sous-buts, quotas »).
+	{
+		std::vector<uint32_t> presence;
+		const std::vector<uint32_t> qh = m.QuotaHostsFrom(r, &presence);
+		std::string s1, s2;
+		for(uint32_t c : qh)
+			s1 += db.Name(c) + " ; ";
+		for(uint32_t c : presence)
+			s2 += db.Name(c) + " ; ";
+		std::printf("  QUOTAS derives (duaux) : %s\n",
+					s1.empty() ? "(aucun)" : s1.c_str());
+		std::printf("  HABILITANTS tires par x* : %s\n",
+					s2.empty() ? "(aucun)" : s2.c_str());
+		if(m.FusionIgniters())
+			std::printf("  igniteurs de Fusion lus : %zu (couplage d'ignition "
+						"ARME)\n", m.FusionIgniters());
+	}
 	return h;
 }
 
@@ -2733,6 +3083,39 @@ size_t SelfTestOperatorLP(size_t* total) {
 		if(ok && c.feas)
 			ok = std::fabs(r.value - c.val) < 1e-6 && r.primal_ok &&
 				 r.optimal_ok;
+		// LE CERTIFICAT DE DUALITE (s22). Les duaux exposes ne sont crus que
+		// s'ils CERTIFIENT l'optimum sur chaque cas : faisabilite duale
+		// (A'y - w <= c, y >= 0, w >= 0) et dualite forte (b'y - u'w = c'x,
+		// contre l'optimum EXACT de sympy, avant arrondi). Un dual faux ici
+		// designerait de faux hotes a quota dans toute la derivation s22.
+		if(ok && c.feas) {
+			double primal = 0.0;
+			for(size_t j = 0; j < c.lp.n_ops; ++j)
+				primal += c.lp.cost[j] * r.x[j];
+			double dualv = 0.0;
+			for(size_t i = 0; i < c.lp.rows.size(); ++i) {
+				if(r.row_dual[i] < -1e-7)
+					ok = false;   // y >= 0 viole
+				dualv += r.row_dual[i] * c.lp.rows[i].rhs;
+			}
+			for(size_t j = 0; j < c.lp.n_ops; ++j) {
+				if(r.bound_dual[j] < -1e-7)
+					ok = false;   // w >= 0 viole
+				if(c.lp.upper[j] < OperatorLP::kNoBound * 0.5)
+					dualv -= r.bound_dual[j] * c.lp.upper[j];
+				else if(r.bound_dual[j] > 1e-7)
+					ok = false;   // dual de borne sans borne finie
+				double red_j = c.lp.cost[j] + r.bound_dual[j];
+				for(size_t i = 0; i < c.lp.rows.size(); ++i)
+					for(const auto& [jj, v] : c.lp.rows[i].coef)
+						if(jj == j)
+							red_j -= r.row_dual[i] * v;
+				if(red_j < -1e-6)
+					ok = false;   // faisabilite duale violee
+			}
+			if(std::fabs(dualv - primal) > 1e-6)
+				ok = false;       // dualite forte violee
+		}
 		if(ok)
 			++pass;
 		else
@@ -2791,10 +3174,18 @@ void OperatorTable::PrintFiringCounts(
 		if(it == cards.end() || it->second.recipes.empty())
 			continue;   // carte de base : rien a fabriquer
 		// UNE SEULE VOIE DEVELOPPEE, et c'est dit dans l'en-tete : on prend la
-		// recette declaree, on ne choisit pas a la place du jeu.
-		const DeclaredRecipe& r = it->second.recipes.front();
-		if(r.named.empty() && r.setcode.empty() && r.unresolved_counts.empty())
+		// PREMIERE recette declaree NON VIDE (une carte Pendule pose d'abord
+		// une recette Pendulum vide, s22), on ne choisit pas a la place du jeu.
+		const DeclaredRecipe* rp = nullptr;
+		for(const DeclaredRecipe& cand : it->second.recipes)
+			if(!cand.named.empty() || !cand.setcode.empty() ||
+			   !cand.unresolved_counts.empty()) {
+				rp = &cand;
+				break;
+			}
+		if(!rp)
 			continue;
+		const DeclaredRecipe& r = *rp;
 		fire[code] += n;
 		for(const auto& [m, k] : r.named)
 			work.emplace_back(db.Canonical(m), n * k);

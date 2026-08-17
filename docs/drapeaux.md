@@ -1,4 +1,13 @@
-# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19)
+# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22)
+
+> **ÉTAT AU TERME DE LA SESSION 22 : +2.**
+>
+> | drapeau | famille | statut |
+> |---|---|---|
+> | `--quota-legacy` | **TÉMOIN d'A/B** | rejoue la dérivation s21 des quotas/habilitants (classes d'effets) à la place des DUAUX du LP (défaut s22). À retirer dès que l'A/B en proportion a tranché. |
+> | `--refine-after <n>` | mécanisme | l'échelle auto-raffinante (chantier 3 s22) : re-sérialisation depuis la meilleure cellule-frontière quand sp_max stagne depuis n tirages. **Écrit, vie complète, NON JUGÉ** — 0 = éteint (défaut). |
+>
+> `--reenter` (s21) reste le témoin de son propre A/B (défaut 0,5).
 
 > **ÉTAT AU TERME DE LA SESSION 19 : 114 → 117.** Trois ajouts, et leur statut
 > est écrit d'avance :
