@@ -11,11 +11,8 @@
 
 namespace solver {
 
-// Declaree ici, definie plus bas : deux points de partition l'appellent avant
-// le corps. Voir 9.31 — la serialisation par les sous-buts du bilan matiere.
-uint32_t SerialProgress(Duel& duel, uint8_t con,
-						const std::vector<SearchConfig::SerialReq>& reqs,
-						const CardDB& db, uint64_t* packed = nullptr);
+// (SerialProgress est desormais declare dans search.h — il sert aussi la
+// sonde des racines du finisseur. Definition plus bas dans ce fichier.)
 
 namespace {
 
@@ -408,7 +405,11 @@ Search::Step Search::StepToPrompt() {
 					// Fusion depuis la zone Pendule, un substitut de Fusion ou
 					// une carte qui copie un nom s'enregistrent exactement de la
 					// meme facon, en tant que fournisseurs de plus.
-					if(cfg.recipes && code) {
+					// `!replaying` (s21) : le rejeu de prefixe du retour au
+					// barreau repasse les MEMES invocations a chaque re-entree —
+					// les re-observer gonflerait le support de ces recettes a
+					// proportion du taux de re-entree, un biais fabrique.
+					if(cfg.recipes && code && !replaying) {
 						cfg.recipes->Observe(duel.Db().Canonical(code),
 											 recipe_materials);
 						++stats.recipes_seen;
@@ -444,6 +445,18 @@ Search::Step Search::StepToPrompt() {
 					for(size_t i = 0; i < cfg.probe_watch.size() && i < 4; ++i)
 						if(cfg.probe_watch[i] == wcode)
 							watch_act_this_step += 1ull << (16 * i);
+				}
+				// USAGES DES HOTES A QUOTA (s21) : une activation de l'hote =
+				// un usage de plus sur ce chemin. Entre dans la cle de cellule
+				// (QuotaKey) — l'etat pertinent est (board, quotas).
+				if(!cfg.quota_hosts.empty() && m.size >= 4) {
+					uint32_t qc = 0;
+					std::memcpy(&qc, m.data, 4);
+					qc = duel.Db().Canonical(qc);
+					for(size_t i = 0;
+						i < cfg.quota_hosts.size() && i < 12; ++i)
+						if(cfg.quota_hosts[i] == qc)
+							++quota_uses[i];
 				}
 				// Resolutions surveillees (--resolve). Compte a l'activation :
 				// en solitaire rien ne nie une chaine. Filtre par zone
@@ -1668,7 +1681,8 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	uint64_t sp_vec = 0;
 	const uint32_t sp = SerialProgress(duel,
 									   static_cast<uint8_t>(cfg.target_player),
-									   cfg.serial_reqs, duel.Db(), &sp_vec);
+									   cfg.serial_reqs, duel.Db(), serial_res0,
+									   &sp_vec);
 	// Score : sous --resolve, les RESOLUTIONS d'abord — le verrou mesure est
 	// la jonction rips+board, et les racines qui la franchissent sont les
 	// etats deja rippes, pas les 8/8 muets. A egalite, le chemin le plus
@@ -1703,9 +1717,11 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	// mecanisme ne peut donc pas degrader le bras temoin.
 	auto pack_sp = [&](uint32_t b) -> uint64_t {
 		const uint64_t base = pack(b);
+		// 7 bits (s21) : le total servi depasse 63 avec les tranches de
+		// departs de reserve ; 127 << 56 tient dans les 63 bits bas.
 		return cfg.serial_reqs.empty()
 				   ? base
-				   : (static_cast<uint64_t>((std::min)(sp, 63u)) << 56) |
+				   : (static_cast<uint64_t>((std::min)(sp, 127u)) << 56) |
 						 (base >> 8);
 	};
 	uint64_t score = pack_sp(0);
@@ -1718,10 +1734,15 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 			return;
 	}
 	// La cle : le palier de progres quand la serialisation est active, sinon le
-	// hachage de board (comportement d'avant, a l'octet pres).
-	const uint64_t cell = cfg.serial_reqs.empty()
-							  ? here.hash
-							  : (0x5E21A1000000000ull ^ sp_vec);
+	// hachage de board (comportement d'avant, a l'octet pres). Les QUOTAS
+	// (s21, l'etude des briques) entrent dans la cle : deux etats au meme
+	// vecteur mais a quotas differents cessent de partager un representant —
+	// c'etait le membre invisible de la conjonction, et le representant
+	// « chemin court » etait systematiquement l'etat qui n'avait pas paye.
+	const uint64_t cell =
+		cfg.serial_reqs.empty()
+			? here.hash
+			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52));
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
@@ -1779,10 +1800,14 @@ bool Search::NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
 	// SERIALISATION PAR x* : le progres sur les sous-buts du bilan matiere se
 	// substitue au comptage des seules cartes cibles. Il bouge des la premiere
 	// brique posee, la ou l'autre reste plat jusqu'a la fin.
+	// 7 bits (s21) : avec les tranches de departs de reserve, le total servi
+	// peut depasser 63 — un masque a 6 bits ferait ALIASER les hauts paliers
+	// sur les bas.
 	if(!cfg.serial_reqs.empty())
-		partition = partition * 64u +
+		partition = partition * 128u +
 					(SerialProgress(duel, static_cast<uint8_t>(cfg.target_player),
-									cfg.serial_reqs, duel.Db()) & 63u);
+									cfg.serial_reqs, duel.Db(), serial_res0) &
+					 127u);
 	CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here, partition,
 				 atoms_scratch);
 	if(novelty.Observe(atoms_scratch, depth, cfg.novelty_strict)) {
@@ -2442,6 +2467,7 @@ bool Search::Rollout(uint64_t& rng) {
 
 void Search::RunRollouts(const BoardKey& t, const std::vector<PlanStep>& p,
 						 uint32_t count, uint64_t seed) {
+	InitSerialBase();
 	// Le self de cette sonde est la ligne « reste » du profil : tout ce que les
 	// sondes internes ne couvrent pas (softmax, politique, tables, PQ...).
 	prof::Scope ps(prof::kSearch);
@@ -2483,7 +2509,17 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		return rng;
 	};
 	++stats.rollout_count;
-	path.clear();
+	// RETOUR AU BARREAU (s21) : un tirage re-entre commence PREFIXE COMPRIS —
+	// les solutions et `best_path` doivent rester rejouables depuis la racine.
+	// Les usages de quota d'un tirage re-entre ont deja ete comptes pendant le
+	// rejeu du prefixe (ReenterMaybe les remet a zero avant) : ne pas les
+	// ecraser ici.
+	if(reenter_active) {
+		path = reenter_path;
+	} else {
+		path.clear();
+		std::memset(quota_uses, 0, sizeof quota_uses);
+	}
 	run.score = 0;
 	run.steps.clear();
 	run.flat.clear();
@@ -2498,10 +2534,17 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const bool mine_flat = cfg.options_online != nullptr;
 	// Compteurs initiaux : le finisseur echantillonne depuis un etat de recul
 	// deja profond — contraintes d'invocation, coupure de tour et gradient de
-	// resolutions doivent compter depuis le prefixe, pas depuis zero.
-	uint32_t actions = 0, turns = cfg.initial_turns,
-			 summons = cfg.initial_summons;
-	uint64_t resolved = cfg.initial_resolved;
+	// resolutions doivent compter depuis le prefixe, pas depuis zero. Le
+	// RETOUR AU BARREAU (s21) fait de meme par tirage : ses compteurs viennent
+	// du rejeu de la cellule (meme StepToPrompt, meme comptabilite), `actions`
+	// compris — sans lui le cout lexicographique (brulees, actions, decisions)
+	// comparerait des lignes re-entrees amputees de leur prefixe a des lignes
+	// completes.
+	uint32_t actions = reenter_active ? reenter_actions : 0,
+			 turns = reenter_active ? reenter_turns : cfg.initial_turns,
+			 summons = reenter_active ? reenter_summons : cfg.initial_summons;
+	uint64_t resolved =
+		reenter_active ? reenter_resolved : cfg.initial_resolved;
 	uint32_t rp_prev = ResolveProgress(resolved);
 	// SONDE DE REPETITION (session 16) : compte BRUT des invocations de chaque
 	// carte surveillee dans CE tirage. Distinct de `ResolveProgress`, qui
@@ -2599,7 +2642,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		~SpGuard() {
 			if(!armed)
 				return;
-			++self->stats.sp_final[(std::min)(*mx, 39u)];
+			++self->stats.sp_final[(std::min)(*mx, 71u)];
 			self->stats.sp_at_sum += *at;
 			++self->stats.sp_lines;
 		}
@@ -2653,7 +2696,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// chaine forcee RESOUT des effets et peut poser une carte ; sauter cela
 	// fausserait les contraintes et le but. Seul le travail d'EVALUATION est
 	// saute.
-	uint32_t depth = 0;
+	// Un tirage re-entre (s21) part a la profondeur de sa cellule : le budget
+	// `--max-decisions` garde le sens « longueur totale de la ligne », et les
+	// solutions portent le compte complet (prefixe + suffixe).
+	uint32_t depth = reenter_active ? reenter_depth : 0;
 	const uint32_t prompt_cap =
 		cfg.elide_forced ? cfg.max_decisions * 8u + 64u : cfg.max_decisions;
 	for(uint32_t pi = 0; pi < prompt_cap && depth < cfg.max_decisions; ++pi) {
@@ -2747,6 +2793,11 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			if(ro_choices.size() == 1) {
 				++stats.elided;
 				duel.SetResponse(ro_choices[0].response);
+				// `path` DOIT porter la reponse elidee (defaut latent trouve en
+				// s21) : `path` alimente les solutions, `best_path` et l'archive
+				// — un chemin sans les reponses forcees ne se rejoue pas depuis
+				// la racine. La branche DFS (Descend) le faisait deja.
+				path.push_back(ro_choices[0].response);
 				// NI `depth`, NI PolicyStep, NI score : rien ne s'est decide.
 				// Un prompt a choix unique ne produisait deja aucun PolicyStep —
 				// la politique n'y perd donc strictement rien.
@@ -2920,8 +2971,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				if(!cfg.serial_reqs.empty()) {
 					const uint32_t spv = SerialProgress(
 						duel, static_cast<uint8_t>(cfg.target_player),
-						cfg.serial_reqs, duel.Db());
-					partition = partition * 64u + (spv & 63u);
+						cfg.serial_reqs, duel.Db(), serial_res0);
+					// 7 bits, comme NoveltyCut (s21) : le total servi depasse
+					// 63 avec les tranches de departs.
+					partition = partition * 128u + (spv & 127u);
 					if(spv > sp_max) {
 						sp_max = spv;
 						sp_max_at = nsteps;
@@ -3637,12 +3690,121 @@ void Search::Adapt(Policy& pol, const NrpaRun& best) {
 		stats.peak_truncations += best.steps.size() - best.peak_steps;
 }
 
+// LE RETOUR AU BARREAU (s21) — la moitie de SIW_R qui manquait aux TIRAGES.
+//
+// L'echelle existait (cellule d'archive = palier de SerialProgress) et seul le
+// FINISSEUR y prenait ses racines : chaque tirage NRPA repartait de la racine
+// et devait re-escalader toute la ligne — l'histogramme sp_final le montre
+// (masse sur les premieres unites, queue exponentielle). La forme close de
+// 9.33 (e) est categorique : le cout serialise `Sigma b^(l_i)` n'existe que si
+// chaque bloc est fouille DEPUIS le barreau precedent ; sans retour, on reste
+// a `b^L`.
+//
+// Ce que fait ce mecanisme, et rien d'autre : avec probabilite cfg.reenter,
+// rejouer depuis la racine le chemin d'une cellule tiree UNIFORMEMENT (Go-
+// Explore : les barreaux hauts peuvent etre des impasses — on ne concentre pas
+// le budget dessus, on repartit la frontiere), armer les compteurs du prefixe
+// (tours, invocations, resolutions, actions, decisions — la MEME comptabilite
+// que le tirage, par le MEME StepToPrompt), et laisser PolicyRollout continuer
+// depuis la. `path` est seme avec le prefixe : les solutions restent
+// rejouables depuis la racine et `best_path` reste une racine valide de
+// finisseur.
+//
+// GARDE DE PERIMETRE : rien ne se passe sans serialisation armee (sans
+// echelle, une cellule est un cache, pas un barreau) — la sante et tout mode
+// sans --target sont inchanges a l'octet pres.
+// La base des barreaux de departs (zone 5) : la taille de la RESERVE
+// (deck+extra) a la RACINE de cette recherche. Posee a l'entree de chaque
+// Run* — le premier SerialProgress arrive au milieu d'une ligne, une
+// initialisation paresseuse mesurerait des departs depuis un etat arbitraire.
+void Search::InitSerialBase() {
+	// Les usages de quota repartent de zero a chaque entree de recherche —
+	// dans les descentes DFS ils ne redescendent pas au retour arriere, donc
+	// les cellules DFS se sur-partitionnent (direction sure).
+	std::memset(quota_uses, 0, sizeof quota_uses);
+	if(cfg.serial_reqs.empty())
+		return;
+	const auto con = static_cast<uint8_t>(cfg.target_player);
+	serial_res0 = duel.Count(con, 0x01u) + duel.Count(con, 0x40u);
+}
+
+void Search::ReenterMaybe(uint64_t& rng) {
+	reenter_active = false;
+	if(cfg.reenter <= 0.0f || cfg.serial_reqs.empty() || archive.empty())
+		return;
+	auto next = [&rng] {
+		rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+		return rng;
+	};
+	if(static_cast<double>(next() & 0xffff) >=
+	   static_cast<double>(cfg.reenter) * 65536.0)
+		return;
+	// TOURNOI DE 2 (s21, apres la mesure a 359 cellules) : l'uniforme pur
+	// diluait le budget — les cellules-frontiere, celles dont le bloc suivant
+	// est le travail, ne recevaient que 1/N des retours. Deux tirages, on
+	// garde le meilleur score (le score classe deja le progres en tete) :
+	// la masse double sur la moitie haute de l'echelle, et aucun palier bas
+	// n'est abandonne (Go-Explore : les hauts peuvent etre des impasses).
+	const ArchiveEntry* pick = &archive[next() % archive.size()];
+	const ArchiveEntry* other = &archive[next() % archive.size()];
+	if(other->score > pick->score)
+		pick = other;
+	const ArchiveEntry& e = *pick;
+	if(e.path.empty())
+		return;
+	// COPIE : l'archive peut evincer cette entree pendant le tirage qui suit.
+	reenter_path = e.path;
+	uint32_t turns = 0, summons = 0, actions = 0;
+	uint64_t resolved = 0;
+	size_t used = 0;
+	bool dead = false;
+	// Les usages de quota du PREFIXE comptent : remis a zero ici, accumules
+	// par StepToPrompt pendant le rejeu, conserves par PolicyRollout.
+	std::memset(quota_uses, 0, sizeof quota_uses);
+	replaying = true;
+	while(used < reenter_path.size()) {
+		const Step st = StepToPrompt();
+		actions += actions_this_step;
+		turns += turns_this_step;
+		summons += static_cast<uint32_t>(summons_this_step.size());
+		resolved += resolved_this_step;
+		if(st != Step::Prompt) {
+			dead = true;
+			break;
+		}
+		duel.SetResponse(reenter_path[used++]);
+	}
+	replaying = false;
+	// Un chemin d'archive DOIT se rejouer depuis la racine (meme duel, meme
+	// graine, reponses completes). Un echec ici est un defaut a regarder, pas
+	// du bruit — il est compte, et le tirage repart de la racine.
+	if(dead) {
+		++stats.reenter_fail;
+		arena.Restore();
+		return;
+	}
+	reenter_turns = turns;
+	reenter_summons = summons;
+	reenter_actions = actions;
+	reenter_resolved = resolved;
+	reenter_depth = e.decisions;
+	reenter_active = true;
+	++stats.reenter_rollouts;
+	stats.reenter_base_sum += SerialProgress(
+		duel, static_cast<uint8_t>(cfg.target_player), cfg.serial_reqs,
+		duel.Db(), serial_res0);
+}
+
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {
 	if(level <= 0) {
 		best.score = -1;
 		best.steps.clear();
+		// Le retour au barreau precede le tirage ; l'arena.Restore() commun
+		// ramene a la racine dans tous les cas (le rejeu ne pousse rien).
+		ReenterMaybe(rng);
 		PolicyRollout(rng, pol, best);
 		arena.Restore();
+		reenter_active = false;
 		return best.score;
 	}
 	// UNE copie de la politique par appel de niveau. Elle etait copiee a
@@ -3892,6 +4054,7 @@ double Search::NrpaTop(Policy& pol, NrpaRun& best, uint64_t& rng) {
 void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 					 uint64_t seed) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	plan = &p;
 	plan_index.clear();
@@ -3994,6 +4157,7 @@ void Search::RunNrpa(const BoardKey& t, const std::vector<PlanStep>& p,
 void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 					  const NrpaPolicy& pol) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	plan = &p;
 	plan_index.clear();
@@ -4655,6 +4819,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 void Search::RunTransplant(const BoardKey& t, const std::vector<PlanStep>& p,
 						   uint32_t discrepancies) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	plan = &p;
 	start = std::chrono::steady_clock::now();
@@ -5481,7 +5646,7 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // temoins. C'est la garde qui manquait a trois mecanismes de ce dossier.
 uint32_t SerialProgress(Duel& duel, uint8_t con,
 						const std::vector<SearchConfig::SerialReq>& reqs,
-						const CardDB& db, uint64_t* packed) {
+						const CardDB& db, uint32_t res0, uint64_t* packed) {
 	if(reqs.empty())
 		return 0;
 	static thread_local std::vector<uint32_t> zone_scratch;
@@ -5490,39 +5655,67 @@ uint32_t SerialProgress(Duel& duel, uint8_t con,
 	// consommateur y depose un corps, et c'est ce qui monte pendant les deserts
 	// que le profil des ecarts a nommes. Les listes sont baties une fois par
 	// appel, puis comptees.
-	std::vector<uint32_t> ava, fld, grv;
+	std::vector<uint32_t> ava, fld, grv, rmv, fzn;
 	for(uint32_t loc : { 0x02u, 0x04u, 0x08u, 0x10u, 0x20u }) {
 		duel.QueryCodes(con, loc, zone_scratch);
 		for(uint32_t c : zone_scratch)
 			ava.push_back(db.Canonical(c));
+		// EN JEU (zone 6, s21) = MZONE + SZONE : les habilitants a compter en
+		// presence ne sont pas tous des monstres — Masquerade est une magie
+		// CONTINUE, sa concession vit en SZONE.
+		if(loc == 0x04u || loc == 0x08u)
+			for(uint32_t c : zone_scratch)
+				fzn.push_back(db.Canonical(c));
 		if(loc == 0x04u)
 			for(uint32_t c : zone_scratch)
 				fld.push_back(db.Canonical(c));
 		if(loc == 0x10u)
 			for(uint32_t c : zone_scratch)
 				grv.push_back(db.Canonical(c));
+		if(loc == 0x20u)
+			for(uint32_t c : zone_scratch)
+				rmv.push_back(db.Canonical(c));
 	}
 	uint32_t served = 0;
 	uint32_t slot = 0;
 	if(packed)
 		*packed = 0;
 	for(const SearchConfig::SerialReq& rq : reqs) {
-		const std::vector<uint32_t>& pool =
-			rq.zone == 2 ? fld : rq.zone == 3 ? grv : ava;
 		uint32_t have = 0;
-		for(uint32_t c : pool) {
-			if(rq.code) {
-				if(c == rq.code)
-					++have;
-			} else if(const CardRow* row = db.Find(c)) {
-				for(uint16_t sc : row->setcodes)
-					if(sc && (sc & 0x0fffu) == (rq.arch & 0x0fffu)) {
+		if(rq.zone == 5) {
+			// DEPARTS DE RESERVE (s21) : une unite par carte sortie de
+			// deck+extra depuis la racine (`res0`). C'est ce qui monte pendant
+			// les deserts que les invocations intermediaires creusent.
+			// `arch` sert de DECALAGE (tranche) : l'empaquetage plafonne
+			// chaque exigence a 15, et la ligne reelle fait ~25 departs — la
+			// premiere tranche saturait a la reponse 118, JUSTE avant les
+			// deserts qu'il fallait couvrir (mesure au banc).
+			const uint32_t cur =
+				duel.Count(con, 0x01u) + duel.Count(con, 0x40u);
+			const uint32_t dep = res0 > cur ? res0 - cur : 0;
+			const uint32_t off = static_cast<uint32_t>(rq.arch);
+			have = dep > off ? dep - off : 0;
+		} else {
+			const std::vector<uint32_t>& pool =
+				rq.zone == 2   ? fld
+				: rq.zone == 3 ? grv
+				: rq.zone == 4 ? rmv
+				: rq.zone == 6 ? fzn
+							   : ava;
+			for(uint32_t c : pool) {
+				if(rq.code) {
+					if(c == rq.code)
 						++have;
-						break;
-					}
+				} else if(const CardRow* row = db.Find(c)) {
+					for(uint16_t sc : row->setcodes)
+						if(sc && (sc & 0x0fffu) == (rq.arch & 0x0fffu)) {
+							++have;
+							break;
+						}
+				}
+				if(have >= rq.count)
+					break;
 			}
-			if(have >= rq.count)
-				break;
 		}
 		const uint32_t got = (std::min)(have, rq.count);
 		served += got;
@@ -5642,6 +5835,7 @@ void LiftRefLine(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 
 void Search::RunRepair(const BoardKey& t, uint32_t discrepancies) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();
@@ -5659,6 +5853,7 @@ void Search::RunRepair(const BoardKey& t, uint32_t discrepancies) {
 
 void Search::RunGuided(const BoardKey& t) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();
@@ -5674,6 +5869,7 @@ void Search::RunGuided(const BoardKey& t) {
 
 void Search::Run(const BoardKey& t) {
 	prof::Scope ps(prof::kSearch);
+	InitSerialBase();
 	target = t;
 	start = std::chrono::steady_clock::now();
 	solutions.clear();

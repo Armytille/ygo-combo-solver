@@ -2059,10 +2059,48 @@ struct SearchConfig {
 	struct SerialReq {
 		uint32_t code = 0;    // 0 = exigence d'archetype
 		uint64_t arch = 0;
-		uint8_t zone = 0;     // 1 = DISPO (terrain+main+cimetiere+bannie), 2 = TERRAIN
+		// 1 = DISPO (terrain+main+cimetiere+bannie), 2 = TERRAIN,
+		// 3 = CIMETIERE, 4 = BANNIE (barreaux de CONSOMMATION de x*, s21 —
+		// Wolf/Masquerade invoquent en BANNISSANT les materiaux : pendant
+		// l'assemblage c'est ce compte-la qui monte),
+		// 5 = DEPARTS DE RESERVE (s21, apres le nommage des deserts) : une
+		// unite par carte sortie de deck+extra depuis la racine de la
+		// recherche. Les invocations intermediaires — les VEHICULES d'extra
+		// deck que x* ne tire pas parce que le LP fusionne « directement » —
+		// consomment toutes la reserve ; c'est la ressource IRREVERSIBLE du
+		// tour, et la seule grandeur qui monte REGULIEREMENT pendant les
+		// deserts +46/+47. `code` et `arch` sont ignores pour cette zone.
+		uint8_t zone = 0;
 		uint32_t count = 1;
 	};
 	std::vector<SerialReq> serial_reqs;
+	// (SerialProgress est declare en fin de fichier : il sert aussi la sonde
+	// des racines du finisseur, main.cpp.)
+	// LE RETOUR AU BARREAU (s21) — la moitie de SIW_R qui manquait aux TIRAGES.
+	// L'archive-echelle existait et seul le FINISSEUR y prenait ses racines :
+	// la phase d'echantillonnage (99 % du budget) repartait de la racine a
+	// chaque tirage, et l'histogramme sp_final le montre (masse sur les
+	// premieres unites, queue exponentielle). La forme close de 9.33 (e) dit
+	// que l'arithmetique `Sigma b^(l_i)` n'existe que si chaque bloc est
+	// fouille DEPUIS le barreau precedent. `reenter` est la probabilite qu'un
+	// tirage NRPA reparte d'une cellule d'archive (uniforme parmi les paliers
+	// retenus — Go-Explore : les barreaux hauts peuvent etre des impasses, on
+	// ne concentre pas tout le budget dessus) au lieu de la racine.
+	// N'agit que sous serialisation armee (sans echelle, une cellule est un
+	// cache, pas un barreau) : la sante et tout mode sans --target sont
+	// inchanges a l'octet pres. 0 = temoin de l'A/B.
+	float reenter = 0.5f;
+	// LES HOTES A QUOTA (s21, l'etude des briques). L'etat pertinent n'est pas
+	// le board : c'est (board, ressources hors-board) — et le quota 1/tour des
+	// effets porteurs (la fusion de Wolf, le renommage de Chick) n'est visible
+	// ni du digest, ni des atomes, ni de la cellule. Consequence mesuree : le
+	// representant de cellule « chemin court » est systematiquement l'etat qui
+	// n'a PAS paye — la conjonction du but au vecteur, morte en jeu. Le compte
+	// d'activations de ces hotes LE LONG DU CHEMIN (MSG_CHAINING, aucun patch
+	// du core) entre dans la CLE de cellule : deux etats au meme vecteur mais
+	// a quotas differents cessent de partager un representant. Codes
+	// canoniques ; au plus 12 suivis, un bit chacun (depense / frais).
+	std::vector<uint32_t> quota_hosts;
 	// Nouveaute stricte : seul un fait jamais vu compte (cf. NoveltyTable).
 	bool novelty_strict = false;
 	// Couper aussi les tirages gloutons. MESURE et desactive par defaut : la
@@ -3021,9 +3059,20 @@ struct SearchStats {
 	// `sp_at_sum` : somme des indices de decision du dernier progres.
 	// `sp_lines` : tirages mesures — le compteur ne vit que si serialisation ET
 	// nouveaute sont actives, car c'est la que SerialProgress est calcule.
-	uint64_t sp_final[40] = {};
+	// 72 cases (s21) : avec les tranches de departs de reserve, le total servi
+	// atteint ~65 sur la ligne de reference.
+	uint64_t sp_final[72] = {};
 	uint64_t sp_at_sum = 0;
 	uint64_t sp_lines = 0;
+	// LA VIE DU RETOUR AU BARREAU (--reenter, piege 52). `reenter_rollouts` :
+	// tirages effectivement repartis d'une cellule ; `reenter_fail` : rejeux de
+	// prefixe morts en route (MSG_RETRY ou fin de duel — le chemin d'une
+	// cellule DOIT se rejouer depuis la racine, un echec ici est un defaut a
+	// regarder, pas du bruit) ; `reenter_base_sum` : somme des paliers de
+	// depart (sa moyenne dit DE QUEL barreau les tirages repartent).
+	uint64_t reenter_rollouts = 0;
+	uint64_t reenter_fail = 0;
+	uint64_t reenter_base_sum = 0;
 	// VIE DE --adapt-to-peak (audit 18, piege 52) : pas RETIRES du gradient
 	// parce qu'ils suivaient le pic du score. A zero, le mecanisme est INERTE et
 	// aucun juge de recherche ne le concerne — soit les lignes culminent a leur
@@ -3278,6 +3327,12 @@ private:
 	// Un tirage sous politique : pas d'evaluation des fils, le choix est tire
 	// au sort selon exp(poids + biais). Remplit `run` pour l'adaptation.
 	void PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run);
+	// RETOUR AU BARREAU (--reenter, s21) : avec probabilite cfg.reenter, rejoue
+	// le chemin d'une cellule d'archive tiree UNIFORMEMENT et arme les
+	// compteurs de prefixe pour le PolicyRollout qui suit. Sans effet (et sans
+	// cout) si la serialisation n'est pas armee ou l'archive vide. En cas
+	// d'echec de rejeu : arena.Restore() et tirage normal depuis la racine.
+	void ReenterMaybe(uint64_t& rng);
 	// La politique n'est copiee qu'une fois par appel de niveau (elle etait
 	// copiee A CHAQUE TIRAGE : une table de milliers d'entrees par rollout).
 	double Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng);
@@ -3444,6 +3499,11 @@ private:
 	// Une invocation surveillee (--material) a viole sa contrainte de materiau
 	// pendant le dernier StepToPrompt : la branche doit mourir.
 	bool material_violation = false;
+	// Rejeu de prefixe en cours (retour au barreau, s21) : StepToPrompt ne
+	// verse alors PAS au graphe de recettes — re-observer le meme prefixe a
+	// chaque re-entree gonflerait son support a proportion du taux de
+	// re-entree.
+	bool replaying = false;
 	// Materiaux (codes) envoyes par la resolution en cours, pour attribution a
 	// l'invocation qui suit.
 	std::vector<uint32_t> recent_materials;
@@ -3566,6 +3626,41 @@ private:
 	std::vector<ArchiveEntry> archive;
 	std::unordered_map<uint64_t, size_t> archive_cells;
 	uint64_t archive_min_score = 0;
+	// --- RETOUR AU BARREAU (--reenter, s21) ---------------------------------
+	// Etat du tirage re-entre courant, pose par ReenterMaybe et consomme par
+	// PolicyRollout : compteurs du prefixe rejoue (tours, invocations,
+	// resolutions, actions, decisions) et le prefixe lui-meme — COPIE, parce
+	// que l'archive peut evincer l'entree pendant le tirage. `path` est seme
+	// avec le prefixe : une solution doit rester rejouable depuis la racine,
+	// et `best_path` sert de racine au finisseur.
+	bool reenter_active = false;
+	uint32_t reenter_turns = 0, reenter_summons = 0, reenter_actions = 0;
+	uint32_t reenter_depth = 0;
+	uint64_t reenter_resolved = 0;
+	std::vector<std::vector<uint8_t>> reenter_path;
+	// Taille de la RESERVE (deck+extra) a la RACINE de cette recherche : la
+	// base des barreaux de departs (zone 5). Posee par InitSerialBase() a
+	// l'entree de chaque Run* — jamais lazily, le premier SerialProgress
+	// arrive au milieu d'une ligne.
+	uint32_t serial_res0 = 0;
+	void InitSerialBase();
+	// Usages des hotes a quota le long du chemin COURANT (cfg.quota_hosts,
+	// meme indice). Exact dans les tirages (remis a zero par tirage, prefixe
+	// de re-entree compris) ; dans les descentes DFS le compteur ne redescend
+	// pas au retour arriere — les cellules DFS se sur-partitionnent, ce qui
+	// est la direction sure (des cellules en plus, jamais un representant
+	// corrompu).
+	// UN BIT par hote (s21) : pour un quota 1/tour la distinction qui compte
+	// est « depense ou frais » — 12 hotes tiennent dans les 12 bits libres de
+	// la cle de cellule, la ou 2 bits par hote plafonnaient a 6 et coupaient
+	// Wolf (7e au tri par code) a chaque derivation.
+	uint32_t quota_uses[12] = {};
+	uint64_t QuotaKey() const {
+		uint64_t k = 0;
+		for(size_t i = 0; i < 12; ++i)
+			k |= static_cast<uint64_t>((std::min)(quota_uses[i], 1u)) << i;
+		return k;
+	}
 	// Politique finale du run NRPA (exportee pour le finisseur).
 	Policy final_policy;
 	// Niveau CONTEXTUEL de la politique (chantier 5ter, cfg.ctx_shrink >= 0).
@@ -3604,5 +3699,14 @@ private:
 	BoardKey board_scratch;               // board du noeud courant
 	BoardKey child_board_scratch;         // board d'un fils evalue
 };
+
+// Progres de serialisation d'un etat : unites servies des sous-buts de x*
+// (9.31/9.32), `packed` = le vecteur (4 bits par exigence). `res0` est la
+// taille de la RESERVE a la racine (base des departs, zone 5). Expose (s21)
+// pour la sonde des racines du finisseur — quels barreaux une racine sert.
+uint32_t SerialProgress(Duel& duel, uint8_t con,
+						const std::vector<SearchConfig::SerialReq>& reqs,
+						const CardDB& db, uint32_t res0,
+						uint64_t* packed = nullptr);
 
 } // namespace solver

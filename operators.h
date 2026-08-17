@@ -449,6 +449,11 @@ private:
 	std::vector<double> need;                       // but par place
 	std::vector<std::unordered_map<size_t, double>> col;   // effets par transition
 	OperatorLP lp;                                  // couts et bornes ; rows rebati
+	// Codes canoniques du BUT : les barreaux de consommation ne doivent jamais
+	// porter sur eux (s21 — l'echelle recompensait l'envoi des LIGERS au
+	// cimetiere, un artefact du descost dans x*, et le run nu archivait des
+	// cellules « en progres » qui avaient detruit leurs pieces de but).
+	std::vector<uint32_t> goal_codes;
 	size_t n_rename = 0;
 	mutable std::unordered_map<uint32_t, std::vector<uint64_t>> sc_cache;
 };

@@ -1337,6 +1337,12 @@ struct Options {
 	// s'eteint par `--no-serial`, comme `--adapt-to-peak` apres sa promotion.
 	// C'est la seule voie que l'arithmetique des 105 ordres laisse ouverte.
 	bool serial = true;
+	// RETOUR AU BARREAU (s21) : probabilite qu'un tirage NRPA reparte d'une
+	// cellule d'archive au lieu de la racine. La moitie de SIW_R qui manquait
+	// aux tirages — la forme close de 9.33 (e) dit que `Sigma b^(l_i)` n'existe
+	// que si chaque bloc est fouille depuis le barreau precedent. Ne mord que
+	// sous serialisation armee. 0 = temoin de l'A/B.
+	double reenter = 0.5;
 	// Poids soustrait au logit d'un changement de phase. 0 = eteint (le temoin).
 	double phase_w = 0.0;
 	// CHANTIER 2 (session 19) : LE CHAINAGE ARRIERE COMME BIAIS.
@@ -1958,6 +1964,11 @@ void Usage() {
 		"                     reference de son sous-arbre (defaut 32).\n"
 		"  --qhat-nodes <n>   plafond de noeuds du bandit par worker (65536).\n"
 		"  --no-qhat-probe    ne pas imprimer la sonde de la premiere decision.\n"
+		"  --reenter <p>      RETOUR AU BARREAU (s21) : probabilite qu'un tirage\n"
+		"                     NRPA reparte d'une cellule d'archive (un palier de\n"
+		"                     l'echelle x*) au lieu de la racine — la moitie de\n"
+		"                     SIW_R qui manquait aux tirages. Ne mord que sous\n"
+		"                     serialisation armee. Defaut 0.5 ; 0 = temoin A/B.\n"
 		"  --canonical-zones  n'explorer qu'une zone libre representative par\n"
 		"                     type de zone. Declare depuis longtemps, allume\n"
 		"                     nulle part jusqu'a la s15. Les fleches de lien et\n"
@@ -2385,6 +2396,14 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.assign_bias = std::atof(v);
 			if(o.assign_bias < 0) {
 				std::printf("!! --assign-bias attend un poids >= 0\n");
+				return false;
+			}
+		} else if(a == "--reenter") {
+			// Retour au barreau (s21) : probabilite de re-entree par cellule.
+			const char* v = next("--reenter"); if(!v) return false;
+			o.reenter = std::atof(v);
+			if(o.reenter < 0.0 || o.reenter > 1.0) {
+				std::printf("!! --reenter attend une probabilite dans [0, 1]\n");
 				return false;
 			}
 		} else if(a == "--phase-w") {
@@ -3635,6 +3654,9 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	cfg.burn_slack = opt.burn_slack;
 	cfg.burn_limit = opt.burn_limit;
 	cfg.phase_w = static_cast<float>(opt.phase_w);
+	// Retour au barreau (s21). Lu sous garde de serial_reqs (search.cpp) :
+	// le cabler sans echelle est sur et inerte — et ReportMechanisms le DIT.
+	cfg.reenter = static_cast<float>(opt.reenter);
 }
 
 // LE CONTROLE QUI MANQUAIT, et il est la vraie lecon de 9.28 (f).
@@ -3686,6 +3708,11 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 		dep(cfg.landmarks != nullptr, "landmark-w %.2f", cfg.landmark_weight);
 	if(cfg.landmark_h > 0.0f)
 		dep(cfg.landmarks != nullptr, "landmark-h %.2f", cfg.landmark_h);
+	// Le retour au barreau exige l'ECHELLE (serial_reqs) : sans elle, une
+	// cellule d'archive est un cache, pas un barreau — et le mecanisme est
+	// volontairement inerte. Le dire ici evite un bras d'A/B mort-ne.
+	if(cfg.reenter > 0.0f)
+		dep(!cfg.serial_reqs.empty(), "reenter %.2f", cfg.reenter);
 
 	std::printf("  MECANISMES [%s] : %s\n", mode,
 				on.empty() ? "aucun (defauts du moteur)" : on.c_str());
@@ -6802,6 +6829,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// recherche) : ils transitent par ici, et sont verses dans `cfg` au moment
 	// ou il existe. Un seul point de versement, comme le chantier D l'exige.
 	std::vector<SearchConfig::SerialReq> serial_from_balance;
+	// Les hotes a QUOTA (s21, l'etude des briques) : verses dans cfg au meme
+	// point que serial_from_balance.
+	std::vector<uint32_t> quota_hosts_wiring;
 	if(opt.probe_repeat && cons.resolve_min.empty())
 		std::printf("!! --probe-repeat sans --summon-min ni --resolve : aucune "
 					"carte a surveiller, la sonde restera MUETTE\n");
@@ -6996,17 +7026,189 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							rq.count = n.count;
 							serial_from_balance.push_back(rq);
 						}
+						// LES DEPARTS DE RESERVE (s21, apres le nommage des
+						// deserts). Les invocations intermediaires — les
+						// vehicules d'extra deck que x* ne tire pas parce que
+						// le LP fusionne « directement » — consomment toutes
+						// la reserve : c'est la ressource IRREVERSIBLE du
+						// tour, la seule grandeur qui monte REGULIEREMENT
+						// pendant les deserts +46/+47 du profil des ecarts.
+						// Une unite par carte sortie de deck+extra depuis la
+						// racine ; plafond 15 = l'empaquetage (sur-compter est
+						// anodin, une unite jamais atteinte ne cree pas de
+						// cellule).
+						// Deux TRANCHES de 15 (le champ `arch` porte le
+						// decalage) : la ligne reelle fait ~25 departs, et la
+						// premiere tranche seule saturait a la reponse 118 —
+						// juste avant les deserts a couvrir (mesure au banc).
+						for(uint64_t off : { 0ull, 15ull }) {
+							SearchConfig::SerialReq rq;
+							rq.zone = 5;
+							rq.arch = off;
+							rq.count = 15;
+							serial_from_balance.push_back(rq);
+						}
+						// LES HOTES DES EFFETS ACCORDES, EN ZONE (s21, apres
+						// le run 600 s). Le but exige une CONJONCTION :
+						// Leo-materiau ET la concession de Masquerade active
+						// ET le renommeur en zone. L'echelle etait AVEUGLE aux
+						// habilitants — ils ne sont pas dans x* — donc une
+						// cellule « 40 unites avec l'hote pose » et une
+						// « sans » avaient la meme cle, et le score (chemin
+						// court d'abord) gardait systematiquement la mauvaise.
+						// Derivation GENERALE (regle 3, aucun nom compile) :
+						// tout hote d'un EFFECT_ADD_CODE ou d'un
+						// EFFECT_EXTRA_FUSION_MATERIAL present au deck devient
+						// un barreau de PRESENCE @TERRAIN, a hauteur de ses
+						// copies (plafond 3, sur-compter anodin).
+						{
+							uint64_t k_add = 0, k_efm = 0;
+							kt.Lookup("EFFECT_ADD_CODE", k_add);
+							kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL", k_efm);
+							std::unordered_map<uint32_t, uint32_t> dcop;
+							for(uint32_t c : deck_mult)
+								++dcop[db.Canonical(c)];
+							for(const auto& kvv : tbl.All()) {
+								const uint32_t host = db.Canonical(kvv.first);
+								auto dit = dcop.find(host);
+								if(dit == dcop.end())
+									continue;
+								bool enabler = false;
+								for(const DeclaredEffect& g :
+									kvv.second.grants)
+									enabler = enabler ||
+											  (g.code_is_effect &&
+											   ((k_add &&
+												 g.code_value == k_add) ||
+												(k_efm &&
+												 g.code_value == k_efm)));
+								if(!enabler)
+									continue;
+								SearchConfig::SerialReq rq;
+								rq.code = host;
+								rq.zone = 6;   // EN JEU (MZONE + SZONE)
+								rq.count = (std::min)(dit->second, 3u);
+								serial_from_balance.push_back(rq);
+								// Un habilitant est aussi un hote a QUOTA.
+								quota_hosts_wiring.push_back(host);
+							}
+						}
+						// LES HOTES A QUOTA (s21, l'etude des briques) : aux
+						// habilitants s'ajoutent les hotes d'un produit
+						// d'INVOCATION SPECIALE dont la portee touche
+						// l'archetype du but (la fusion de Wolf : ignition
+						// 1/tour, membre invisible de la conjonction). Le
+						// compte d'activations le long du chemin entre dans la
+						// cle de cellule.
+						{
+							// LE CRITERE EST LA VOIE DU BUT, pas l'archetype :
+							// le but est une FUSION, donc les quotas qui
+							// comptent sont les IGNITEURS de Fusion
+							// (CATEGORY_FUSION_SUMMON — la fusion de Wolf,
+							// 1/tour depuis la PZONE). La premiere version
+							// prenait tout produit SPECIAL_SUMMON d'archetype
+							// et le plafond de 6 coupait... Wolf exactement.
+							uint64_t c_fu = 0;
+							kt.Lookup("CATEGORY_FUSION_SUMMON", c_fu);
+							std::vector<uint64_t> goal_archs;
+							for(const auto& [gc0, gn0] : gc2) {
+								(void)gn0;
+								if(const CardRow* row =
+									   db.Find(db.Canonical(gc0)))
+									for(uint16_t sc : row->setcodes)
+										if(sc)
+											goal_archs.push_back(sc & 0x0fffu);
+							}
+							for(const auto& kvv : tbl.All()) {
+								const uint32_t host = db.Canonical(kvv.first);
+								// (i) produit de FUSION declare ; ou (ii) un
+								// effet BORNE (SetCountLimit) d'un hote dont
+								// les series listees croisent l'archetype du
+								// but — la fusion de Wolf vit dans Fusion.lua
+								// partage, hors de portee de l'extraction par
+								// carte : c'est son 1/tour + SET_LUNALIGHT qui
+								// le designent.
+								bool fu = false;
+								for(const DeclaredProduct& pr :
+									kvv.second.products)
+									fu = fu ||
+										 (c_fu && (pr.category & c_fu));
+								bool capped_goal = false;
+								bool series_goal = false;
+								for(uint64_t s0 : kvv.second.listed_series)
+									for(uint64_t ga : goal_archs)
+										series_goal =
+											series_goal ||
+											((s0 & 0x0fffull) == ga);
+								if(series_goal)
+									for(const std::vector<DeclaredEffect>* set :
+										{ &kvv.second.operators,
+										  &kvv.second.grants })
+										for(const DeclaredEffect& e0 : *set)
+											capped_goal = capped_goal ||
+														  e0.has_count_limit;
+								if(!fu && !capped_goal)
+									continue;
+								// FILTRE DE PRINCIPE : un sort a usage unique
+								// laisse une trace VISIBLE en zone (il part au
+								// cimetiere — le digest et l'echelle le
+								// voient). L'ignition d'une carte QUI RESTE en
+								// jeu (monstre, continu) ne laisse aucune
+								// trace : c'est elle que la cle doit porter.
+								// Et jamais une carte DU BUT (son quota est le
+								// produit, pas une ressource).
+								bool is_goal = false;
+								for(const auto& [gc0, gn0] : gc2) {
+									(void)gn0;
+									is_goal = is_goal ||
+											  db.Canonical(gc0) == host;
+								}
+								if(is_goal)
+									continue;
+								uint64_t t_cont = 0;
+								kt.Lookup("TYPE_CONTINUOUS", t_cont);
+								const CardRow* hrow = db.Find(host);
+								const bool persists =
+									hrow && ((hrow->type & 0x1u) ||
+											 (t_cont &&
+											  (hrow->type & t_cont)));
+								if(!persists)
+									continue;
+								quota_hosts_wiring.push_back(host);
+							}
+							std::sort(quota_hosts_wiring.begin(),
+									  quota_hosts_wiring.end());
+							quota_hosts_wiring.erase(
+								std::unique(quota_hosts_wiring.begin(),
+											quota_hosts_wiring.end()),
+								quota_hosts_wiring.end());
+							if(quota_hosts_wiring.size() > 12)
+								quota_hosts_wiring.resize(12);
+							if(!quota_hosts_wiring.empty()) {
+								std::printf("  QUOTAS suivis (cle de cellule) "
+											": ");
+								for(uint32_t qh : quota_hosts_wiring)
+									std::printf("%s ; ",
+												db.Name(qh).c_str());
+								std::printf("\n");
+							}
+						}
 						std::printf("  SERIALISATION par le bilan matiere : "
 									"h(depart) = %.0f, %zu sous-but(s)\n",
 									h0, serial_from_balance.size());
 						for(const SearchConfig::SerialReq& rq :
 							serial_from_balance)
 							std::printf("      x%-2u %-34s @%s\n", rq.count,
-										rq.code
-											? db.Name(rq.code).c_str()
-											: "(archetype)",
+										rq.zone == 5
+											? "(departs de reserve)"
+											: rq.code
+												  ? db.Name(rq.code).c_str()
+												  : "(archetype)",
 										rq.zone == 2   ? "TERRAIN"
 										: rq.zone == 3 ? "CIMETIERE"
+										: rq.zone == 4 ? "BANNIE"
+										: rq.zone == 5 ? "RESERVE"
+										: rq.zone == 6 ? "EN JEU"
 													   : "DISPO");
 					} else {
 						// Un `h` infini ICI voudrait dire que le but est prouve
@@ -7115,6 +7317,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	SearchConfig cfg;
 	ApplyMechanisms(opt, cfg);   // chantier D : UN SEUL POINT DE CABLAGE
 	cfg.serial_reqs = serial_from_balance;   // 9.31 : les sous-buts calcules
+	cfg.quota_hosts = quota_hosts_wiring;    // s21 : (board, quotas) en cle
 	// Le plan compte 273 etapes ; un autre deck en demandera davantage pour
 	// arriver au meme endroit. On laisse de la marge, sans quoi la borne
 	// couperait avant le board.
@@ -7535,8 +7738,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		struct ModeStats {
 			uint64_t nodes = 0, rollouts = 0, cuts = 0, turn_cuts = 0, adapts = 0;
 			// Profil de progression par tirage (s21) : additif entre workers.
-			uint64_t sp_final[40] = {};
+			uint64_t sp_final[72] = {};
 			uint64_t sp_at_sum = 0, sp_lines = 0;
+			// Vie du retour au barreau (--reenter, s21) : additif.
+			uint64_t reenter_rollouts = 0, reenter_fail = 0,
+					 reenter_base_sum = 0;
 			uint64_t hint_seen = 0, hint_taken = 0;
 			// Ventilation (audit 18) : `sel` = prompts de SOUS-ENSEMBLE, ou
 			// l'identite de carte est approximative et n'existe que sous
@@ -7801,10 +8007,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.rollouts += s.Stats().rollout_count;
 					m.cuts += s.Stats().novelty_cuts;
 					m.turn_cuts += s.Stats().turn_cuts;
-					for(int k = 0; k < 40; ++k)
+					for(int k = 0; k < 72; ++k)
 						m.sp_final[k] += s.Stats().sp_final[k];
 					m.sp_at_sum += s.Stats().sp_at_sum;
 					m.sp_lines += s.Stats().sp_lines;
+					m.reenter_rollouts += s.Stats().reenter_rollouts;
+					m.reenter_fail += s.Stats().reenter_fail;
+					m.reenter_base_sum += s.Stats().reenter_base_sum;
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
@@ -8125,7 +8334,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			const ModeStats& m = mi ? nrpa : greedy;
 			if(!m.sp_lines)
 				continue;
-			int hi = 39;
+			int hi = 71;
 			while(hi > 0 && !m.sp_final[hi])
 				--hi;
 			int mode_k = 0;
@@ -8151,6 +8360,32 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						2 * mode_n > m.sp_lines
 							? "PIC UNIQUE — verrou nommable a ce barreau"
 							: "DISPERSION — l'arite tue, couper plus fin");
+		}
+		// LA VIE DU RETOUR AU BARREAU (--reenter, piege 52). A zero re-entree
+		// avec le drapeau arme, le mecanisme est inerte (archive vide ou
+		// serialisation absente) et aucun juge de recherche ne le concerne.
+		// Un rejeu ECHOUE n'est pas du bruit : un chemin d'archive doit se
+		// rejouer depuis la racine, l'echec est un defaut a regarder.
+		for(int mi = 0; mi < 2; ++mi) {
+			const ModeStats& m = mi ? nrpa : greedy;
+			if(!m.reenter_rollouts && !m.reenter_fail)
+				continue;
+			std::printf("      %-7s retour au barreau : %llu tirage(s) "
+						"re-entre(s) (%.1f %% des tirages), base moyenne "
+						"%.1f unite(s)%s",
+						mi ? "NRPA" : "glouton",
+						(unsigned long long)m.reenter_rollouts,
+						m.rollouts ? 100.0 * double(m.reenter_rollouts) /
+										 double(m.rollouts)
+								   : 0.0,
+						m.reenter_rollouts
+							? double(m.reenter_base_sum) /
+								  double(m.reenter_rollouts)
+							: 0.0,
+						m.reenter_fail ? "" : "\n");
+			if(m.reenter_fail)
+				std::printf(", %llu rejeu(x) ECHOUE(S) <-- defaut\n",
+							(unsigned long long)m.reenter_fail);
 		}
 		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
 					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
@@ -8554,9 +8789,17 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// Les meilleurs etats d'archive sont massivement VERROUILLES
 			// (mesure : 1-3 expansions puis epuisement — le verrou se pose a
 			// l'invocation, bien avant l'etat final) ; leurs prefixes de
-			// recul, eux, demarrent avant le verrou.
-			for(size_t i = 0; i < ents.size() && i < 3; ++i)
-				for(uint32_t back : { 15u, 30u })
+			// recul, eux, demarrent avant le verrou. TOP-12 (s21) : trois
+			// cellules ne couvraient qu'un sommet de l'echelle fine — la
+			// conjonction du but (habilitants + materiaux + quota) peut vivre
+			// dans n'importe laquelle des cellules-frontiere.
+			// Reculs 45/60 (s21) : le vecteur des cellules-frontiere porte la
+			// CONJONCTION (Leo@cimetiere + habilitants en jeu) mais l'etat est
+			// verrouille — et le quota 1/tour de Wolf, INVISIBLE au vecteur,
+			// se depense ~30-50 reponses avant la fin. Il faut reculer
+			// jusqu'AVANT la depense.
+			for(size_t i = 0; i < ents.size() && i < 12; ++i)
+				for(uint32_t back : { 15u, 30u, 45u, 60u })
 					if(ents[i]->path.size() > back) {
 						std::snprintf(lbl, sizeof(lbl), "arch%02zu recul %u", i,
 									  back);
@@ -9116,6 +9359,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								static_cast<uint8_t>(1 - opt.target_player))) {
 						if(opt.stop_gc)
 							fd.SetLuaGc(false);
+						// Base des departs de reserve (zone 5) pour la sonde
+						// de racine : la RESERVE au depart du duel.
+						const uint32_t root_res0 =
+							fd.Count(static_cast<uint8_t>(opt.target_player),
+									 0x01u) +
+							fd.Count(static_cast<uint8_t>(opt.target_player),
+									 0x40u);
 						fa.Push();   // position de depart du duel
 						for(;;) {
 							size_t i = next_root.fetch_add(1);
@@ -9136,6 +9386,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											roots[i].label.c_str(), pc.used,
 											roots[i].pre.size());
 								continue;
+							}
+							// SONDE DE RACINE (s21) : QUELS barreaux cet etat
+							// sert — le vecteur empaquete, 4 bits par exigence
+							// dans l'ordre du cablage. C'est la reponse a « la
+							// conjonction du but existe-t-elle dans une
+							// cellule ? », lisible racine par racine.
+							char spv[40] = "";
+							if(!cfg.serial_reqs.empty()) {
+								uint64_t pk = 0;
+								SerialProgress(
+									fd,
+									static_cast<uint8_t>(opt.target_player),
+									cfg.serial_reqs, db, root_res0, &pk);
+								std::snprintf(spv, sizeof spv, " sp=%013llx",
+											  (unsigned long long)pk);
 							}
 							SearchConfig fcfg = cfg;
 							fcfg.time_limit_ms = left;
@@ -9204,11 +9469,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											  (unsigned long long)st.macro_absorbed,
 											  (unsigned long long)st.macro_aborted);
 							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
-										"%s%s%s%s%s  b=%llu  %s%s\n",
+										"%s%s%s%s%s%s  b=%llu  %s%s\n",
 										roots[i].label.c_str(),
 										(unsigned long long)st.nodes,
 										st.ms / 1000.0, st.best_overlap,
 										target.codes.size(), rr, rf, rg, rj, mc,
+										spv,
 										(unsigned long long)st.edges_skipped,
 										SearchOutcome(st),
 										fs.Solutions().empty() ? ""
@@ -10073,7 +10339,7 @@ int main(int argc, char** argv) {
 						arena.Restore();
 						const uint8_t con =
 							static_cast<uint8_t>(opt.target_player);
-						std::vector<uint32_t> res, ava, fld, grv, tmp;
+						std::vector<uint32_t> res, ava, fld, grv, rmv, fzn, tmp;
 						auto snap = [&]() {
 							res.clear(); ava.clear(); fld.clear();
 							for(uint32_t loc : { 0x01u, 0x40u }) {   // DECK, EXTRA
@@ -10090,6 +10356,12 @@ int main(int argc, char** argv) {
 							fld.assign(tmp.begin(), tmp.end());
 							duel.QueryCodes(con, 0x10u, tmp);   // GRAVE (s21)
 							grv.assign(tmp.begin(), tmp.end());
+							duel.QueryCodes(con, 0x20u, tmp);   // BANNIE (s21)
+							rmv.assign(tmp.begin(), tmp.end());
+							// EN JEU (zone 6) = MZONE + SZONE.
+							fzn = fld;
+							duel.QueryCodes(con, 0x08u, tmp);
+							fzn.insert(fzn.end(), tmp.begin(), tmp.end());
 						};
 						// --- PROFIL DES ECARTS ENTRE BARREAUX (s21) -----------
 						// La forme close derivee en s21 sur 9.31 : le cout d'un
@@ -10117,16 +10389,73 @@ int main(int argc, char** argv) {
 							for(const BalanceModel::Need& n :
 								bm.ConsumedFrom(r0))
 								needs.push_back(n);
+							// Les DEPARTS DE RESERVE (zone 5), memes deux
+							// tranches que le cablage (`arch` = decalage).
+							for(uint64_t off : { 0ull, 15ull }) {
+								BalanceModel::Need dep;
+								dep.zone = 5;
+								dep.arch = off;
+								dep.count = 15;
+								needs.push_back(dep);
+							}
+							// Les HOTES DES EFFETS ACCORDES @TERRAIN, meme
+							// derivation que le cablage (s21).
+							{
+								uint64_t k_add = 0, k_efm = 0;
+								kt.Lookup("EFFECT_ADD_CODE", k_add);
+								kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL",
+										  k_efm);
+								std::unordered_map<uint32_t, uint32_t> dcop;
+								for(uint32_t c : deck_codes)
+									++dcop[db.Canonical(c)];
+								for(const auto& kvv : tbl.All()) {
+									const uint32_t host =
+										db.Canonical(kvv.first);
+									auto dit = dcop.find(host);
+									if(dit == dcop.end())
+										continue;
+									bool enabler = false;
+									for(const DeclaredEffect& g :
+										kvv.second.grants)
+										enabler =
+											enabler ||
+											(g.code_is_effect &&
+											 ((k_add &&
+											   g.code_value == k_add) ||
+											  (k_efm &&
+											   g.code_value == k_efm)));
+									if(!enabler)
+										continue;
+									BalanceModel::Need pres;
+									pres.code = host;
+									pres.zone = 6;   // EN JEU
+									pres.count = (std::min)(dit->second, 3u);
+									needs.push_back(pres);
+								}
+							}
 						}
+						const uint32_t res0b =
+							static_cast<uint32_t>(res.size());
 						auto served_now = [&]() {
 							std::pair<uint64_t, uint32_t> out{ 0, 0 };
 							uint32_t slot = 0;
 							for(const BalanceModel::Need& n : needs) {
+								uint32_t have = 0;
+								if(n.zone == 5) {
+									const uint32_t cur = static_cast<uint32_t>(
+										res.size());
+									const uint32_t dep =
+										res0b > cur ? res0b - cur : 0;
+									const uint32_t off =
+										static_cast<uint32_t>(n.arch);
+									have = dep > off ? dep - off : 0;
+								} else {
 								const std::vector<uint32_t>& pool =
 									n.zone == 2   ? fld
 									: n.zone == 3 ? grv
+									: n.zone == 4 ? rmv
+									: n.zone == 6 ? fzn
 												  : ava;
-								uint32_t have = 0;
 								for(uint32_t raw : pool) {
 									const uint32_t c = db.Canonical(raw);
 									bool okc = false;
@@ -10141,6 +10470,7 @@ int main(int argc, char** argv) {
 											}
 									if(okc && ++have >= n.count)
 										break;
+								}
 								}
 								const uint32_t got = (std::min)(have, n.count);
 								out.second += got;
@@ -10287,7 +10617,10 @@ int main(int argc, char** argv) {
 									const BalanceModel::Need& n =
 										needs[unit_need[i]];
 									char nb[64];
-									if(n.code)
+									if(n.zone == 5)
+										std::snprintf(nb, sizeof nb,
+													  "(depart de reserve)");
+									else if(n.code)
 										std::snprintf(nb, sizeof nb, "%s",
 													  db.Name(n.code).c_str());
 									else
@@ -10299,6 +10632,9 @@ int main(int argc, char** argv) {
 												unit_at[i], unit_at[i] - pat, nb,
 												n.zone == 2   ? "TERRAIN"
 												: n.zone == 3 ? "CIMETIERE"
+												: n.zone == 4 ? "BANNIE"
+												: n.zone == 5 ? "RESERVE"
+												: n.zone == 6 ? "EN JEU"
 															  : "DISPO");
 									pat = unit_at[i];
 								}

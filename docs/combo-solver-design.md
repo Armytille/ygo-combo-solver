@@ -8094,3 +8094,100 @@ mécanisme central.*
    tant qu'un écart le dépasse, aucun budget réaliste ne le franchit par
    échantillonnage uniforme — c'est un critère de CORRECTION du grain, pas un
    réglage.
+
+#### (k) LE RETOUR AU BARREAU (`--reenter`) : la moitié de SIW_R enfin câblée côté tirages
+
+Relecture du code après (h) : l'échelle existait (cellule = palier de
+`SerialProgress`) et **seul le finisseur y prenait ses racines** — la phase
+d'échantillonnage, 99 % du budget, repartait de la racine à chaque tirage.
+L'histogramme (h) est exactement la signature de ce manque : masse sur les
+premières unités, queue exponentielle. La forme close de (e) est catégorique —
+`Σ b^(ℓᵢ)` n'existe que si chaque bloc est fouillé DEPUIS le barreau
+précédent ; sans retour on reste à `b^L`.
+
+**Le mécanisme.** Avec probabilité `--reenter` (défaut 0,5 — un mécanisme est
+un drapeau le temps de le mesurer ; 0 = témoin), un tirage NRPA rejoue depuis
+la racine le chemin d'une cellule d'archive tirée **uniformément** (Go-Explore :
+les barreaux hauts peuvent être des impasses, on répartit la frontière), arme
+les compteurs du préfixe (tours, invocations, résolutions, actions,
+décisions — le MÊME `StepToPrompt`, donc la même comptabilité), et continue de
+là. Garde de périmètre : **rien sans sérialisation armée** (sans échelle, une
+cellule est un cache) — la santé est inchangée et l'inertie est ANNONCÉE par
+`ReportMechanisms` (« DEMANDÉ mais INERTE : reenter 0.50 » en mode santé,
+vérifié).
+
+**Trois points de rigueur, chacun payé une fois dans l'histoire du dossier :**
+
+- `path` est semé avec le préfixe : solutions et `best_path` restent
+  **rejouables depuis la racine** (et le finisseur garde des racines valides) ;
+  `actions` et `depth` sont semés aussi, sans quoi le coût lexicographique
+  comparerait des lignes amputées à des lignes complètes.
+- le rejeu ne verse PAS au graphe de recettes (`replaying`) : re-observer le
+  même préfixe à chaque re-entrée gonflerait son support à proportion du taux
+  de re-entrée — un biais fabriqué.
+- un rejeu qui échoue est **compté à part** (`reenter_fail`) et le tirage
+  repart de la racine : un chemin d'archive doit se rejouer, l'échec est un
+  défaut à regarder, pas du bruit.
+
+**Défaut latent trouvé en câblant** (la tradition du dossier tient) : la
+branche d'élision de `PolicyRollout` n'ajoutait pas la réponse forcée à
+`path` — sous `--elide-forced`, solutions, `best_path` et chemins d'archive
+étaient **incomplets et non rejouables**, en silence (l'élision est éteinte par
+défaut, d'où l'absence de symptôme). La branche DFS le faisait déjà. Corrigé.
+
+**L'A/B** (étalon A nu, 3 Liger, 90 s, graine 888, `--reenter 0` contre 0,5) :
+
+| | témoin | retour au barreau |
+|---|---|---|
+| vie | — | **95 267 re-entrées (49,8 %), base moyenne 8,0 unités, 0 rejeu échoué** |
+| tirages mesurés | 271 227 | 191 261 (−30 % : le prix du rejeu) |
+| ≥ 11 unités | 1,6 % | **21,2 % (×13)** |
+| ≥ 14 unités | 20 tirages (0,007 %) | **5 724 (3,0 % — ×400 en proportion)** |
+| but | 0/3, 6 monstres | 0/3, 6 monstres |
+
+**La masse monte l'échelle bloc par bloc** — la première mesure du dossier où
+la frontière de progression se DÉPLACE au lieu de s'étirer. Le but reste 0/3 à
+ce budget, et c'est cohérent : le sommet plafonne à 18 unités sur 30, juste
+sous le désert de ~24 décisions à choix que (j) nomme — le retour au barreau ne
+raccourcit pas les blocs, il rend leur franchissement CUMULATIF. Les deux
+leviers sont désormais indépendants et mesurés : le retour (fait) rend
+l'escalade cumulative ; le grain (à faire, (j)) doit ramener ℓ_max sous ~8.
+*Réserve : une graine, un budget — l'ampleur (×13 en proportion) dépasse
+largement le bruit de graine observé sur ce banc, mais la promotion en défaut
+suivra la règle : elle est acquise, le témoin reste `--reenter 0`.*
+
+À 300 s (budget s20) : **312 074 re-entrées (49,9 %), 0 rejeu échoué**,
+≥ 14 unités **2,2 % → 8,8 %**, ≥ 16 : 0,15 % → 1,8 % (×12) — et la frontière
+se COMPRIME contre un mur à 17-19 unités. Le mur est le désert, au barreau
+près.
+
+#### (l) Les déserts NOMMÉS — et ils désignent la même extraction que Bagooska
+
+**Barreaux de bannissement.** Wolf et Masquerade invoquent les Fusions en
+BANNISSANT les matériaux : `ConsumedFrom` émet donc aussi chaque exigence en
+zone BANNIE (zone 4 de `SerialReq`, même comptes, sur-compter anodin). Mesure
+au banc : la FIN de ligne se densifie (les assemblages Liger 2/3, réponses 310
+et 329, deviennent 5 barreaux chacun — 30 → 39 unités servies), mais les
+bannissements arrivent **en rafale à l'invocation**, pas pendant les déserts :
+`ℓ_max` reste 47.
+
+**Le contenu des déserts, lu au rejeu `--verbose`.** La fenêtre 239-286 est
+une suite d'**invocations spéciales intermédiaires** (`spsummon` aux prompts
+#248, #256, #265, #274, #280, avec leurs sélections de matériaux, places et
+positions) — les VÉHICULES d'extra deck du « 15 → 4 » de §9.31, que `x*` ne
+modélise pas parce que le LP fusionne « directement ». Leurs invocations ne
+peuvent donc pas être des barreaux.
+
+**C'est la même lacune que Bagooska, vue de l'autre côté** : les procédures
+Xyz/Lien sans compte de matériaux extrait (`unresolved_counts` vide hors
+`Xyz.AddProcedure` partiel) n'entrent pas dans `A` — ni comme producteurs
+(Bagooska sans producteur, l'armement à 4 buts qui tombe), ni comme
+transitions que `x*` tirerait (les véhicules invisibles, les déserts). **Une
+extraction, deux gains**, et elle était déjà le chantier n°1 de (j).
+
+**L'état à la clôture de séance** : étalon A, 90 s, 11 sous-buts armés,
+re-entrée 49,7 % (base 9,7 unités), archive 73 cellules, santé inchangée —
+et 0/3, parce que les déserts +46/+47 sont intacts tant que les véhicules ne
+sont pas dans le modèle. La chaîne causale est complète et chaque maillon est
+mesuré : forme close → profil des écarts → retour au barreau (frontière ×12) →
+le grain restant, nommé, avec son extraction.

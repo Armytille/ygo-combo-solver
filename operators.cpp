@@ -2418,8 +2418,10 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 				col[t][gen] += pos;
 		}
 	}
-	for(const auto& g : goal)
+	for(const auto& g : goal) {
 		need[place(0, AliasOf(cdb, g.first), kFld)] += g.second;
+		goal_codes.push_back(AliasOf(cdb, g.first));
+	}
 	col.resize(lp.n_ops);
 	return true;
 }
@@ -2571,6 +2573,17 @@ std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 		Need n;
 		const int kind = static_cast<int>(kv.first >> 62);
 		const uint64_t k = (kv.first >> 2) & ((1ull << 60) - 1);
+		// JAMAIS un barreau de consommation sur une carte DU BUT (s21).
+		// x* peut consommer un Liger (descost) — mais recompenser « Liger au
+		// cimetiere » quand le but est « 3 Liger » et que le deck n'en a que 3
+		// fabrique des cellules en progres APPARENT qui ont detruit le but.
+		// C'est mesure : la ligne reelle ne sert jamais ce barreau, les
+		// tirages du run nu le servaient massivement, et le tournoi preferait
+		// ces cellules empoisonnees.
+		if(kind == 0 &&
+		   std::find(goal_codes.begin(), goal_codes.end(),
+					 static_cast<uint32_t>(k)) != goal_codes.end())
+			continue;
 		if(kind == 0)
 			n.code = static_cast<uint32_t>(k);
 		else
@@ -2581,6 +2594,18 @@ std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 		n.count = (std::min)(
 			static_cast<uint32_t>(std::ceil(kv.second - 1e-9)), 15u);
 		out.push_back(n);
+		// LA MEME EXIGENCE EN ZONE BANNIE (s21, apres le mur a 17-19 unites).
+		// Le profil de progression sous --reenter se COMPRIME contre les
+		// deserts +34/+47 de la ligne reelle — et ce qui y bouge n'est ni le
+		// board ni le cimetiere : Wolf et Masquerade invoquent les Fusions en
+		// BANNISSANT les materiaux depuis le cimetiere ou le terrain. Pendant
+		// tout l'assemblage, c'est le compte de bannies qui monte, et aucune
+		// echelle ne le regardait. Sur-compter est anodin (une unite jamais
+		// atteinte ne cree pas de cellule) ; ne pas compter laissait le desert
+		// entier.
+		Need b = n;
+		b.zone = 4;   // BANNIE
+		out.push_back(b);
 	}
 	return out;
 }

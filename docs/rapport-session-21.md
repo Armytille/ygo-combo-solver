@@ -124,15 +124,171 @@ l'armement du mécanisme central.**
   solveur, pas le modèle), densité 5 % inchangée.
 - Auto-test simplexe : 65/65 à chaque exécution.
 
-## 8. Ce qui reste, dans l'ordre que les nombres donnent
+## 7bis. LE RETOUR AU BARREAU (`--reenter`, seconde moitié de séance)
 
-1. **Extraction `Xyz.AddProcedure`** (producteur pour Bagooska) : débloque la
-   sérialisation à 4 buts.
-2. **Les deux déserts restants** (+46 aux réponses 72-118, +47 aux 239-286) :
-   lister les activations du harnais dans ces fenêtres et trouver la place qui
-   les rend visibles — poursuite du geste des barreaux de consommation.
-3. Le critère est fixé : **ℓ_max ≤ ~8 décisions à choix**, sinon aucun budget
-   ne franchit l'écart.
+La relecture du code a montré que **seul le finisseur** prenait ses racines
+dans l'archive-échelle : chaque tirage NRPA repartait de la racine — la forme
+close dit que `Σ b^(ℓᵢ)` n'existe alors pas. Mécanisme câblé : avec
+probabilité 0,5 (drapeau `--reenter`, 0 = témoin), un tirage rejoue le chemin
+d'une cellule tirée uniformément (Go-Explore) et continue de là — compteurs de
+préfixe armés par le même `StepToPrompt`, `path` semé (solutions rejouables),
+graphe de recettes non pollué (`replaying`), rejeu échoué compté comme défaut.
+Gardé par la sérialisation : santé inchangée, inertie annoncée.
+
+**Défaut latent corrigé en câblant** : la branche d'élision de `PolicyRollout`
+omettait la réponse forcée dans `path` — sous `--elide-forced`, solutions et
+chemins d'archive étaient silencieusement non rejouables.
+
+**A/B (90 s, graine 888)** : vie = 95 267 re-entrées (49,8 %), 0 rejeu échoué.
+Tirages à ≥ 11 unités : 1,6 % → **21,2 %** ; à ≥ 14 : 20 tirages → **5 724**
+(×400 en proportion), pour −30 % de débit. À 300 s : ≥ 14 unités 2,2 % →
+**8,8 %**, ≥ 16 : ×12. **La frontière de progression se déplace** — première
+fois du dossier — et se **comprime contre un mur à 17-19 unités** : le désert,
+au barreau près. Le but reste 0/3.
+
+**Les déserts nommés (rejeu `--verbose`)** : la fenêtre 239-286 est une suite
+d'invocations spéciales intermédiaires — les **véhicules d'extra deck** du
+« 15 → 4 », que x* ne modélise pas (le LP fusionne « directement »). Les
+barreaux de bannissement (zone 4, Wolf/Masquerade bannissent les matériaux)
+densifient la fin de ligne (30 → 39 unités au banc) mais tombent en rafale à
+l'invocation : ℓ_max reste 47. **C'est la même lacune que Bagooska, vue de
+l'autre côté** : les procédures Xyz/Lien sans compte de matériaux n'entrent
+dans `A` ni comme producteurs (armement 4 buts) ni comme transitions (les
+véhicules invisibles). Une extraction, deux gains.
+
+## 7ter. LES DÉPARTS DE RÉSERVE, et le tournoi de réentrée (troisième moitié de séance)
+
+L'analyse a réfuté mon propre plan : même extraite, la recette des véhicules
+n'entrerait pas dans x* — le LP fusionne « directement », il ne tirerait
+jamais ces transitions. Ce qui monte RÉGULIÈREMENT pendant les déserts, c'est
+la ressource irréversible : **les départs de réserve** (deck+extra, le
+« 15 → 4 »). Barreau zone 5 : une unité par carte sortie depuis la racine,
+deux tranches de 15 (le champ `arch` porte le décalage — la première tranche
+seule saturait à la réponse 118, juste avant les déserts). Partitions élargies
+à 7 bits, histogramme à 72 cases.
+
+**Mesure au banc** : ℓ_max **47 → 33 réponses (~17 à choix)**, terme dominant
+**10^18,5 → 10^13**. Tous les déserts géants sont cassés ; le +33 restant est
+la fenêtre de la première Fusion (163→196) — le régime nommé, une rafale de
+sélections sans mouvement de zone.
+
+**Run 90 s** : archive **359 cellules** (×5), 70 racines, base de réentrée
+20,3 unités, frontière à **38 unités** — au seuil du premier Leo. La cascade
+coule comme jamais : Chick activée 0,78 % (s19 : 0,14 %), Wolf 1,48 %,
+**Leo au cimetière dans 333 tirages** (s19 : 6). Leo/Liger invoqués : 0 — la
+porte Wolf+matériaux reste le dernier bloc.
+
+**Le tournoi de 2** : l'uniforme sur 359 cellules diluait le budget (1/N par
+cellule-frontière). Deux tirages, on garde le meilleur score — la masse double
+sur la moitié haute sans abandonner les bas paliers.
+
+**Run 600 s (tournoi armé)** : 592 526 ré-entrées (49,9 %), base moyenne 26,2
+unités, **Leo au cimetière dans 9 859 tirages** (s19 : 6) — et Liger toujours
+à 0. Le diagnostic est structurel : le but exige une CONJONCTION
+(Leo-matériau ∧ concession de Masquerade active ∧ renommeur en zone) et
+**l'échelle était aveugle aux habilitants** — Masquerade n'est pas dans x*,
+donc une cellule « 40 unités avec Masquerade posée » et une « sans » avaient
+la même clé, et le score (chemin court d'abord) gardait systématiquement la
+mauvaise représentante.
+
+**Les barreaux de PRÉSENCE des hôtes d'effets accordés** (dérivation générale,
+règle 3 — aucun nom compilé) : tout hôte d'un `EFFECT_ADD_CODE` ou d'un
+`EFFECT_EXTRA_FUSION_MATERIAL` présent au deck devient un barreau @EN JEU
+(zone 6 = MZONE ∪ SZONE — **Masquerade est une magie continue, sa concession
+vit en SZONE**, une zone 2 ne l'aurait jamais vue). Au banc : Chick @EN JEU à
+la réponse 17, Masquerade @EN JEU à la 110, **51 paliers distincts** (40
+avant). Les cellules porteuses d'habilitants sont désormais distinctes et le
+tournoi les cible.
+
+## 7quater. La conjonction TROUVÉE, le verrou NOMMÉ (script lu), et le finisseur déverrouillé
+
+**Le script de Wolf, lu** (`c47705572.lua`) : sa fusion est une ignition à
+`SetRange(LOCATION_PZONE)` (Wolf doit être POSÉ EN ZONE PENDULE), avec
+`SetCountLimit(1)` — un usage par tour par copie — et `fextra` prend les
+matériaux du **cimetière nativement**. Conséquence : le piège n'est pas
+l'accessibilité mais le **CHOIX** — une fusion bon marché (Tiger) tirée tôt
+dépense le quota et tue la fenêtre Liger du tour.
+
+**La sonde de racine** (vecteur `sp=` par racine du finisseur, 4 bits par
+exigence) prouve que **la conjonction existe dans les cellules-frontière** :
+`Leo@CIMETIÈRE = 1 ∧ Chick@EN JEU = 1 ∧ Masquerade@EN JEU = 1` (slots 9/13/14).
+Mais l'LTS s'y épuise en 2-5 expansions : ces états sont capturés en **fin de
+tour**, tout est dépensé — et le quota de Wolf est INVISIBLE au vecteur.
+
+**Les reculs déverrouillent** : depuis `recul 30`, l'LTS passe de 5 à
+**15 717 expansions** (138 s, budget). Toujours 0/3 : le recul de 30 réponses
+ne remonte probablement pas avant la dépense du quota. Reculs portés à
+{15, 30, 45, 60} sur les 12 premières cellules, et budget finisseur réservé
+(`--finisher-min`).
+
+## 7quinquies. L'étude des briques (à la demande de l'opérateur), et ce qu'elle a corrigé
+
+« Manque-t-il vraiment ces briques ? » — vérifié dans le code et contre nos
+propres mesures, pas sur la foi de la revue :
+
+- **Brique 1 (élagage d'impasse en tirage)** : absente du code (aucun LP dans
+  search.cpp) mais **ÉDENTÉE seule** — le deck porte un RECYCLEUR (« capacité
+  de RECYCLAGE sur l'extra : 1/tour + un recycleur sans borne déclarée », notre
+  propre marche 1), donc un Liger brûlé laisse le LP faisable et l'élagage ne
+  mordrait pas. Elle dépend de la brique 2 (capacités dynamiques).
+- **Brique 2 (l'état-ressource dans les clés)** : CONFIRMÉE ligne à ligne — ni
+  le digest (zones+payload+pile, search.cpp:554-613), ni les atomes, ni la
+  cellule ne voient un compteur d'usage. C'est LA brique porteuse, et elle
+  explique le représentant mort mesuré (conjonction au vecteur, LTS 5 exp).
+- **Brique 3 (h^SEQ comme heuristique de nœud)** : RETIRÉE — notre banc la
+  réfute probablement (densité 5 % contre 15 % pour la nouveauté, s20 et s21).
+
+**Implémentation de la brique 2** : usages des hôtes à quota comptés le long du
+chemin (`MSG_CHAINING`, aucun patch du core), un bit par hôte (dépensé/frais),
+12 hôtes, injectés dans la clé de cellule (bits 52-63). Dérivation générale en
+trois temps — produits de FUSION déclarés ∪ hôtes à effet borné dont les séries
+croisent l'archétype du but, MOINS les cartes du but et les sorts à usage
+unique (leur activation laisse une trace visible en zone ; l'ignition d'une
+carte qui RESTE en jeu n'en laisse aucune — c'est elle que la clé doit porter).
+Trois dérivations naïves ont coupé Wolf avant celle-ci (plafond, catégorie dans
+Fusion.lua partagé, tri par code) — chaque fois vu par la ligne de VIE
+« QUOTAS suivis », jamais par un silence.
+
+## 7sexies. LE PREMIER LIGER DU RUN NU
+
+Run 900 s, graine 888, échelle complète (13 sous-buts après dépoisonnement) +
+clé de cellule (board, quotas) :
+
+```
+Lunalight Liger Dancer : >=1 1972    (toutes les sessions precedentes : 0, « JAMAIS »)
+au mieux 1 des 3 cartes cibles ; frontiere a 47 unites ; archive 630 cellules
+retour au barreau : 715 466 re-entrees (50,0 %), base moyenne 29,0 unites
+best_approach_1of3.yrp ecrite (223 decisions)
+```
+
+**1 972 tirages invoquent un Liger.** La chaîne complète — forme close →
+barreaux (consommation, départs, présence) → retour au barreau → dépoisonnement
+→ (board, quotas) en clé — vient de faire tomber la discontinuité du régime
+nommé. Le verrou était bien le REPRÉSENTANT de cellule quota-aveugle. Reste
+`>=2 : 0` : la même conjonction à reconstruire une deuxième et troisième fois
+dans le même tour — c'est le bloc suivant de la même échelle, plus une affaire
+de budget et de grain que de mécanisme inconnu.
+
+**Reproduit et borné à 1 800 s** : 1/3 stable (260 tirages à ≥1, meilleure
+approche 113 décisions), `>=2 : 0`. Le bloc Liger 1 → Liger 2 est le plus long
+segment de la référence (réponses 217 → 312, ~95 réponses) : la conjonction
+entière à rebâtir — deuxième Leo-matériau, igniteur frais, corps — et c'est le
+chantier de la s22, avec l'échelle et la clé désormais en place pour le porter.
+
+## 8. Ce qui reste — UNE extraction, et elle est doublement payante
+
+1. **Extraire le compte de matériaux des procédures Xyz/Lien** (l'argument de
+   `Xyz.AddProcedure`, `Link.AddProcedure`). Elle rend à la fois : le
+   producteur de Bagooska (l'armement de la sérialisation à 4 buts) ET les
+   transitions « véhicule » que x* pourrait tirer — donc des barreaux DANS les
+   déserts +46/+47, là où la ligne réelle invoque ses intermédiaires.
+2. Le critère de réussite est fixé par la forme close : **ℓ_max ≤ ~8 décisions
+   à choix** au banc du profil des écarts. Tant qu'un écart le dépasse, aucun
+   budget ne le franchit — et avec le retour au barreau désormais en place,
+   c'est le SEUL levier restant.
+3. Rejouer alors l'A/B du run nu : la frontière (aujourd'hui comprimée à
+   17-19 unités) doit atteindre les barreaux Leo/Liger, et la conversion 0/3 →
+   ≥ 1/3 est le juge.
 
 ## 9. Inventaire
 
