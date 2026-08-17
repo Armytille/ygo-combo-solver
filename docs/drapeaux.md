@@ -8,6 +8,12 @@
 > | `--refine-after <n>` | mécanisme | l'échelle auto-raffinante (chantier 3 s22) : re-sérialisation depuis la meilleure cellule-frontière quand sp_max stagne depuis n tirages. **Écrit, vie complète, NON JUGÉ** — 0 = éteint (défaut). |
 >
 > `--reenter` (s21) reste le témoin de son propre A/B (défaut 0,5).
+>
+> **s22ter** : `--no-self-negate` — famille **DISCIPLINE** (comme
+> `--no-activate`/`--no-chain`) : jamais proposer une négation du joueur sur
+> son propre maillon de chaîne. Effets dérivés de la table déclarée
+> (NEGATE/DISABLE), vie imprimée (813 coupes/60 s mesurées étalon A). Une
+> contrainte choisie n'a pas d'A/B à passer — elle a un contrat à tenir.
 
 > **ÉTAT AU TERME DE LA SESSION 19 : 114 → 117.** Trois ajouts, et leur statut
 > est écrit d'avance :
