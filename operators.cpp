@@ -2594,18 +2594,17 @@ std::vector<BalanceModel::Need> BalanceModel::ConsumedFrom(
 		n.count = (std::min)(
 			static_cast<uint32_t>(std::ceil(kv.second - 1e-9)), 15u);
 		out.push_back(n);
-		// LA MEME EXIGENCE EN ZONE BANNIE (s21, apres le mur a 17-19 unites).
-		// Le profil de progression sous --reenter se COMPRIME contre les
-		// deserts +34/+47 de la ligne reelle — et ce qui y bouge n'est ni le
-		// board ni le cimetiere : Wolf et Masquerade invoquent les Fusions en
-		// BANNISSANT les materiaux depuis le cimetiere ou le terrain. Pendant
-		// tout l'assemblage, c'est le compte de bannies qui monte, et aucune
-		// echelle ne le regardait. Sur-compter est anodin (une unite jamais
-		// atteinte ne cree pas de cellule) ; ne pas compter laissait le desert
-		// entier.
-		Need b = n;
-		b.zone = 4;   // BANNIE
-		out.push_back(b);
+		// LES BARREAUX @BANNIE ONT ETE RETIRES (s21, observation operateur +
+		// deux mesures). (1) Au banc, ils n'apportaient AUCUN barreau dans les
+		// deserts : les bannissements de fusion tombent en rafale A
+		// l'invocation, la meme reponse que les barreaux Liger@DISPO/TERRAIN
+		// deja servis. (2) Au run, ils etaient un CANAL DE POISON massif : la
+		// negation de Silver Hound (QUICK depuis le cimetiere) bannit en COUT
+		// Silver + une Fusion Lunalight du cimetiere — le Leo-materiau. Leo
+		// atteignait la zone bannie dans 25 884 tirages pour 260 invocations
+		// de Liger (98,9 % de suicides recompenses par l'echelle). Le CHOIX de
+		// Silver reste jouable (regle 2) ; seule la recompense est retiree —
+		// meme geste que Liger@CIMETIERE.
 	}
 	return out;
 }

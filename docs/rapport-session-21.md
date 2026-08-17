@@ -275,6 +275,57 @@ segment de la référence (réponses 217 → 312, ~95 réponses) : la conjonctio
 entière à rebâtir — deuxième Leo-matériau, igniteur frais, corps — et c'est le
 chantier de la s22, avec l'échelle et la clé désormais en place pour le porter.
 
+## 7septies. Le second poison, vu par l'OPÉRATEUR : la négation de Silver
+
+Observation d'opérateur : « Silver est utilisé pour annuler Polymerization ».
+Le script (`c35763582.lua`) le confirme et l'aggrave : la négation de Silver
+Hound est une QUICK depuis le **cimetière**, dont le coût **bannit Silver + une
+Fusion Lunalight du cimetière** — c'est-à-dire le **Leo-matériau**. Et
+l'échelle RÉCOMPENSAIT ce suicide : le Leo banni servait le barreau
+`Leo@BANNIE` — le même canal de poison que Liger@CIMETIÈRE, ressurgi par les
+barreaux de bannissement.
+
+**Mesuré** : Leo atteint la zone bannie dans **25 884 tirages pour 260
+invocations de Liger** (1 800 s) — 98,9 % de suicides récompensés. Et le banc
+avait déjà montré que les barreaux @BANNIE n'apportent **aucun** barreau dans
+les déserts (les bannissements de fusion tombent en rafale À l'invocation,
+même réponse que les barreaux Liger déjà servis) : valeur d'échelle nulle,
+canal de poison massif.
+
+**Correctif (règle 2 tenue)** : le CHOIX de Silver reste jouable — seule la
+récompense est retirée. Barreaux @BANNIE supprimés de `ConsumedFrom` ; banc
+inchangé (ℓ_max 33, 51 paliers) ; la zone 4 de `SerialProgress` reste câblée
+(inerte). **La règle générale, deuxième occurrence** : un barreau de
+consommation ne vaut que si la consommation est un PASSAGE OBLIGÉ du plan —
+jamais quand un coût quelconque peut le servir.
+
+**Lecture honnête du premier run assaini** : graine 888, 900 s → 0/3, Leo
+banni tombe à 2 421 (contre 9 789-25 884). MAIS le juge « ≥ 1 Liger » est un
+ÉVÉNEMENT RARE (0,13 % des tirages au meilleur run) sur des runs au budget
+TEMPS — la variance inter-runs est énorme (1 972 → 260 → 0 sur trois runs de
+la même config à graines/budgets voisins). La règle de l'étalon B s'applique :
+**N runs par bras, lecture en proportion.**
+
+**La proportion (3 graines × 600 s, bras assaini)** : ≥ 1 Liger dans **2
+graines sur 3** (87 et 437 tirages ; graine 4242 : 0). **Le premier Liger ne
+dépendait pas de la récompense sur-ajustée** — la percée tient sur l'échelle
+propre, et le 0/3 de la graine 888 assainie était bien de la variance.
+
+## 7octies. L'audit du fine-tuning de récompense (question opérateur)
+
+« A-t-on récompensé des actions spécifiques au problème Lunalight (comme
+bannir) ? » — **Oui, une fois, explicitement : le barreau @BANNIE**, ajouté
+parce que « Wolf et Masquerade bannissent » — une récompense calquée sur la
+SURFACE de la solution connue, et elle s'est fait Goodharter en deux runs
+(Silver). Taxonomie complète : production/quota/retour = propres (conditionnés
+au BUT par construction, ce qui est la définition de la sérialisation) ;
+départs de réserve = défendable (ressource irréversible du jeu) ; observable
+« cimetière » et classes d'habilitants = glissements moyens (forme générique,
+sélection collée à l'étalon) ; @BANNIE = le piège, retiré. Zéro littéral de
+carte dans le code (vérifié au grep) ; la sonde Synchron montre que la garde
+REFUSE de s'armer hors couverture au lieu d'inventer. Le juge de généralité
+reste le troisième deck.
+
 ## 8. Ce qui reste — UNE extraction, et elle est doublement payante
 
 1. **Extraire le compte de matériaux des procédures Xyz/Lien** (l'argument de
