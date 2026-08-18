@@ -90,7 +90,7 @@ Write-Output "    minage en ligne d'entrainement : EXIT=$LASTEXITCODE"
     --target "90590304@DEF" --max-decisions 700 `
     --resolve 4731783 --resolve 2344618 --resolve 47705572 `
     --summon-min "54701958:3" `
-    --options-online 12 --qhat 6 --archive-spread `
+    --options-online 12 --qhat 6 `
     --solve-ms 40000 --seed $Seed --finisher levin --archive-k 24 `
     --outdir s24_pgo_train6 *> s24_pgo_train6.log
 Write-Output "    bandit Q^ d'entrainement : EXIT=$LASTEXITCODE"
