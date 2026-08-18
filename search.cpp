@@ -1549,9 +1549,21 @@ bool Search::GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,
 	uint32_t common = CommonCodes(here.codes, target.codes);
 	// Crete conditionnee aux resolutions completes : jusqu'ou montent les
 	// lignes qui ont fait TOUS les rips ?
-	if(resolve_total && ResolveProgress(resolved) >= resolve_total &&
+	const uint32_t rp_here = resolve_total ? ResolveProgress(resolved) : 0;
+	if(resolve_total && rp_here >= resolve_total &&
 	   common > stats.best_overlap_ripped)
 		stats.best_overlap_ripped = common;
+	// La meilleure ligne JOINTE (s23) : max lexicographique (rips, board).
+	// Copie rare (au plus quelques ameliorations par recherche) — c'est le
+	// chemin qui se reinjecte par --approach a la session suivante.
+	if(rp_here &&
+	   (rp_here > stats.best_joint_rp ||
+		(rp_here == stats.best_joint_rp &&
+		 common > stats.best_joint_overlap))) {
+		stats.best_joint_rp = rp_here;
+		stats.best_joint_overlap = common;
+		stats.best_joint_path = path;
+	}
 	if(common > stats.best_overlap) {
 		stats.best_overlap = common;
 		stats.best_board = here.codes;

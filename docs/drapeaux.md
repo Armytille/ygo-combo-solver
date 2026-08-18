@@ -1,4 +1,12 @@
-# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22)
+# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22, 23)
+
+> **s23** : `--resolve-legacy` — **TÉMOIN d'A/B**. Rejoue le câblage s22quater
+> des résolutions (crédit post-résolution seulement) à la place de la
+> compilation dans le bilan (défaut s23 : chaque `--resolve`/`--summon-min`
+> pose UNE demande de présence @DISPO — le but se COMPILE, il ne se récompense
+> pas ; garde d'asymétrie si aucun producteur lisible). Vie : ligne
+> « RESOLUTIONS -> BILAN » avec le câblage actif. À retirer dès que l'A/B en
+> proportion a tranché.
 
 > **ÉTAT AU TERME DE LA SESSION 22 : +2.**
 >

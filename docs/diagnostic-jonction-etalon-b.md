@@ -168,3 +168,39 @@ serial_from_balance` — l'échelle vient du seul LP board) ; `search.cpp:1804`
 rippées : top-3 par score, reculs {0,20,40}) ; `search.cpp:3898`
 (ReenterMaybe : tournoi de 2 sur le score, sp_eff domine — 3 barreaux de rip
 contre ~40 de board).*
+
+---
+
+## 8. LE CHANTIER EST FAIT (s23, commit `8ca29c0`) — et le contrôle mesure
+
+Implémenté tel que §7 : chaque `--resolve`/`--summon-min` pose UNE demande de
+présence `@DISPO` dans le bilan (jamais N — admissibilité), garde d'asymétrie
+(sans producteur lisible : non posée, nommée), témoin `--resolve-legacy` ;
+reculs des racines rippées dérivés de la longueur du chemin (0, L/12, L/6,
+L/3) + la cellule la plus rippée toujours racine.
+
+**Juges gratuits (tous passés)** : banc B + resolve → h(départ)=8 (fini),
+x* tire « choisir Omega/Trishula @DISPO », barreaux MI-LIGNE aux réponses 154
+(Trishula) et 210 (Omega) — où la référence les joue ; théorème 2 : 0 chute
+> 1 ; h final=1 et 22 états h=∞ (Dis Pater@TERRAIN, décisions 243-248)
+PRÉEXISTENT — témoin sans `--resolve` identique : lacune de modèle héritée,
+pas un effet du chantier. `--resolve-legacy` → h=6, s22quater à l'identique.
+Santé et banc A : inchangés.
+
+**Contrôle (600 s + 150 s, graine 8305444233615674939, `s23_ctrl_600.log`)**,
+contre le run diagnostic (20 min, même graine) :
+
+| jauge | diagnostic (s22quater, 20 min) | contrôle (s23, 600 s) |
+|---|---|---|
+| échelle au départ | h=6, 18 sous-buts (0 rip) | **h=8, 23 sous-buts (Omega/Trishula @DISPO+@TERRAIN)** |
+| Omega, 1ʳᵉ invocation (phase libre) | décision 240,5 (spasme terminal) | **185,7 — mi-ligne** |
+| rips ≥2 au finisseur (A2, continuations) | **0 partout** (16 workers) | **~700 tirages** (7 workers : 96, 23, 52, 152, 41, 102, 230) |
+| Omega×2 (détour) aux racines du finisseur | 0 | **80 tirages** |
+| reculs des racines rippées | {0,20,40} — 200 k tirages à recul 0 pour 0 rip | {0,19,38,77} dérivés — le détour vit aux reculs 19-77 |
+| ≥3 / crête jointe | 0 / 0-6 | 0 / 0-6 — **le dernier bloc (Omega×2 ∧ Trishula) reste dû** |
+
+Lecture : le mécanisme fait exactement ce que le diagnostic demandait — les
+rips ont quitté le spasme terminal, le détour est un phénomène de mécanisme
+(finisseur) et non plus d'accident (46/10⁶). La conjonction complète ≥3 n'est
+pas encore franchie à 600 s ; le run livrable (20 min, même graine) est la
+mesure suivante.

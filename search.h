@@ -3199,6 +3199,15 @@ struct SearchStats {
 	// sont probablement incompatibles en RESSOURCES — question de jeu (ou de
 	// relaxation arithmetique a prouver), plus de recherche.
 	uint32_t best_overlap_ripped = 0;
+	// LA MEILLEURE LIGNE JOINTE (s23) : le chemin du max lexicographique
+	// (resolutions faites, cartes cibles posees). La crete `best_overlap_ripped`
+	// n'etait qu'un COMPTEUR : les lignes qui franchissaient le verrou mouraient
+	// avec le run (47 tirages a 3 rips du run s23_USER_B, aucun conserve). Le
+	// chemin s'ecrit en fin de run (best_joint_*.yrp) et se reinjecte par
+	// --approach — l'instrument d'isolation s21 (conversion 3/3 mesuree quand
+	// la mecanique est proche). Ne vit que sous --resolve (resolve_total > 0).
+	uint32_t best_joint_rp = 0, best_joint_overlap = 0;
+	std::vector<std::vector<uint8_t>> best_joint_path;
 	// SONDE DE REPETITION (--probe-repeat) : une entree par carte --summon-min.
 	RepeatProbe rep[4];
 	double ms = 0;

@@ -7828,6 +7828,26 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// tous les codes y sont.
 	std::vector<std::vector<uint8_t>> best_path;
 	std::vector<QueriedCard> best_mzone, best_szone;
+	// La meilleure ligne JOINTE (s23) : max lexicographique (rips, board),
+	// toutes passes confondues. Ecrite en fin de run (best_joint_*.yrp) pour
+	// etre reinjectee par --approach — les lignes a rips complets mouraient
+	// avec le run (47 tirages a 3 rips du run s23_USER_B, aucun conserve).
+	uint32_t best_joint_rp = 0, best_joint_overlap = 0;
+	std::vector<std::vector<uint8_t>> best_joint_path;
+	auto merge_joint = [&](const SearchStats& st,
+						   const std::vector<std::vector<uint8_t>>& pre) {
+		if(st.best_joint_rp &&
+		   (st.best_joint_rp > best_joint_rp ||
+			(st.best_joint_rp == best_joint_rp &&
+			 st.best_joint_overlap > best_joint_overlap))) {
+			best_joint_rp = st.best_joint_rp;
+			best_joint_overlap = st.best_joint_overlap;
+			best_joint_path = pre;
+			best_joint_path.insert(best_joint_path.end(),
+								   st.best_joint_path.begin(),
+								   st.best_joint_path.end());
+		}
+	};
 	// Budget GLOBAL : les trois passes se partagent solve_ms, elles ne
 	// l'empilent pas — un --solve-ms de 600 s doit durer ~600 s.
 	double spent = 0;
@@ -7899,6 +7919,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 					best_overlap = (std::max)(best_overlap, st.best_overlap);
 					best_monsters = (std::max)(best_monsters, st.best_monsters);
+					merge_joint(st, {});
 					for(const auto& x : s.Solutions())
 						sols.push_back(x);
 				} else {
@@ -8301,6 +8322,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 					best_overlap = (std::max)(best_overlap, s.Stats().best_overlap);
 					best_monsters = (std::max)(best_monsters, s.Stats().best_monsters);
+					merge_joint(s.Stats(), {});
 				} else {
 					WorkerAbort("duel (tirages NRPA)", err);
 				}
@@ -9599,6 +9621,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												st.best_path.begin(),
 												st.best_path.end());
 										}
+										// La ligne jointe aussi — seulement
+										// depuis le duel de DEPART (un prefixe
+										// d'approche ne se rejoue pas depuis
+										// le gabarit).
+										if(R.a < 0)
+											merge_joint(st, R.pre);
 									}
 								}
 							} else {
@@ -9795,6 +9823,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												 st.best_path.begin(),
 												 st.best_path.end());
 							}
+							merge_joint(st, roots[i].pre);
 						}
 						fa.Pop();
 					} else {
@@ -10032,6 +10061,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 					best_overlap = (std::max)(best_overlap, s.Stats().best_overlap);
 					best_monsters = (std::max)(best_monsters, s.Stats().best_monsters);
+					merge_joint(s.Stats(), {});
 				} else {
 					std::lock_guard<std::mutex> lock(merge);
 					std::printf("  !! duel de depart non initialisable : %s\n",
@@ -10130,6 +10160,29 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				std::printf("\n  meilleure approche ecrite : %s (%zu decisions, "
 							"PAS une solution)\n", apath.c_str(),
 							best_path.size());
+			else
+				std::printf("  !! %s\n", werr.c_str());
+		}
+		// La meilleure ligne JOINTE (s23) : rips d'abord, board ensuite.
+		// Reinjectable par --approach (l'instrument d'isolation s21 : la
+		// mecanique convertit quand elle est proche, 3/3 mesure) — c'est le
+		// pont entre « des lignes a rips complets » et « un board depuis
+		// elles », que les compteurs seuls laissaient mourir avec le run.
+		if(best_joint_rp && !best_joint_path.empty()) {
+			std::error_code ec;
+			std::filesystem::create_directories(opt.outdir, ec);
+			char name[64];
+			std::snprintf(name, sizeof(name), "best_joint_%ur_%uof%zu.yrp",
+						  best_joint_rp, best_joint_overlap,
+						  target.codes.size());
+			std::string jpath = opt.outdir + "/" + name;
+			std::string werr;
+			if(WriteYrp1(jpath, start_yrp, best_joint_path, werr))
+				std::printf("  meilleure ligne JOINTE ecrite : %s (%u rip(s), "
+							"%u/%zu au board, %zu decisions, PAS une "
+							"solution)\n",
+							jpath.c_str(), best_joint_rp, best_joint_overlap,
+							target.codes.size(), best_joint_path.size());
 			else
 				std::printf("  !! %s\n", werr.c_str());
 		}
