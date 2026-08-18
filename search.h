@@ -2130,6 +2130,15 @@ struct SearchConfig {
 	// et le tournoi travaillent inchanges sur l'echelle raffinee. UN niveau
 	// pour commencer, mesure. 0 = eteint (drapeau le temps de la mesure).
 	uint32_t refine_after = 0;
+	// LES QUOTAS DU CHEMIN DANS LE LP (s24, chantier 4 — red-black). Au
+	// raffinement, les usages observes des hotes a quota (quota_uses, la meme
+	// comptabilite que la cle de cellule) entrent dans les capacites du LP :
+	// h et la sous-echelle deviennent honnetes vis-a-vis de ce que le chemin
+	// a DEJA depense. Ne mord qu'a RefineLadderHere — un LP infaisable la-bas
+	// renonce au raffinement, il ne coupe aucune ligne (mode d'echec doux,
+	// voulu tant que le juge de la marche theoreme-2 avec quotas fait foi).
+	// Faux par defaut (temoin = l'historique a l'octet).
+	bool quota_h = false;
 	// Le modele de bilan (racine du LP), prete par main.cpp — nul sinon.
 	const class BalanceModel* balance = nullptr;
 	// Nouveaute stricte : seul un fait jamais vu compte (cf. NoveltyTable).
@@ -3340,6 +3349,16 @@ public:
 	const std::vector<Solution>& Solutions() const { return solutions; }
 	// Archive Go-Explore collectee pendant la recherche (cfg.archive_k > 0).
 	const std::vector<ArchiveEntry>& Archive() const { return archive; }
+	// LE SEMIS D'ARCHIVE (s24, Go-Explore complet — --carry). Les cellules
+	// d'un round precedent re-entrent AVANT le premier tirage : le retour au
+	// barreau repart de la frontiere d'hier au lieu de la reconstruire.
+	// PRECONDITION : les chemins des entrees doivent etre rejouables depuis
+	// LA RACINE de cette recherche (meme gabarit — vrai entre rounds d'une
+	// meme commande, JAMAIS pour un finisseur enracine sur un prefixe : ne
+	// semer que les recherches de la phase tirages). Un chemin qui ne rejoue
+	// pas est compte par reenter_fail, pas silencieux. Rend le nombre
+	// d'entrees semees (plafond cfg.archive_k, meilleures d'abord).
+	size_t SeedArchive(const std::vector<ArchiveEntry>& seed);
 	// Politique apprise par RunNrpa, exportee en fin de run — elle guidait
 	// les tirages, elle guide ensuite le finisseur (RunLevin).
 	const NrpaPolicy& LearnedPolicy() const { return final_policy; }

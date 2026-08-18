@@ -1358,6 +1358,27 @@ struct Options {
 	// s22quater : credit post-resolution seulement). Un drapeau le temps d'une
 	// mesure — le cablage actif s'imprime dans tous les cas.
 	bool resolve_legacy = false;
+	// LES QUOTAS DU CHEMIN DANS LE LP (s24, chantier 4 — relaxation partielle
+	// red-black, Katz-Hoffmann-Domshlak) : au raffinement, les usages
+	// observes des hotes a quota entrent dans les capacites du LP — h et la
+	// sous-echelle deviennent honnetes vis-a-vis de ce que le chemin a deja
+	// depense. Arme aussi la colonne h_quota de la marche du theoreme 2 (le
+	// juge mandate : 0 etat infaisable NOUVEAU le long de la reference).
+	// Faux par defaut le temps de la mesure.
+	bool quota_h = false;
+	// GO-EXPLORE COMPLET, premiere moitie (s24) : les archives des recherches
+	// du FINISSEUR (A1/A2/phase 2) entrent dans l'archive globale, chemins
+	// re-enracines au depart. Jusqu'ici elles MOURAIENT avec leur phase — la
+	// litterature (Go-Explore : « les decouvertes de chaque phase
+	// renourrissent l'archive ») et la mesure (les lignes jointes naissent au
+	// finisseur) disent la meme chose. Faux par defaut le temps de la mesure.
+	bool archive_fin = false;
+	// GO-EXPLORE COMPLET, seconde moitie (s24) : sous --rounds, l'archive
+	// globale et la politique fusionnee PERSISTENT d'un round a l'autre, et
+	// les workers de tirages du round suivant sont SEMES avec les cellules
+	// portees. Sans lui, chaque round repart d'une archive vide et seule la
+	// ligne jointe transite. Faux par defaut le temps de la mesure.
+	bool carry = false;
 	// DISCIPLINE (s22ter, demande operateur) : ne jamais proposer une
 	// NEGATION du joueur sur son propre maillon de chaine (Crystal Wing,
 	// Zalen, Silver Hound...). Famille de --no-activate/--no-chain — une
@@ -2140,6 +2161,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--operators",        &Options::operators },
 				{ "--op-recipes",       &Options::op_recipes },
 				{ "--quota-legacy",     &Options::quota_legacy },
+				{ "--quota-h",          &Options::quota_h },
+				{ "--archive-fin",      &Options::archive_fin },
+				{ "--carry",            &Options::carry },
 				{ "--resolve-legacy",   &Options::resolve_legacy },
 				{ "--no-self-negate",   &Options::no_self_negate },
 				{ "--mp1-only",         &Options::mp1_only },
@@ -3514,8 +3538,13 @@ void ReportDirty(const LineResult& r, const Arena& arena, double ms_per_decision
 
 // Avance le duel d'exactement `n` decisions a partir de la reponse `from`.
 // Renvoie le nombre de decisions reellement consommees.
+// `chain_codes` (s24, chantier 4) : recoit le code BRUT de chaque activation
+// (MSG_CHAINING) rencontree — la meme observation que quota_uses dans la
+// recherche, pour que la marche du theoreme 2 compte les quotas du chemin
+// avec la comptabilite du run.
 size_t Advance(Duel& duel, const Replay& yrp, size_t from, size_t n,
-			   uint32_t* actions = nullptr) {
+			   uint32_t* actions = nullptr,
+			   std::vector<uint32_t>* chain_codes = nullptr) {
 	size_t used = 0;
 	while(used < n) {
 		int status = duel.Process();
@@ -3523,6 +3552,11 @@ size_t Advance(Duel& duel, const Replay& yrp, size_t from, size_t n,
 			if(actions && (m.type == MSG_SUMMONING || m.type == MSG_SPSUMMONING ||
 						   m.type == MSG_FLIPSUMMONING || m.type == MSG_CHAINING))
 				++*actions;
+			if(chain_codes && m.type == MSG_CHAINING && m.size >= 4) {
+				uint32_t cc = 0;
+				std::memcpy(&cc, m.data, 4);
+				chain_codes->push_back(cc);
+			}
 		}
 		if(status == OCG_DUEL_STATUS_AWAITING) {
 			if(from + used >= yrp.responses.size())
@@ -3714,6 +3748,10 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	// Retour au barreau (s21). Lu sous garde de serial_reqs (search.cpp) :
 	// le cabler sans echelle est sur et inerte — et ReportMechanisms le DIT.
 	cfg.reenter = static_cast<float>(opt.reenter);
+	// Quotas du chemin dans le LP (s24, chantier 4). Ne mord qu'au
+	// raffinement — sans refine_after ni modele, il est inerte, et
+	// ReportMechanisms le DIT.
+	cfg.quota_h = opt.quota_h;
 }
 
 // LE CONTROLE QUI MANQUAIT, et il est la vraie lecon de 9.28 (f).
@@ -3774,6 +3812,12 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 	if(cfg.refine_after)
 		dep(!cfg.serial_reqs.empty() && cfg.balance != nullptr,
 			"refine-after %u", cfg.refine_after);
+	// Les quotas du chemin (s24) ne mordent QU'AU raffinement : sans lui (ou
+	// sans hotes a quota derives), le drapeau est demande mais inerte.
+	if(cfg.quota_h)
+		dep(cfg.refine_after != 0 && !cfg.serial_reqs.empty() &&
+				cfg.balance != nullptr && !cfg.quota_hosts.empty(),
+			"quota-h");
 
 	std::printf("  MECANISMES [%s] : %s\n", mode,
 				on.empty() ? "aucun (defauts du moteur)" : on.c_str());
@@ -6631,11 +6675,25 @@ struct TransplantOutcome {
 	std::string joint_file;   // vide : rien d'ecrit ce round
 };
 
+// CE QUI PERSISTE ENTRE LES ROUNDS (s24, --carry — Go-Explore complet).
+// L'archive globale (finisseur compris sous --archive-fin) et la politique
+// NRPA fusionnee survivent a l'appel : le round suivant SEME ses workers de
+// tirages avec ces cellules et demarre sa politique de finisseur sur ces
+// poids. Les chemins restent valides d'un round a l'autre parce que le
+// gabarit de depart est LE MEME (meme graine, meme main, meme duel) — la
+// propriete que same_gabarit verifie pour les approches est ici structurelle.
+struct RoundCarry {
+	std::unordered_map<uint64_t, ArchiveEntry> archive;
+	NrpaPolicy policy;
+	unsigned policy_workers = 0;
+};
+
 void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_yrp,
 						const Options& opt, Arena& arena, const LineResult& ref,
 						CardDB& db, ScriptProvider& scripts, uint32_t patience,
 						const LineConstraints& cons,
-						TransplantOutcome* outres = nullptr) {
+						TransplantOutcome* outres = nullptr,
+						RoundCarry* carry = nullptr) {
 	std::printf("\n=== transplantation du combo sur un autre deck ===\n");
 	if(!cons.opp_hand.empty()) {
 		std::printf("  main adverse   : +%zu carte(s) (--opp-hand) :",
@@ -7901,6 +7959,30 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::unordered_map<uint64_t, ArchiveEntry> global_archive;
 	NrpaPolicy merged_policy;
 	unsigned policy_workers = 0;
+	// L'HERITAGE DU ROUND PRECEDENT (s24, --carry). Adopte AVANT toute phase :
+	// le finisseur de ce round lira ces cellules dans ses racines, et les
+	// workers de tirages en seront semes plus bas. La vie est dite — une
+	// archive portee en silence serait indiscernable d'une archive vide.
+	if(carry && opt.carry &&
+	   (!carry->archive.empty() || !carry->policy.empty())) {
+		global_archive = std::move(carry->archive);
+		merged_policy = std::move(carry->policy);
+		policy_workers = carry->policy_workers;
+		std::printf("  ARCHIVE PORTEE (s24, --carry) : %zu cellule(s), "
+					"politique %zu poids (%u worker(s)) reprises du round "
+					"precedent\n",
+					global_archive.size(), merged_policy.size(),
+					policy_workers);
+	}
+	// L'INSTANTANE DE SEMIS (s24, --carry) : les cellules HERITEES, figees
+	// AVANT que les phases de ce round n'ecrivent — la sonde et les workers
+	// de tirages sont semes du round d'HIER, pas du bruit d'aujourd'hui.
+	// Chemins start-rootes par construction (meme gabarit entre rounds) ;
+	// ne JAMAIS semer un finisseur enracine sur un prefixe.
+	std::vector<ArchiveEntry> carry_seed;
+	if(opt.carry)
+		for(const auto& [cell_, e_] : global_archive)
+			carry_seed.push_back(e_);
 	// Borne brulees PARTAGEE entre workers (session 6) : semee par
 	// --burn-limit, resserree par chaque amelioration de chaque phase — un
 	// worker qui trouve 19 coupe chez les quinze autres des la decision
@@ -7912,6 +7994,44 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			auto [it, fresh] = global_archive.try_emplace(e.cell, e);
 			if(!fresh && e.score > it->second.score)
 				it->second = e;
+		}
+	};
+	// GO-EXPLORE COMPLET, la fusion RE-ENRACINEE (s24, --archive-fin). Les
+	// archives des recherches du finisseur sont relatives a LEUR racine (le
+	// prefixe est rejoue avant la construction du Search) : on re-enracine —
+	// chemin = prefixe + chemin, decisions cumulees, et la queue de
+	// profondeur du score re-etalonnee EXACTEMENT (bits bas = ~profondeur ;
+	// les composantes d'ETAT — progres, rips, overlap, brulees — se lisent du
+	// duel et restent justes). Deux approximations CONNUES et SURES : la cle
+	// de cellule et le nibble « quotas frais » datent de la racine du
+	// finisseur (les usages du prefixe leur manquent) — au pire des cellules
+	// EN PLUS (sur-partitionnement, direction sure de s21), jamais un
+	// representant corrompu ; une re-observation par un worker semé reprend
+	// la cle vivante. APPELER SOUS fmx (global_archive n'est pas protegee).
+	size_t fin_cells_new = 0, fin_cells_upd = 0;
+	auto merge_rebased = [&](const std::vector<ArchiveEntry>& a,
+							 const std::vector<std::vector<uint8_t>>& pre) {
+		for(ArchiveEntry e : a) {
+			if(e.path.empty())
+				continue;
+			e.decisions += static_cast<uint32_t>(pre.size());
+			std::vector<std::vector<uint8_t>> full = pre;
+			full.insert(full.end(), e.path.begin(), e.path.end());
+			e.path = std::move(full);
+			const uint64_t tail =
+				0xFFFFFFFFull -
+				(std::min<uint64_t>)(e.decisions, 0xFFFFFF00ull);
+			if(cfg.serial_reqs.empty())
+				e.score = (e.score & ~0xFFFFFFFFull) | tail;
+			else
+				e.score = (e.score & ~0xFFFFFFull) | (tail >> 8);
+			auto [it, fresh] = global_archive.try_emplace(e.cell, e);
+			if(fresh)
+				++fin_cells_new;
+			else if(e.score > it->second.score) {
+				it->second = std::move(e);
+				++fin_cells_upd;
+			}
 		}
 	};
 
@@ -7943,6 +8063,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					pcfg.time_limit_ms = (std::min)(opt.solve_ms / 6.0, 20000.0);
 					pcfg.archive_k = opt.archive_k;
 					Search s(probe, probe_arena, start_yrp, pcfg);
+					// Semis du round precedent (s24, --carry) : la sonde
+					// repart de la frontiere d'hier.
+					if(!carry_seed.empty())
+						std::printf("  semis d'archive (s24, --carry) : %zu "
+									"cellule(s) -> sonde\n",
+									s.SeedArchive(carry_seed));
 					s.RunGuided(target);
 					merge_archive(s.Archive());
 					const SearchStats& st = s.Stats();
@@ -8250,6 +8376,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					wcfg.ctx_max = opt.ctx_max;
 					wcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 					Search s(local, la, start_yrp, wcfg);
+					// Semis du round precedent (s24, --carry) : chaque worker
+					// de tirages repart de la frontiere d'hier — le retour au
+					// barreau re-entre des cellules qu'aucun tirage de CE
+					// round n'a encore atteintes. Vie dite une fois (worker 0).
+					if(!carry_seed.empty()) {
+						const size_t sown = s.SeedArchive(carry_seed);
+						if(id == 0)
+							std::printf("  semis d'archive (s24, --carry) : "
+										"%zu cellule(s) par worker\n", sown);
+					}
 					// Graine distincte par worker : sans cela les seize tirent
 					// exactement la meme sequence de lignes.
 					uint64_t seed = base_seed + id * 0x100000001b3ull;
@@ -9352,8 +9488,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								// La ligne jointe de la conversion LTS aussi
 								// (gabarit verifie) : c'est ICI qu'une
 								// approche a rips complets se referme.
-								if(same_gabarit(ap))
+								if(same_gabarit(ap)) {
 									merge_joint(st, pre);
+									// Go-Explore complet (s24) : les cellules
+									// du LTS d'approche entrent dans l'archive
+									// globale, re-enracinees. Meme garde de
+									// gabarit que la ligne jointe.
+									if(opt.archive_fin)
+										merge_rebased(fs.Archive(), pre);
+								}
 							}
 							fa.Pop();
 						} else {
@@ -9669,8 +9812,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 										// La ligne jointe aussi — depuis le duel
 										// de DEPART, ou depuis une approche au
 										// MEME gabarit (verifie, pas suppose).
+										// Et les cellules de ces tirages
+										// enracines (s24, --archive-fin) :
+										// c'est la phase qui produit les
+										// lignes a rips, exactement celles que
+										// l'archive n'a jamais vues.
 										if(R.a < 0) {
 											merge_joint(st, R.pre);
+											if(opt.archive_fin)
+												merge_rebased(fs.Archive(),
+															  R.pre);
 										} else {
 											ApproachSols& JAR = approach_runs
 												[static_cast<size_t>(R.a)];
@@ -9678,8 +9829,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												JAR.holder->IsStreamed()
 													? JAR.holder->Embedded()
 													: JAR.holder.get();
-											if(same_gabarit(asrc))
+											if(same_gabarit(asrc)) {
 												merge_joint(st, R.pre);
+												if(opt.archive_fin)
+													merge_rebased(fs.Archive(),
+																  R.pre);
+											}
 										}
 									}
 								}
@@ -9878,6 +10033,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												 st.best_path.end());
 							}
 							merge_joint(st, roots[i].pre);
+							// Go-Explore complet (s24) : duel de depart —
+							// re-enracinement direct, aucun gabarit a verifier.
+							if(opt.archive_fin)
+								merge_rebased(fs.Archive(), roots[i].pre);
 						}
 						fa.Pop();
 					} else {
@@ -9891,6 +10050,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		for(auto& t : pool)
 			t.join();
 		prof::PrintPhase("finisseur duel de depart");
+		// La vie de la fusion (s24, --archive-fin) : TOUJOURS dite quand le
+		// mecanisme est arme, y compris « +0 » — un finisseur qui n'apporte
+		// aucune cellule est une information (archives vides ? gabarit
+		// refuse ?), pas un silence.
+		if(opt.archive_fin)
+			std::printf("  ARCHIVE DU FINISSEUR (s24) : +%zu cellule(s) "
+						"nouvelle(s), %zu amelioree(s) — archive globale %zu\n",
+						fin_cells_new, fin_cells_upd, global_archive.size());
 		// SONDE DE REPETITION cote FINISSEUR : les tirages ENRACINES sont
 		// invisibles dans la table de la phase tirages, et c'est justement la
 		// que la session 14 avait trouve sa 2e Liger (9.21 (d)). Sans cette
@@ -10251,6 +10418,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			outres->best_overlap = best_overlap;
 			outres->joint_rp = best_joint_rp;
 			outres->joint_overlap = best_joint_overlap;
+		}
+		// Le TRANSPORT (s24, --carry) : tout ce que ce round a appris —
+		// archive globale (finisseur compris sous --archive-fin) et politique
+		// fusionnee — survit a l'appel pour le round suivant.
+		if(carry && opt.carry) {
+			carry->archive = std::move(global_archive);
+			carry->policy = std::move(merged_policy);
+			carry->policy_workers = policy_workers;
 		}
 		return;
 	}
@@ -10993,12 +11168,43 @@ int main(int argc, char** argv) {
 						// un compte seul ne dit pas laquelle. On garde les
 						// premieres occurrences avec leurs lignes de phase 1.
 						std::vector<std::pair<size_t, std::string>> inf_diag;
+						// LA MARCHE AVEC QUOTAS (s24, chantier 4) : le JUGE
+						// MANDATE du red-black. La meme marche, le meme LP, plus
+						// les usages MSG_CHAINING accumules le long de la ligne
+						// (meme derivation d'hotes et meme plafond de 12 que le
+						// cablage du run). La ligne de reference ABOUTIT : tout
+						// etat qu'elle traverse est vivant, donc tout « h_quota
+						// = INFINI » sur un etat ou h etait fini est une
+						// SUR-CONTRAINTE de l'agregat — 0 nouveau exige avant
+						// de promouvoir le mecanisme au-dela du raffinement.
+						std::vector<uint32_t> qwalk_hosts, qwalk_spent;
+						std::vector<uint32_t> qwalk_chain;
+						std::vector<uint32_t> qunb_union, qover_union;
+						size_t infeasible_q = 0, infeasible_new = 0;
+						double first_hq = -1.0, last_hq = -1.0;
+						uint32_t qmax_applied = 0;
+						std::vector<std::pair<size_t, std::string>> infq_diag;
+						if(opt.quota_h && r0.feasible) {
+							qwalk_hosts = bm.QuotaHostsFrom(r0, nullptr);
+							if(qwalk_hosts.size() > 12)
+								qwalk_hosts.resize(12);
+							qwalk_spent.assign(qwalk_hosts.size(), 0u);
+						}
 						while(at < yrp->responses.size()) {
-							const size_t used = Advance(duel, *yrp, at, 1);
+							qwalk_chain.clear();
+							const size_t used = Advance(
+								duel, *yrp, at, 1, nullptr,
+								qwalk_hosts.empty() ? nullptr : &qwalk_chain);
 							if(!used)
 								break;
 							at += used;
 							++steps;
+							for(uint32_t raw : qwalk_chain) {
+								const uint32_t cq = db.Canonical(raw);
+								for(size_t qi = 0; qi < qwalk_hosts.size(); ++qi)
+									if(qwalk_hosts[qi] == cq)
+										++qwalk_spent[qi];
+							}
 							snap();
 							if(!needs.empty()) {
 								const auto [pk, sv] = served_now();
@@ -11018,6 +11224,55 @@ int main(int argc, char** argv) {
 							}
 							LPResult lrx;
 							const double h = bm.Solve(res, ava, fld, &lrx);
+							// La marche jumelle avec quotas (s24) : memes
+							// marquages, plus les capacites du chemin. Elle se
+							// compare a `h` DECISION PAR DECISION — un
+							// infaisable la ou h etait fini est un NOUVEAU, et
+							// c'est lui que le juge compte.
+							if(!qwalk_hosts.empty()) {
+								std::vector<std::pair<uint32_t, uint32_t>> qsp;
+								for(size_t qi = 0; qi < qwalk_hosts.size(); ++qi)
+									if(qwalk_spent[qi])
+										qsp.emplace_back(qwalk_hosts[qi],
+														 qwalk_spent[qi]);
+								LPResult lqx;
+								const double hq =
+									bm.Solve(res, ava, fld, &lqx, qsp);
+								qmax_applied = (std::max)(qmax_applied,
+														  lqx.quota_applied);
+								auto once = [](std::vector<uint32_t>& v,
+											   uint32_t c) {
+									if(std::find(v.begin(), v.end(), c) ==
+									   v.end())
+										v.push_back(c);
+								};
+								for(uint32_t sk : lqx.quota_unbounded_hosts)
+									once(qunb_union, sk);
+								for(uint32_t sk : lqx.quota_overrun_hosts)
+									once(qover_union, sk);
+								if(hq < 0) {
+									++infeasible_q;
+									if(h >= 0) {
+										++infeasible_new;
+										if(infq_diag.size() < 6) {
+											std::string rows;
+											for(const std::string& lb :
+												lqx.infeasible_rows) {
+												if(!rows.empty())
+													rows += " ; ";
+												rows += lb;
+											}
+											if(rows.empty())
+												rows = "(solveur en defaut)";
+											infq_diag.emplace_back(steps, rows);
+										}
+									}
+								} else {
+									if(first_hq < 0)
+										first_hq = hq;
+									last_hq = hq;
+								}
+							}
 							if(h < 0) {
 								++infeasible;
 								if(inf_diag.size() < 6) {
@@ -11095,6 +11350,50 @@ int main(int argc, char** argv) {
 										"ABOUTIT : sur-contrainte\n",
 										infeasible);
 							for(const auto& [st, rows] : inf_diag)
+								std::printf("      decision %zu : %s\n", st,
+											rows.c_str());
+						}
+						// --- le verdict de la marche avec quotas (s24) --------
+						if(!qwalk_hosts.empty()) {
+							std::printf("\n  --- la meme marche AVEC QUOTAS DU "
+										"CHEMIN (--quota-h, s24) ---\n");
+							std::printf("  hotes suivis : %zu ; lignes de "
+										"quota posees (max sur la ligne) : "
+										"%u\n",
+										qwalk_hosts.size(), qmax_applied);
+							// La raison de chaque hote ignore : `sans borne`
+							// appelle l'extraction des bornes, `hors budget`
+							// appelle la couverture du modele — les confondre
+							// enverrait le correctif au mauvais endroit.
+							auto qprint = [&db](const char* tag,
+												const std::vector<uint32_t>& v) {
+								if(v.empty())
+									return;
+								std::string sk;
+								for(uint32_t c : v)
+									sk += db.Name(c) + " ; ";
+								std::printf("  ignores (%s) : %s\n", tag,
+											sk.c_str());
+							};
+							qprint("effet SANS BORNE declaree — extraction",
+								   qunb_union);
+							qprint("observations > budget declare — "
+								   "couverture", qover_union);
+							std::printf("  h_quota : %.0f -> %.0f ; "
+										"infaisables %zu (temoin sans quotas "
+										"%zu)\n",
+										first_hq, last_hq, infeasible_q,
+										infeasible);
+							std::printf("  etats infaisables NOUVEAUX : %zu  "
+										"%s\n", infeasible_new,
+										infeasible_new
+											? "<<< SUR-CONTRAINTE red-black : "
+											  "l'agregat ment sur cette ligne, "
+											  "ne pas promouvoir"
+											: "(JUGE : 0 nouveau — l'agregat "
+											  "est sur le long de la "
+											  "reference)");
+							for(const auto& [st, rows] : infq_diag)
 								std::printf("      decision %zu : %s\n", st,
 											rows.c_str());
 						}
@@ -11436,24 +11735,33 @@ int main(int argc, char** argv) {
 					const double total_ms = opt.solve_ms;
 					const auto tstart = Clock::now();
 					const uint64_t nrounds = (std::max<uint64_t>)(1, opt.rounds);
+					// Le transport inter-rounds (s24, --carry) : archive et
+					// politique survivent aux appels — Go-Explore complet.
+					RoundCarry rcarry;
 					for(uint64_t round = 0; round < nrounds; ++round) {
 						ropt.solve_ms = (std::max)(0.0,
 							(total_ms - MsSince(tstart)) /
 								double(nrounds - round));
-						if(nrounds > 1)
+						if(nrounds > 1) {
+							char carried[64] = "";
+							if(opt.carry && !rcarry.archive.empty())
+								std::snprintf(carried, sizeof(carried),
+											  ", archive portee %zu cellule(s)",
+											  rcarry.archive.size());
 							std::printf("\n===== ROUND %llu/%llu — budget "
-										"%.0f s%s =====\n",
+										"%.0f s%s%s =====\n",
 										(unsigned long long)(round + 1),
 										(unsigned long long)nrounds,
 										ropt.solve_ms / 1000.0,
 										ropt.approach_files.size() >
 												opt.approach_files.size()
 											? ", ligne jointe reinjectee"
-											: "");
+											: "", carried);
+						}
 						TransplantOutcome tout;
 						RunTransplantSolve(duel, *yrp, synth, ropt, *arena_ptr,
 										   first, db, scripts, patience, cons,
-										   &tout);
+										   &tout, &rcarry);
 						if(tout.solutions) {
 							if(nrounds > 1)
 								std::printf("\n===== ROUND %llu/%llu : %zu "
@@ -11466,7 +11774,12 @@ int main(int argc, char** argv) {
 						}
 						if(round + 1 >= nrounds)
 							break;
-						if(tout.joint_file.empty()) {
+						// Sans ligne jointe NI archive portee, le round
+						// suivant serait un simple re-run : on s'arrete. Sous
+						// --carry, l'archive portee est une reinjection a
+						// part entiere — la boucle continue sans ligne.
+						if(tout.joint_file.empty() &&
+						   !(opt.carry && !rcarry.archive.empty())) {
 							std::printf("\n===== ROUND %llu/%llu : aucune "
 										"ligne jointe ecrite — la boucle "
 										"s'arrete =====\n",
@@ -11475,7 +11788,8 @@ int main(int argc, char** argv) {
 							break;
 						}
 						ropt.approach_files = opt.approach_files;
-						ropt.approach_files.push_back(tout.joint_file);
+						if(!tout.joint_file.empty())
+							ropt.approach_files.push_back(tout.joint_file);
 					}
 				} else if(!opt.deck_file.empty()) {
 					// --deck demande mais depart inconstructible : ne pas

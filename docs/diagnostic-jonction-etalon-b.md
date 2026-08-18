@@ -268,3 +268,63 @@ l'élagage ; (2) faire entrer les lignes du finisseur dans l'ARCHIVE du round
 suivant (aujourd'hui seule la ligne jointe transite — Go-Explore garde tout) ;
 (3) l'A/B en proportion (N graines) des mécanismes s23 : demandes @DISPO
 (`--resolve-legacy` témoin), `--refine-after`, `--rounds`.
+
+## 11. Session 24 : les restes (1) et (2) sont FAITS, et un défaut de `--rounds` trouvé par leur fumée
+
+**(1) Chantier 4 — `--quota-h` (relaxation partielle red-black, la direction
+publiée §2c de l'état de l'art).** Les usages observés des hôtes à quota
+(`quota_uses`, les MÊMES compteurs MSG_CHAINING que la clé de cellule) entrent
+dans les capacités du LP : une ligne agrégée par hôte, Σx_t ≤ (Σu_t) − s sur
+ses transitions CHAÎNANTES. Deux découvertes de construction :
+
+- l'agrégat naïf sur TOUTES les transitions de l'hôte est inerte partout —
+  chaque monstre du deck porte sa transition `invoquer` (invocation inhérente,
+  non bornée, hôte = lui-même) ; or une invocation inhérente ne produit jamais
+  de MSG_CHAINING sous le code de l'hôte, et `choisir` est de la tenue de
+  livres. Les exclure est prouvé par construction, et élargir E est la
+  direction sûre (budget plus large = ligne plus faible) ;
+- les deux gardes d'asymétrie sont NOMMÉES avec leur correctif : « effet sans
+  borne déclarée » → travail d'extraction ; « observations > budget déclaré »
+  → travail de couverture (étalon A : Masquerade et Tiger refusés par cette
+  garde — la liste de travail est imprimée).
+
+**Le juge mandaté est passé** (marche théorème-2 AVEC quotas, banc gratuit) :
+étalon B — 2 lignes posées le long de la référence, 0 état infaisable NOUVEAU
+(les 22 hérités de Dis Pater@TERRAIN inchangés), h_quota 8→1 ; étalon A —
+7 lignes posées, 0 nouveau, h_quota 12→0 (le but reste reconnu). Le câblage de
+recherche ne mord qu'à `RefineLadderHere` (échec doux : LP infaisable à la
+cellule = pas de raffinement, jamais une coupe) ; l'élagage événementiel reste
+un chantier ultérieur, sous le même juge.
+
+**(2) Go-Explore complet — `--archive-fin` + `--carry`.** Les archives des
+trois familles de recherches du finisseur fusionnent dans `global_archive`,
+chemins ré-enracinés (préfixe + chemin, décisions cumulées, queue de
+profondeur du score ré-étalonnée exactement ; la clé de cellule et le nibble
+« quotas frais » datent de la racine du finisseur — sur-partitionnement,
+direction sûre). Sous `--rounds`, `RoundCarry` transporte archive + politique
+fusionnée d'un round à l'autre et les workers de tirages sont SEMÉS
+(`SeedArchive`, plafond archive-k ; JAMAIS un finisseur enraciné sur préfixe).
+
+**Le défaut trouvé par la fumée (hérité s23)** : `BalanceModel::Build` ne
+remettait pas l'instance statique à zéro — à tout round ≥ 2 le second Build
+EMPILAIT places/transitions/demandes, le LP devenait infaisable, la
+sérialisation se désarmait et `reenter`/`refine-after`/`quota-h` passaient
+INERTES. La fumée s23 (§10) avait donc des rounds 2-3 amputés : la montée
+2r∧4/6 → 2r∧5/6 venait de la seule ligne réinjectée. Vu UNIQUEMENT par la
+ligne « !! INERTE » de ReportMechanisms — la vie des mécanismes est
+l'instrument qui a payé. Corrigé (reset complet en tête de Build).
+
+**Fumée s24 (UNE commande, 240 s, 3 rounds, tout armé)** : sérialisation armée
+aux trois rounds (h=8, 23 sous-buts) ; archive du finisseur +235/+273/+89
+cellules ; archive portée 870 → 1208 → 1299 ; semis 96 cellules par worker,
+0 échec de rejeu ; **base moyenne de ré-entrée 19,7 → 38,1/38,3 unités** aux
+rounds 2-3 — les workers repartent de la frontière d'hier, ce qui est
+exactement la promesse de Go-Explore ; crête jointe 2r∧4/6 → 2r∧5/6.
+
+Reste nommé : (3) l'A/B en proportion (N graines) de TOUS les mécanismes
+récents — demandes @DISPO, `--refine-after`, `--rounds`, `--quota-h`,
+`--archive-fin`, `--carry` ; le run livrable mono-commande est à relancer avec
+les trois drapeaux s24. Nota : `--refine-after 30000` ne se déclenche pas dans
+des rounds de 80 s (la stagnation n'a pas le temps de s'accumuler) — la vie
+« quotas du chemin : N posé(s) » au raffinement ne se lira que sur les rounds
+longs.

@@ -1957,6 +1957,48 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 		archive_min_score = 0;
 }
 
+// LE SEMIS (s24, Go-Explore complet). Les entrees arrivent TRIEES par
+// l'appelant ou non — on trie ici, meilleures d'abord, et on ne garde que
+// cfg.archive_k : semer au-dela serait evince des la premiere observation.
+// Les scores semes datent du round precedent (meme echelle : meme
+// serial_reqs, meme cible) ; une cellule re-observee ce round reprend le
+// score vivant par le chemin normal d'ArchiveObserve.
+size_t Search::SeedArchive(const std::vector<ArchiveEntry>& seed) {
+	if(!cfg.archive_k || seed.empty())
+		return 0;
+	std::vector<const ArchiveEntry*> order;
+	order.reserve(seed.size());
+	for(const ArchiveEntry& e : seed)
+		if(!e.path.empty())
+			order.push_back(&e);
+	std::sort(order.begin(), order.end(),
+			  [](const ArchiveEntry* a, const ArchiveEntry* b) {
+				  return a->score > b->score;
+			  });
+	if(order.size() > cfg.archive_k)
+		order.resize(cfg.archive_k);
+	size_t added = 0;
+	for(const ArchiveEntry* e : order) {
+		auto it = archive_cells.find(e->cell);
+		if(it != archive_cells.end()) {
+			if(e->score > archive[it->second].score)
+				archive[it->second] = *e;
+			continue;
+		}
+		if(archive.size() >= cfg.archive_k)
+			break;
+		archive_cells.emplace(e->cell, archive.size());
+		archive.push_back(*e);
+		++added;
+	}
+	archive_min_score = ~0ull;
+	for(const ArchiveEntry& e : archive)
+		archive_min_score = (std::min)(archive_min_score, e.score);
+	if(archive.size() < cfg.archive_k)
+		archive_min_score = 0;
+	return added;
+}
+
 bool Search::NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
 						uint32_t& stale) {
 	if(!cfg.novelty_patience)
@@ -4023,11 +4065,22 @@ void Search::RefineLadderHere() {
 			for(uint32_t c : scratch)
 				zfld.push_back(db.Canonical(c));
 	}
+	// LES QUOTAS DU CHEMIN (s24, chantier 4). Les usages accumules par
+	// StepToPrompt jusqu'a cette cellule (rejeu de prefixe compris — c'est le
+	// meme compteur que la cle de cellule) entrent dans les capacites du LP :
+	// la sous-echelle derivee de x* ne peut plus router par un effet que ce
+	// chemin a deja depense. Sous garde de cfg.quota_h (temoin = off).
+	std::vector<std::pair<uint32_t, uint32_t>> spent;
+	if(cfg.quota_h)
+		for(size_t i = 0; i < cfg.quota_hosts.size() && i < 12; ++i)
+			if(quota_uses[i])
+				spent.emplace_back(cfg.quota_hosts[i], quota_uses[i]);
 	LPResult r;
-	const double h2 = cfg.balance->Solve(zres, zava, zfld, &r);
+	const double h2 = cfg.balance->Solve(zres, zava, zfld, &r, spent);
 	// Un LP infaisable ICI serait une cellule morte au sens du theoreme 3 —
 	// on ne raffine pas dessus, et on laisse le compteur de stagnation armer
-	// le prochain retour au sommet.
+	// le prochain retour au sommet. Sous quota_h ce cas inclut « morte AUX
+	// QUOTAS PRES » : renoncer au raffinement est le mode d'echec doux voulu.
 	if(h2 < 0 || !r.feasible) {
 		rollouts_since_gain = 0;
 		return;
@@ -4057,11 +4110,22 @@ void Search::RefineLadderHere() {
 	stats.refine_done = 1;
 	stats.refine_subrungs = refine_reqs.size();
 	stats.refine_gate = refine_gate_sp;
+	// La vie des quotas du chemin (s24) : silencieuse quand le mecanisme est
+	// eteint, TOUJOURS dite quand il est arme — y compris « 0 pose » (un hote
+	// jamais depense a ce barreau est une information, pas un silence).
+	char qh[96] = "";
+	if(cfg.quota_h) {
+		std::snprintf(qh, sizeof(qh),
+					  ", quotas du chemin : %u pose(s), %zu sans-borne, "
+					  "%zu hors-budget",
+					  r.quota_applied, r.quota_unbounded_hosts.size(),
+					  r.quota_overrun_hosts.size());
+	}
 	std::printf("  RAFFINEMENT (s22) : frontiere stagnante (%u tirages sans "
 				"gain, seuil %u) — LP a la cellule h=%.0f, %zu sous-barreau(x) "
-				"poses, porte sp=%u\n",
+				"poses, porte sp=%u%s\n",
 				rollouts_since_gain, cfg.refine_after, h2, refine_reqs.size(),
-				refine_gate_sp);
+				refine_gate_sp, qh);
 }
 
 double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) {

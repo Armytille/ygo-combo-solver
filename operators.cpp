@@ -2248,6 +2248,28 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 						 const std::vector<std::pair<uint32_t, uint32_t>>& goal,
 						 const std::vector<std::pair<uint32_t, uint32_t>>& transient) {
 	db = &cdb;
+	// REMISE A ZERO (s24) : Build est rappele sur la MEME instance a chaque
+	// round de la boucle interne (`g_balance_model` est un statique de
+	// process). Sans ce reset, le second Build EMPILAIT places, transitions
+	// et demandes sur celles du premier : le LP devenait infaisable (« le
+	// bilan matiere ne rend aucun plan »), la serialisation se desarmait, et
+	// reenter/refine-after/quota-h passaient INERTES a tous les rounds >= 2.
+	// Present depuis la s23 (--rounds) ; vu par la ligne « !! INERTE » de la
+	// fumee s24 — la vie des mecanismes est le seul instrument qui l'ait dit.
+	pid.clear();
+	pname.clear();
+	tname.clear();
+	thost.clear();
+	need.clear();
+	col.clear();
+	lp = OperatorLP{};
+	goal_codes.clear();
+	n_rename = 0;
+	n_igniter = 0;
+	{
+		std::lock_guard<std::mutex> lk(sc_mx);
+		sc_cache.clear();
+	}
 	if(goal.empty())
 		return false;
 	auto place = [&](int kind, uint64_t key, int z) -> size_t {
@@ -2736,7 +2758,9 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 double BalanceModel::Solve(const std::vector<uint32_t>& res,
 						   const std::vector<uint32_t>& ava,
 						   const std::vector<uint32_t>& fld,
-						   LPResult* out) const {
+						   LPResult* out,
+						   const std::vector<std::pair<uint32_t, uint32_t>>&
+							   spent) const {
 	std::vector<double> mark(pname.size(), 0.0);
 	auto put = [&](const std::vector<uint32_t>& codes, int z) {
 		for(uint32_t raw : codes) {
@@ -2781,6 +2805,67 @@ double BalanceModel::Solve(const std::vector<uint32_t>& res,
 		row.label = pname[p];
 		inst.rows.push_back(std::move(row));
 	}
+	// LES QUOTAS DU CHEMIN (s24, chantier 4 — relaxation red-black). Chaque
+	// hote observe `s` fois recoit UNE ligne agregee sur TOUTES ses
+	// transitions : Sigma x_t <= (Sigma u_t) - s, encodee en ligne >= a
+	// coefficients -1 (le solveur accepte deja rhs et coefficients de tout
+	// signe). L'agregat est sur en toute attribution des activations aux
+	// effets : Sigma s_t >= s, donc le budget restant reel est <= le notre —
+	// on SOUS-contraint, h reste admissible (regle 9.29 (f)). Les deux gardes
+	// d'asymetrie (effet sans borne ; observation > budget) IGNORENT l'hote
+	// et le NOMMENT dans le resultat : une lacune du modele ne doit jamais
+	// devenir une preuve de mort. Le juge mandate est la marche du theoreme 2
+	// AVEC quotas le long de la ligne de reference : 0 etat infaisable
+	// nouveau exige avant tout usage au-dela du raffinement.
+	uint32_t quota_applied = 0;
+	std::vector<uint32_t> quota_unbounded, quota_overrun;
+	for(const auto& hs : spent) {
+		if(!hs.second)
+			continue;
+		const uint32_t host = db->Canonical(hs.first);
+		double budget = 0.0;
+		bool unbounded = false;
+		std::vector<size_t> ts;
+		for(size_t t = 0; t < lp.n_ops && t < thost.size(); ++t) {
+			if(thost[t] != host)
+				continue;
+			// L'ENSEMBLE E DE L'AGREGAT : toutes les transitions de l'hote
+			// SAUF celles qui, PAR CONSTRUCTION, ne produisent jamais de
+			// MSG_CHAINING sous son code — `invoquer` (l'invocation inherente
+			// du corps lui-meme : MSG_SPSUMMONING, jamais une chaine ; un
+			// igniteur qui chaine est hote de SA transition `igniter`, pas de
+			// celle du corps invoque) et `choisir` (tenue de livres des pools
+			// s22, aucune action de jeu). Tout le reste — `effet`,
+			// `renommer`, `igniter` — RESTE dans E : en cas de doute on
+			// ELARGIT E, ce qui elargit le budget et AFFAIBLIT la ligne
+			// (direction sure). Sans cette exclusion, chaque monstre du deck
+			// portait sa transition `invoquer` non bornee et la garde rendait
+			// le mecanisme inerte partout (mesure : banc B, 0 ligne posee,
+			// 2 hotes ignores « sans borne »).
+			if(tname[t] == "invoquer" || tname[t] == "choisir")
+				continue;
+			ts.push_back(t);
+			if(lp.upper[t] >= OperatorLP::kNoBound * 0.5)
+				unbounded = true;
+			else
+				budget += lp.upper[t];
+		}
+		if(ts.empty() || unbounded) {
+			quota_unbounded.push_back(host);
+			continue;
+		}
+		if(static_cast<double>(hs.second) > budget + 1e-9) {
+			quota_overrun.push_back(host);
+			continue;
+		}
+		OperatorLP::Row row;
+		for(size_t t : ts)
+			row.coef.emplace_back(t, -1.0);
+		row.rhs = -(budget - static_cast<double>(hs.second));
+		row.label = "quota_chemin:" + db->Name(host);
+		inst.rows.push_back(std::move(row));
+		++quota_applied;
+	}
 	// DEUX INFAISABILITES QU'IL NE FAUT PAS CONFONDRE, et les confondre rendrait
 	// le theoreme 3 inutilisable.
 	//
@@ -2804,6 +2889,9 @@ double BalanceModel::Solve(const std::vector<uint32_t>& res,
 						row.label.c_str(), row.rhs);
 	}
 	LPResult r = SolveOperatorLP(inst);
+	r.quota_applied = quota_applied;
+	r.quota_unbounded_hosts = std::move(quota_unbounded);
+	r.quota_overrun_hosts = std::move(quota_overrun);
 	if(out)
 		*out = r;
 	if(!r.feasible || !r.primal_ok || !r.optimal_ok)

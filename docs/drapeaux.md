@@ -1,4 +1,20 @@
-# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22, 23)
+# Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22, 23, 24)
+
+> **s24** : trois ajouts, tous FAUX par défaut (témoin = l'historique à l'octet,
+> vérifié sur bancs A et B).
+>
+> | drapeau | famille | statut |
+> |---|---|---|
+> | `--quota-h` | mécanisme | **chantier 4 — red-black** (Katz-Hoffmann-Domshlak) : les usages observés des hôtes à quota (MSG_CHAINING, mêmes compteurs que la clé de cellule) entrent dans les capacités du LP au RAFFINEMENT — une ligne agrégée par hôte sur ses transitions chaînantes (`invoquer`/`choisir` exclues par construction), gardes nommées « sans borne » (→ extraction) et « hors budget » (→ couverture). Ne mord qu'avec `--refine-after` + modèle armé (ReportMechanisms le dit). **Juge passé** : marche théorème-2 avec quotas — étalon B 2 lignes posées, 0 état infaisable NOUVEAU (22 hérités inchangés) ; étalon A 7 lignes, 0 nouveau, h_quota 12→0. Arme aussi la colonne h_quota du banc. |
+> | `--archive-fin` | mécanisme | **Go-Explore complet (1/2)** : les archives des recherches du finisseur (A1 LTS d'approche — gabarit vérifié —, A2 tirages enracinés, phase 2) fusionnent dans l'archive globale, chemins RÉ-ENRACINÉS (préfixe + chemin, décisions cumulées, queue de profondeur du score ré-étalonnée exactement ; clé/nibble-frais datés de la racine du finisseur = sur-partitionnement, direction sûre). Vie : « ARCHIVE DU FINISSEUR : +N cellules ». Fumée : +235/+273/+89 sur 3 rounds. |
+> | `--carry` | mécanisme | **Go-Explore complet (2/2)** : sous `--rounds`, l'archive globale et la politique fusionnée PERSISTENT entre rounds (`RoundCarry`), et les workers de tirages du round suivant sont SEMÉS (SeedArchive, plafond archive-k, jamais un finisseur enraciné). La boucle continue sans ligne jointe si l'archive porte. Vie : « ARCHIVE PORTÉE », « semis d'archive ». Fumée : base moyenne de ré-entrée 19,7 → 38,1/38,3 unités aux rounds 2-3, 0 échec de rejeu. |
+>
+> **s24, correctif `--rounds`** : `BalanceModel::Build` ne remettait pas
+> l'instance à zéro — au round ≥ 2 le second Build EMPILAIT places/transitions
+> /demandes sur le premier, le LP devenait infaisable, la sérialisation se
+> désarmait et `reenter`/`refine-after`/`quota-h` passaient INERTES (présent
+> depuis la s23 ; vu par la ligne « !! INERTE » de la fumée). Corrigé : reset
+> complet en tête de Build ; la fumée s24 arme l'échelle aux trois rounds.
 
 > **s23** : `--rounds <n>` — **mécanisme** (défaut 1 = historique à l'octet,
 > zéro bannière). La boucle interne (directive opérateur ; forme

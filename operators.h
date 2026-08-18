@@ -400,6 +400,18 @@ struct LPResult {
 	// champ, « h = INFINI » au milieu d'une ligne reelle est muet (s22 : 22
 	// etats infaisables sur l'etalon B, cause invisible).
 	std::vector<std::string> infeasible_rows;
+	// LA VIE DES QUOTAS DU CHEMIN (s24, chantier 4 — red-black). Combien de
+	// lignes de quota ont ete POSEES dans cette instance, et quels hotes la
+	// garde d'asymetrie a IGNORES — avec la RAISON, parce que les deux cas
+	// appellent des correctifs opposes : `unbounded` (l'hote porte un effet
+	// sans borne declaree : l'activation observee peut etre lui, l'agregat
+	// serait un mensonge) se corrige par l'EXTRACTION des bornes ; `overrun`
+	// (observations > budget declare : le modele ne decrit pas cet hote) se
+	// corrige par la couverture. Un mecanisme qui ne dit pas sa vie a deja
+	// coute deux sessions de mesures sur du vide (--assign-bias).
+	uint32_t quota_applied = 0;
+	std::vector<uint32_t> quota_unbounded_hosts;
+	std::vector<uint32_t> quota_overrun_hosts;
 };
 
 LPResult SolveOperatorLP(const OperatorLP& lp);
@@ -436,10 +448,25 @@ public:
 	// `res` (deck+extra), `ava` (main, terrain, cimetiere, bannie) et `fld`
 	// (zone monstre) sont les codes PHYSIQUES presents dans chaque zone a
 	// l'etat courant. Rend h, ou -1 si infaisable (theoreme 3).
+	//
+	// `spent` (s24, chantier 4) : usages OBSERVES des hotes a quota le long du
+	// chemin qui mene a cet etat (code canonique -> activations MSG_CHAINING).
+	// C'est la relaxation partielle RED-BLACK (Katz-Hoffmann-Domshlak) du
+	// bilan : les capacites deviennent celles du CHEMIN, pas du depart. Un
+	// bit d'activation ne dit pas QUEL effet de l'hote a tire — la ligne
+	// posee est donc l'AGREGAT Sigma x_t <= (Sigma u_t) - s sur toutes les
+	// transitions de l'hote, sur en toute attribution (Sigma s_t >= s).
+	// Gardes d'asymetrie, nommees dans LPResult : hote dont UNE transition
+	// est sans borne declaree -> ignore (l'activation observee peut etre
+	// l'effet non borne) ; observation au-dela du budget declare -> ignore
+	// (le modele ne decrit pas cet hote ; appliquer prouverait des morts
+	// fausses).
 	double Solve(const std::vector<uint32_t>& res,
 				 const std::vector<uint32_t>& ava,
 				 const std::vector<uint32_t>& fld,
-				 LPResult* out = nullptr) const;
+				 LPResult* out = nullptr,
+				 const std::vector<std::pair<uint32_t, uint32_t>>& spent =
+					 {}) const;
 	// LES SOUS-BUTS, DERIVES DE x*. Chaque transition qui tire produit des
 	// places : ce sont les etapes que tout plan optimal du programme doit
 	// franchir. C'est la SERIALISATION, calculee et non devinee — et elle porte
