@@ -328,3 +328,30 @@ les trois drapeaux s24. Nota : `--refine-after 30000` ne se déclenche pas dans
 des rounds de 80 s (la stagnation n'a pas le temps de s'accumuler) — la vie
 « quotas du chemin : N posé(s) » au raffinement ne se lira que sur les rounds
 longs.
+
+## 12. Session 24bis — directive « preuves, formes closes, dégraissage » : le verdict
+
+Formes closes (tools/s24_forme_close_conjonction.py, sympy 10/10) :
+S(α,k)=(1+αk)/(1−α) ; minoration (I.b) — le zéro de rips du livrable réfute
+l'explication par la seule masse (155 hits attendus, log₁₀P(0)=−67,5), le
+couplage politique est prouvé nécessaire ; lemme d'affamement (w%N) ;
+m*=√(λ/μ), E[T]*=2/√(λμ) (convexité prouvée).
+
+**A/B en proportion à 180 s (4 graines/bras + bissection)** : le bras MINIMAL
+(`--no-serial`, rien d'autre que disciplines+targets+resolve+garde) est sain
+4/4 (jointes 3r, crête-rip 5/6) ; le bras COMPLET s'effondre 4/4 (phase libre
+1/6, ZÉRO rip). Bissection : la cause est l'échelle+ré-entrée seule ;
+**le défaut est ANCIEN** (s23e le reproduit) — le régime « phase ~112 s,
+niveau NRPA 2 » n'avait jamais été mesuré (le pari des 60 s/run jamais
+balayé, encaissé). La file de travail A2 (lemme d'affamement corrigé) sert
+désormais tous les reculs, mesuré sur les deux approches.
+
+**Le mur restant, LOCALISÉ** : toute ligne rips-complets finit 5/6 en
+manquant Abyss (9753964) — la référence le pose réponse 122, AVANT les rips
+(154-226) ; à recul 150 la recherche retrouve 6/6 mais 0 rip, à recul 60-80
+elle garde 3 rips mais 5/6. L'embranchement de la conjonction vit aux
+décisions ~100-150. h le long de la jointe : 2 au bout (relaxation vivante),
+LTS épuisé en 12 expansions (réellement morte) — lacune admissible, connue.
+μ mesuré ≈ 0 depuis les racines 5/6-rippées : le modèle E[T]* REJETTE « plus
+de budget sur les mêmes racines » — la fermeture passe par des racines à
+CONJONCTION INTERMÉDIAIRE (rips partiels ∧ Abyss vivant), pas par du temps.
