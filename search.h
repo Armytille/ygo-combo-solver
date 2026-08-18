@@ -96,8 +96,16 @@ void CollectAtoms(Duel& duel, uint8_t con, const BoardKey& here,
 // zones du masque). La garde tient si AU MOINS UNE clause tient entierement.
 // Exemple : "Crystal Wing@terrain" OU "Zalen@terrain + Junk Signal@main".
 struct GuardAtom {
-	uint32_t code = 0;    // canonique
+	uint32_t code = 0;    // canonique ; 0 si l'atome est un PREDICAT
 	uint32_t zones = 0;   // masque LOCATION_*
+	// PREDICAT d'etat (s24, regle de jeu posee par le joueur) : au lieu
+	// d'une carte-en-zone, l'atome exige un COMPTE. kind 0 = carte@zone
+	// (historique) ; kind 1 = « bannieadv>=count » (cartes ADVERSES
+	// bannies). Usage : « Dis Pater@terrain + bannieadv>=1 » est une
+	// negation disponible, au meme titre que Crystal Wing — meme famille
+	// que la regle Zalen/Crystal Wing de la session 4.
+	uint8_t kind = 0;
+	uint32_t count = 0;
 };
 using GuardClause = std::vector<GuardAtom>;
 

@@ -2110,8 +2110,10 @@ void Usage() {
 		"                     moins une clause doit tenir. <spec> =\n"
 		"                     n:clause[|clause...], clause = carte[@zone][+...],\n"
 		"                     zones : main terrain cimetiere banni extra\n"
-		"                     (defaut terrain). Ex : --guard \"5:Crystal Wing|\n"
-		"                     Zalen@terrain+Junk Signal@main\"\n"
+		"                     (defaut terrain). Atome-predicat : bannieadv>=N\n"
+		"                     (cartes ADVERSES bannies). Ex : --guard \"5:\n"
+		"                     Crystal Wing|Zalen@terrain+Junk Signal@main|\n"
+		"                     27572350@terrain+bannieadv>=1\"\n"
 		"  --no-activate <c>  interdit d'activer cette carte depuis une zone\n"
 		"                     (<c> = carte[@zone], defaut terrain — l'activation\n"
 		"                     depuis la main, qui POSE la carte, reste permise).\n"
@@ -2748,6 +2750,27 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 				if(atom_s.empty())
 					continue;
 				GuardAtom a;
+				// Atome-PREDICAT (s24) : « bannieadv>=N » — cartes ADVERSES
+				// bannies. Regle de jeu posee par le joueur : Dis Pater au
+				// terrain + une carte adverse bannie = une negation
+				// disponible, meme famille que Zalen/Crystal Wing (s4).
+				const std::string trimmed = Trimmed(atom_s);
+				const std::string pfx = "bannieadv>=";
+				if(trimmed.rfind(pfx, 0) == 0) {
+					char* end = nullptr;
+					unsigned long v = std::strtoul(
+						trimmed.c_str() + pfx.size(), &end, 10);
+					if(!end || *end != '\0' || v == 0 || v > 0xffff) {
+						std::printf("!! --guard : \"%s\" — forme attendue "
+									"bannieadv>=N (N >= 1)\n",
+									trimmed.c_str());
+						return false;
+					}
+					a.kind = 1;
+					a.count = static_cast<uint32_t>(v);
+					clause.push_back(a);
+					continue;
+				}
 				if(!ResolveCardZone(atom_s, db, "--guard", a.code, a.zones))
 					return false;
 				clause.push_back(a);
@@ -4990,6 +5013,13 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 	constexpr size_t kMaxWritten = 16;
 	size_t written = 0, rejected = 0;
 	size_t rej_retry = 0, rej_cons = 0, rej_board = 0;
+	// TEMOINS des candidates rejetees (s24) : une ligne qui a touche le but
+	// en recherche ne se PERD plus dans un desaccord de validateur — elle
+	// s'ecrit, marquee de sa raison. Le 18/08 : 6 lignes au but COMPLET
+	// rejetees « board non conforme » (S/T exigee vide contre l'Assault Zone
+	// que toute ligne du deck pose au premier coup), zero octet sur disque,
+	// lignes perdues avec le processus. Plafond 8.
+	size_t rej_written = 0;
 	// Rejets pour contrainte --summon JAMAIS ATTEINTE (3.4) : distincts d'une
 	// contrainte VIOLEE, et bien plus instructifs — ils disent que la ligne
 	// s'arrete avant le point que l'experience vise.
@@ -5145,7 +5175,20 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 				// But principal, ou un des buts ALTERNATIFS (--fire : le
 				// board sans les cartes sacrifiees pour contrer la menace).
 				const BoardKey fin = ComputeBoardKey(d, con);
-				const bool full_board = fin == target;
+				// Sous --target-subset (s24), l'INCLUSION fait foi a
+				// l'ecriture AUSSI : le juge de recherche etait deja en
+				// inclusion pour une cible posee, mais ce validateur exigeait
+				// l'egalite stricte — le drapeau ne changeait donc RIEN ici,
+				// et les 6 lignes au but du 18/08 seraient rejetees a
+				// l'identique. `entries` est trie (ComputeBoardKeyInto),
+				// l'inclusion est std::includes. Sans le drapeau : egalite
+				// stricte, comportement historique a l'octet.
+				const bool full_board =
+					opt.target_subset
+						? std::includes(fin.entries.begin(), fin.entries.end(),
+										target.entries.begin(),
+										target.entries.end())
+						: fin == target;
 				bool alt_board = false;
 				if(!full_board && target_alts)
 					for(const BoardKey& ab : *target_alts)
@@ -5170,15 +5213,28 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 						std::printf("  !! %s\n", werr.c_str());
 				} else {
 					++rejected;
-					if(retry)
+					const char* why = "board";
+					if(retry) {
 						++rej_retry;
-					else if(!cons_ok) {
+						why = "retry";
+					} else if(!cons_ok) {
 						++rej_cons;
 						if(summon_never)
 							++rej_never;
+						why = "contrainte";
 					}
 					else
 						++rej_board;
+					// Le TEMOIN : la candidate s'ecrit quand meme, marquee.
+					if(rej_written < 8) {
+						char name[64];
+						std::snprintf(name, sizeof(name),
+									  "but_rejete_%02zu_%s.yrp", i, why);
+						std::string werr;
+						if(WriteYrp1(outdir + "/" + name, start_yrp,
+									 sols[i].responses, werr))
+							++rej_written;
+					}
 				}
 				a.Restore();
 			}

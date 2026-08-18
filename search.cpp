@@ -1697,6 +1697,9 @@ bool GuardHolds(Duel& duel, uint8_t con, const std::vector<GuardClause>& clauses
 	};
 	static thread_local ZoneCache hand, grave, removed, extra;
 	hand.loaded = grave.loaded = removed.loaded = extra.loaded = false;
+	// Compte des cartes ADVERSES bannies (predicat kind 1), charge au plus
+	// une fois par evaluation — meme discipline de cache que les zones.
+	int opp_removed = -1;
 	auto in_zone = [&](uint32_t loc, ZoneCache& z, uint32_t code) {
 		if(!z.loaded) {
 			duel.QueryCodes(con, loc, z.codes);
@@ -1708,6 +1711,12 @@ bool GuardHolds(Duel& duel, uint8_t con, const std::vector<GuardClause>& clauses
 		return std::binary_search(z.codes.begin(), z.codes.end(), code);
 	};
 	auto atom_holds = [&](const GuardAtom& a) {
+		if(a.kind == 1) {
+			if(opp_removed < 0)
+				opp_removed = static_cast<int>(duel.Count(
+					static_cast<uint8_t>(1 - con), LOCATION_REMOVED));
+			return opp_removed >= static_cast<int>(a.count);
+		}
 		if(a.zones & (LOCATION_MZONE | LOCATION_SZONE)) {
 			if(std::binary_search(field_codes.begin(), field_codes.end(), a.code))
 				return true;
