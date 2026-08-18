@@ -9653,20 +9653,71 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					: static_cast<uint64_t>(
 						  std::chrono::high_resolution_clock::now()
 							  .time_since_epoch().count());
+				// LA FILE DE TRAVAIL PAR SOURCE (s24bis). L'affectation figee
+				// r = w % N ne sert que les racines {0..min(W,N)-1} : au run
+				// de fermeture, 16 racines rip occupaient les 16 workers et
+				// les 6 reculs profonds de l'approche — la fenetre de
+				// fermeture MESUREE (s23 : recul 70-80) — n'ont recu AUCUN
+				// budget. C'est le lemme d'affamement, verifie dans
+				// tools/s24_forme_close_conjonction.py (II) : un fait
+				// combinatoire, pas un reglage. Un worker reste lie a UNE
+				// source de duel (meme motif que la phase A1 : un duel par
+				// arene, Push une fois, Restore par racine) mais TIRE ses
+				// racines de la file partagee de son groupe — toutes les
+				// racines sont servies, budget restitue comme en phase 2,
+				// trois passes au plus.
+				struct RootGroup {
+					int64_t a = -1;
+					std::vector<size_t> idx;
+					std::atomic<size_t> next{ 0 };
+				};
+				std::vector<std::unique_ptr<RootGroup>> groups;
+				for(size_t i = 0; i < roots2.size(); ++i) {
+					RootGroup* g = nullptr;
+					for(auto& gg : groups)
+						if(gg->a == roots2[i].a) { g = gg.get(); break; }
+					if(!g) {
+						groups.push_back(std::make_unique<RootGroup>());
+						groups.back()->a = roots2[i].a;
+						g = groups.back().get();
+					}
+					g->idx.push_back(i);
+				}
+				// Workers repartis entre groupes au plus fort quotient
+				// (D'Hondt) : proportionnel a la taille, et chaque groupe est
+				// servi avant qu'un gros ne double sa part.
+				std::vector<RootGroup*> wplan(threads, nullptr);
+				{
+					std::vector<unsigned> got(groups.size(), 0);
+					for(unsigned w = 0; w < threads; ++w) {
+						size_t best_g = 0;
+						double best_q = -1.0;
+						for(size_t gi = 0; gi < groups.size(); ++gi) {
+							const double q =
+								double(groups[gi]->idx.size()) /
+								double(got[gi] + 1);
+							if(q > best_q) { best_q = q; best_g = gi; }
+						}
+						++got[best_g];
+						wplan[w] = groups[best_g].get();
+					}
+				}
 				std::vector<std::thread> npool;
 				for(unsigned w = 0; w < threads; ++w) {
 					npool.emplace_back([&, w] {
-						const size_t r = w % roots2.size();
-						const NrpaRoot& R = roots2[r];
-						// Duel de la racine : l'en-tete de l'approche, ou le
-						// duel de DEPART pour les etats rippes de l'archive.
+						// Le groupe (donc la SOURCE de duel) de ce worker :
+						// l'en-tete de l'approche, ou le duel de DEPART pour
+						// les etats rippes de l'archive.
+						RootGroup* grp = wplan[w];
+						if(!grp)
+							return;
 						const Replay* src = &start_yrp;
-						if(R.a >= 0) {
-							src = approach_runs[static_cast<size_t>(R.a)]
+						if(grp->a >= 0) {
+							src = approach_runs[static_cast<size_t>(grp->a)]
 									  .holder->IsStreamed()
-								? approach_runs[static_cast<size_t>(R.a)]
+								? approach_runs[static_cast<size_t>(grp->a)]
 									  .holder->Embedded()
-								: approach_runs[static_cast<size_t>(R.a)]
+								: approach_runs[static_cast<size_t>(grp->a)]
 									  .holder.get();
 							if(!src)
 								return;
@@ -9687,8 +9738,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											1 - opt.target_player))) {
 								if(opt.stop_gc)
 									fd.SetLuaGc(false);
-								double left = a2_deadline - MsSince(t0);
-								if(left >= 2000 && found.load() < found_stop) {
+								fa.Push();   // position de depart de la source
+								for(;;) {
+									const size_t pk = grp->next.fetch_add(1);
+									// Trois passes au plus : au-dela on ne fait
+									// que re-renforcer les memes racines.
+									if(pk >= grp->idx.size() * 3)
+										break;
+									double left = a2_deadline - MsSince(t0);
+									if(left < 2000 ||
+									   found.load() >= found_stop)
+										break;
+									const size_t r =
+										grp->idx[pk % grp->idx.size()];
+									const NrpaRoot& R = roots2[r];
+									fa.Restore();
 									PrefixCount pc = replay_prefix(fd, R.pre);
 									if(!pc.ok) {
 										std::lock_guard<std::mutex> lk(fmx);
@@ -9698,7 +9762,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													R.pre.size());
 									} else {
 										SearchConfig fcfg = cfg;
-										fcfg.time_limit_ms = left;
+										// Budget par racine AVEC RESTITUTION
+										// (la forme de la phase 2) : le
+										// restant divise par les racines
+										// restantes de la passe — une racine
+										// qui s'epuise tot rend son solde.
+										const size_t pass_left =
+											grp->idx.size() -
+											(pk % grp->idx.size());
+										fcfg.time_limit_ms = (std::min)(
+											left,
+											(std::max)(2000.0,
+													   left /
+														   double(pass_left)));
 										fcfg.max_decisions = FinisherDepth(
 											cfg.max_decisions, R.pre.size());
 										fcfg.initial_summons = pc.summons;
@@ -9720,6 +9796,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 										fs.RunNrpa(target, plan,
 												   fseed +
 													   w * 0x9E3779B97F4A7C15ull +
+													   pk * 0x100000001b3ull +
 													   1);
 										const SearchStats& st = fs.Stats();
 										fin_goal_hits += st.goal_hits;
@@ -9838,6 +9915,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 										}
 									}
 								}
+								fa.Pop();
 							} else {
 								WorkerAbort("duel (finisseur, racines de recul)", err);
 							}
