@@ -204,3 +204,67 @@ rips ont quitté le spasme terminal, le détour est un phénomène de mécanisme
 (finisseur) et non plus d'accident (46/10⁶). La conjonction complète ≥3 n'est
 pas encore franchie à 600 s ; le run livrable (20 min, même graine) est la
 mesure suivante.
+
+## 9. La boucle de conversion (s23, suite) — trajectoire de la crête jointe
+
+Le run livrable 20 min a CASSÉ le mur ≥3 : **47 tirages à résolutions
+complètes** (Omega×2 ∧ Trishula, worker rippé recul 80), crête jointe 2/6.
+Ces lignes mouraient avec le run → chantier `best_joint_*.yrp` (commit
+`61b5d12`) : GoalCheck conserve le max lexicographique (rips, board, chemin
+court — 3ᵉ axe ajouté en `fd2fc48` : la ligne 3r de 239 décisions finissait
+son tour sans ressources, LTS épuisé à 34 expansions), fusion aux six sites
+(approches comprises, gabarit VÉRIFIÉ — l'it3 a perdu sa meilleure ligne à
+cause de l'exclusion aveugle), écrit à côté de `best_approach`, réinjecté par
+`--approach` (l'instrument d'isolation s21).
+
+| passe | budget | approche d'entrée | crête jointe | ≥3 (phase libre / finisseur) |
+|---|---|---|---|---|
+| s22quater (diagnostic) | 20 min | — | 0 | 0 / 0 |
+| s23 run 1 | 20 min | — | 3r ∧ 2/6 | 0 / 47 |
+| fumée | 60 s | — | 3r ∧ 1/6 (écrite !) | — |
+| it2 | 5 min | 3r_1of6 | **3r ∧ 3/6** | 121 / 37 558 (contin. r3) |
+| it3 (fusion aveugle) | 5 min | 3r_3of6 | perdue (2r_2of6 écrite) | 0 / 267 |
+| it4 (corrigé) | 5 min | 3r_3of6 | 3r ∧ 3/6 (plateau) | 0 / ~700 ≥2 |
+| final | 20 min | 3r_3of6 | 3r ∧ 3/6 (235 déc.) | 0 / ~1 200 |
+| final2 (+`--refine-after 30000`) | 20 min | 3r_3of6 | **3r ∧ 4/6** (275 déc.) | 0 / ~2 100 (≥2 : 5 860) |
+
+**Le raffinement a jugé POSITIF sur son premier vrai cas d'usage** : 10
+workers re-sérialisés, 160 sous-barreaux, 576 745 états archivés AU-DELÀ de la
+porte — et la crête jointe, plate à 3/6 sur trois passes, monte à 4/6 dans la
+même passe (w15, appr recul 90 : crête-rip 4/6, 141 tirages ≥3).
+
+**Le juge décisif du plateau (banc, gratuit)** : le théorème 2 marché LE LONG
+de la ligne jointe elle-même (`best_joint_3r_3of6.yrp` comme replay du banc) :
+h 8→3, **0 état infaisable, h final = 3** — les 3 pièces manquantes restent
+fabricables en relaxation depuis la fin de la ligne. Le plafond 3/6 est un
+trou de RECHERCHE (fermeture non guidée), pas un mur de ressources prouvé —
+avec la réserve nommée : h ignore les quotas du CHEMIN (chantier 4), donc
+« fabricable en relaxation » sur-estime peut-être l'état réel.
+
+La mesure en cours : le même run + `--refine-after 30000` — la
+re-sérialisation à la meilleure cellule (désormais une cellule RIPPÉE, avec
+les demandes compilées) pose la sous-échelle de fermeture. C'est le cas
+d'usage exact que la limite nommée du rapport s22quater désignait.
+
+## 10. La boucle devient INTERNE (`--rounds`, commit `7ef1bee`)
+
+Directive opérateur : « un utilisateur s'attend à ce que le programme retourne
+le résultat final sans qu'il ne doive itérer lui-même ». La chaîne manuelle
+des §8-9 est la forme canonique de Go-Explore / Expert Iteration
+(`etat-de-lart-boucle-interne.md`) et vit désormais dans le binaire :
+`--rounds <n>` découpe `--solve-ms` en rounds, réinjecte automatiquement la
+meilleure ligne jointe (remplacement, pas empilement), s'arrête sur solution
+— les solutions des racines d'approche comptent — ou à l'épuisement. Câblage
+au site d'appel (`TransplantOutcome`), `rounds=1` = historique à l'octet.
+
+Fumée (UNE commande, 240 s, 3 rounds) : R1 écrit 2r∧4/6, R2 la réinjecte et
+écrit **2r∧5/6**, R3 stable — la chaîne manuelle reproduite sans opérateur,
+crête montée dans la même commande. Suite de la mesure : le run livrable
+mono-commande (3 × 20 min, raffinement armé, graine 8305444233615674939).
+
+Reste nommé, dans l'ordre : (1) chantier 4 — capacités dynamiques
+(red-black) : h honnête vis-à-vis des quotas du chemin, au raffinement et à
+l'élagage ; (2) faire entrer les lignes du finisseur dans l'ARCHIVE du round
+suivant (aujourd'hui seule la ligne jointe transite — Go-Explore garde tout) ;
+(3) l'A/B en proportion (N graines) des mécanismes s23 : demandes @DISPO
+(`--resolve-legacy` témoin), `--refine-after`, `--rounds`.

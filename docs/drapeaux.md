@@ -1,5 +1,14 @@
 # Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22, 23)
 
+> **s23** : `--rounds <n>` — **mécanisme** (défaut 1 = historique à l'octet,
+> zéro bannière). La boucle interne (directive opérateur ; forme
+> Go-Explore/ExIt, cf. `etat-de-lart-boucle-interne.md`) : le budget
+> `--solve-ms` se découpe en N rounds, la meilleure ligne JOINTE de chaque
+> round est réinjectée automatiquement au suivant (remplace la précédente ;
+> les `--approach` de la commande restent). Arrêt sur solution ou plus de
+> ligne jointe. Fumée : R1 → 2r_4of6, R2 (réinjectée) → 2r_5of6 en une seule
+> commande de 240 s. Vie : bannières « ===== ROUND k/N ===== ».
+
 > **s23** : `--resolve-legacy` — **TÉMOIN d'A/B**. Rejoue le câblage s22quater
 > des résolutions (crédit post-résolution seulement) à la place de la
 > compilation dans le bilan (défaut s23 : chaque `--resolve`/`--summon-min`
