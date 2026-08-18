@@ -1353,6 +1353,11 @@ struct Options {
 	// d'effets a la place de la derivation par les duaux du LP. Un drapeau le
 	// temps d'une mesure — les deux derivations s'impriment dans tous les cas.
 	bool quota_legacy = false;
+	// TEMOIN de l'A/B des demandes transitoires (s23) : ne PAS compiler les
+	// exigences --resolve/--summon-min dans le bilan matiere (comportement
+	// s22quater : credit post-resolution seulement). Un drapeau le temps d'une
+	// mesure — le cablage actif s'imprime dans tous les cas.
+	bool resolve_legacy = false;
 	// DISCIPLINE (s22ter, demande operateur) : ne jamais proposer une
 	// NEGATION du joueur sur son propre maillon de chaine (Crystal Wing,
 	// Zalen, Silver Hound...). Famille de --no-activate/--no-chain — une
@@ -2125,6 +2130,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--operators",        &Options::operators },
 				{ "--op-recipes",       &Options::op_recipes },
 				{ "--quota-legacy",     &Options::quota_legacy },
+				{ "--resolve-legacy",   &Options::resolve_legacy },
 				{ "--no-self-negate",   &Options::no_self_negate },
 				{ "--mp1-only",         &Options::mp1_only },
 			};
@@ -7047,10 +7053,42 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				for(const auto* l : { &sd.main, &sd.extra })
 					for(uint32_t c : *l)
 						deck_mult.push_back(c);
+				// LES RESOLUTIONS SE COMPILENT DANS LE BILAN (s23). Le but a
+				// deux moities de meme rang — l'etat final (--target) et les
+				// passages exiges (--resolve/--summon-min) — et seule la
+				// premiere etait compilee : tout le credit de la seconde etait
+				// post-evenement, donc aucun barreau mi-ligne, donc la carte a
+				// resoudre ne vivait que dans le spasme terminal (mesure :
+				// 1re invocation d'Omega a 240,5 decisions, 12,9 de vie
+				// restante, conjonction ~2e-8/tirage). UNE demande de presence
+				// @DISPO par code (jamais N : le retour d'un meme corps est
+				// legal, exiger 1 garde h admissible). Temoin : --resolve-legacy
+				// rejoue le cablage s22quater a l'identique.
+				std::vector<std::pair<uint32_t, uint32_t>> gtr;
+				if(!opt.resolve_legacy)
+					for(const ResolveReq& rr : cons.resolve_min) {
+						const uint32_t cc = db.Canonical(rr.code);
+						if(std::find_if(gtr.begin(), gtr.end(),
+										[&](const auto& g) {
+											return g.first == cc;
+										}) == gtr.end())
+							gtr.emplace_back(cc, 1u);
+					}
+				if(!cons.resolve_min.empty()) {
+					std::string vie;
+					for(const auto& g : gtr)
+						vie += "x1 " + db.Name(g.first) + " @DISPO ; ";
+					std::printf("  RESOLUTIONS -> BILAN : %s(cablage : "
+								"%s — temoin via --resolve-legacy)\n",
+								vie.c_str(),
+								opt.resolve_legacy ? "LEGACY s22quater, demandes "
+													 "NON posees"
+												   : "demandes transitoires s23");
+				}
 				BalanceModel& bm = g_balance_model;
 				g_balance_armed = false;
 				if(opt.serial && !gc2.empty() &&
-				   bm.Build(tbl, db, kt, deck_mult, gc2)) {
+				   bm.Build(tbl, db, kt, deck_mult, gc2, gtr)) {
 					LPResult lr;
 					const double h0 = bm.Solve(deck_mult, {}, {}, &lr);
 					if(lr.feasible && lr.primal_ok && lr.optimal_ok) {
@@ -9289,17 +9327,48 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// cote, des 8/8 muets de l'autre, jamais les deux).
 			{
 				std::vector<const ArchiveEntry*> ripped;
+				const ArchiveEntry* deepest = nullptr;
 				for(const auto& [cell, e] : global_archive)
-					if(e.resolves > 0)
+					if(e.resolves > 0) {
 						ripped.push_back(&e);
+						// La cellule la plus RIPPEE est toujours une racine :
+						// le score (sp_eff) est domine par les barreaux de
+						// board (~40 contre <= 4 de rips), donc le top-3 par
+						// score peut n'offrir que des r1 — mesure sur le run
+						// diagnostic : les trois racines etaient « 5/6 r1 »
+						// alors qu'une cellule r2 existait plus bas. Le max
+						// d'un axe MESURE, pas un choix.
+						if(!deepest || e.resolves > deepest->resolves ||
+						   (e.resolves == deepest->resolves &&
+							e.score > deepest->score))
+							deepest = &e;
+					}
 				std::sort(ripped.begin(), ripped.end(),
 						  [](const ArchiveEntry* x, const ArchiveEntry* y) {
 							  return x->score > y->score;
 						  });
 				if(ripped.size() > 3)
 					ripped.resize(3);
-				for(size_t i = 0; i < ripped.size(); ++i)
-					for(uint32_t back : { 0u, 20u, 40u })
+				if(deepest &&
+				   std::find(ripped.begin(), ripped.end(), deepest) ==
+					   ripped.end())
+					ripped.push_back(deepest);
+				for(size_t i = 0; i < ripped.size(); ++i) {
+					// Reculs DERIVES de la longueur du chemin archive, plus
+					// une constante d'etalon ({0,20,40} : sous le point de
+					// non-retour du detour, ~60-90 decisions d'amont sur le
+					// run diagnostic — 200 k tirages a recul 0 pour zero rip).
+					// L/12, L/6, L/3 couvrent la re-preparation d'un rip
+					// (~8 %), d'une manoeuvre (~17 %) et d'un tiers de ligne,
+					// quelle que soit l'echelle du deck.
+					const uint32_t plen =
+						static_cast<uint32_t>(ripped[i]->path.size());
+					uint32_t prev = ~0u;
+					for(uint32_t back : { 0u, plen / 12u, plen / 6u,
+										  plen / 3u }) {
+						if(back == prev)
+							continue;   // chemins courts : reculs confondus
+						prev = back;
 						if(ripped[i]->path.size() > back) {
 							std::snprintf(rlbl, sizeof(rlbl),
 										  "rip%zu(%u/%zu r%u) recul %u", i,
@@ -9312,6 +9381,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									  ripped[i]->path.begin(),
 									  ripped[i]->path.end() - back) });
 						}
+					}
+				}
 			}
 			for(size_t a = 0; a < approach_runs.size(); ++a) {
 				const Replay* ap = approach_runs[a].holder->IsStreamed()
@@ -10578,6 +10649,20 @@ int main(int argc, char** argv) {
 						++git->second;
 				}
 				tbl.PrintFiringCounts(db, kt, deck_codes, goal_counts);
+				// Les demandes transitoires (s23) au banc aussi : le juge
+				// gratuit doit voir exactement le modele que la recherche
+				// verra — memes drapeaux, meme compilation.
+				std::vector<std::pair<uint32_t, uint32_t>> goal_transient;
+				if(!opt.resolve_legacy)
+					for(const ResolveReq& rr : cons.resolve_min) {
+						const uint32_t cc = db.Canonical(rr.code);
+						if(std::find_if(goal_transient.begin(),
+										goal_transient.end(),
+										[&](const auto& g) {
+											return g.first == cc;
+										}) == goal_transient.end())
+							goal_transient.emplace_back(cc, 1u);
+					}
 				// LE SOLVEUR SE PROUVE AVANT DE SERVIR (9.30). Cinq instances a
 				// solution connue, couvrant les quatre theoremes. Un simplexe
 				// faux rendrait des valeurs plausibles et NON admissibles :
@@ -10592,7 +10677,7 @@ int main(int argc, char** argv) {
 								"jeter");
 					if(ok == tot)
 						BuildAndSolveBalance(tbl, db, kt, deck_codes,
-											 goal_counts);
+											 goal_counts, goal_transient);
 				}
 				// --- LE THEOREME 2, CONSTATE SUR UNE LIGNE REELLE -----------
 				//
@@ -10610,7 +10695,8 @@ int main(int argc, char** argv) {
 				//     le score n'a jamais eu.
 				if(!goal_counts.empty() && arena_ptr) {
 					BalanceModel bm;
-					if(bm.Build(tbl, db, kt, deck_codes, goal_counts)) {
+					if(bm.Build(tbl, db, kt, deck_codes, goal_counts,
+								goal_transient)) {
 						while(arena.Depth() > 1)
 							arena.Pop();
 						if(arena.Depth() == 0)

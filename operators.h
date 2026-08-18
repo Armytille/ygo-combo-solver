@@ -419,9 +419,20 @@ LPResult SolveOperatorLP(const OperatorLP& lp);
 // l'asymetrie de 9.29 (f), appliquee au modele entier.
 class BalanceModel {
 public:
+	// `goal` : demandes d'etat FINAL, par code, lues @TERRAIN.
+	// `transient` (s23) : demandes de PASSAGE, par code, lues @DISPO — « cette
+	// carte doit EXISTER hors reserve a un moment de la ligne ». C'est la
+	// compilation des exigences de resolution (--resolve) dans le bilan : le
+	// but se COMPILE, il ne se recompense pas. Une demande transitoire vaut 1
+	// par code (N resolutions n'exigent PAS N corps — le retour d'un meme corps
+	// est legal —, donc exiger 1 est plus faible que la verite : h reste
+	// admissible, regle de sous-contrainte). Garde d'asymetrie : un code sans
+	// producteur lisible n'est PAS pose (une lacune d'extraction ne doit jamais
+	// devenir une fausse preuve d'impossibilite) — et il est nomme.
 	bool Build(const OperatorTable& tbl, const CardDB& db,
 			   const ConstantTable& kt, const std::vector<uint32_t>& deck,
-			   const std::vector<std::pair<uint32_t, uint32_t>>& goal);
+			   const std::vector<std::pair<uint32_t, uint32_t>>& goal,
+			   const std::vector<std::pair<uint32_t, uint32_t>>& transient = {});
 	// `res` (deck+extra), `ava` (main, terrain, cimetiere, bannie) et `fld`
 	// (zone monstre) sont les codes PHYSIQUES presents dans chaque zone a
 	// l'etat courant. Rend h, ou -1 si infaisable (theoreme 3).
@@ -515,10 +526,11 @@ private:
 	mutable std::unordered_map<uint32_t, std::vector<uint64_t>> sc_cache;
 };
 
-double BuildAndSolveBalance(const OperatorTable& tbl, const CardDB& db,
-							const ConstantTable& kt,
-							const std::vector<uint32_t>& deck,
-							const std::vector<std::pair<uint32_t, uint32_t>>& goal);
+double BuildAndSolveBalance(
+	const OperatorTable& tbl, const CardDB& db, const ConstantTable& kt,
+	const std::vector<uint32_t>& deck,
+	const std::vector<std::pair<uint32_t, uint32_t>>& goal,
+	const std::vector<std::pair<uint32_t, uint32_t>>& transient = {});
 
 // Rend le nombre de cas passes sur le nombre de cas. Doit valoir n/n.
 size_t SelfTestOperatorLP(size_t* total);

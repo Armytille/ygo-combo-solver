@@ -2245,7 +2245,8 @@ static uint32_t AliasOf(const CardDB& db, uint32_t c) {
 bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 						 const ConstantTable& kt,
 						 const std::vector<uint32_t>& deck,
-						 const std::vector<std::pair<uint32_t, uint32_t>>& goal) {
+						 const std::vector<std::pair<uint32_t, uint32_t>>& goal,
+						 const std::vector<std::pair<uint32_t, uint32_t>>& transient) {
 	db = &cdb;
 	if(goal.empty())
 		return false;
@@ -2690,6 +2691,44 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 		need[place(0, AliasOf(cdb, g.first), kFld)] += g.second;
 		goal_codes.push_back(AliasOf(cdb, g.first));
 	}
+	// LES DEMANDES TRANSITOIRES (s23) — la compilation des resolutions dans le
+	// bilan. Le diagnostic de la jonction (etalon B discipline) a montre que
+	// tout le credit d'une resolution exigee etait POST-evenement (score,
+	// barreau, cle) : aucun gradient n'existait AVANT, et la carte a resoudre
+	// n'apparaissait que dans le spasme terminal des lignes (1re invocation a
+	// 240 decisions sur ~253 de vie). Demander ici sa PRESENCE @DISPO met sa
+	// chaine de fabrication dans x*, donc ses places dans la serialisation,
+	// donc des barreaux MI-LIGNE — sans un nom de carte dans le code : les
+	// codes viennent des drapeaux, comme le but lui-meme.
+	//
+	// @DISPO et non @TERRAIN : DISPO (main, terrain, cimetiere, BANNIE) est
+	// cumulatif le long d'une ligne — un corps sorti de reserve y reste, meme
+	// banni par sa propre resolution. C'est la semantique « a existe » la plus
+	// faible, donc admissible. Garde d'asymetrie : sans producteur lisible, la
+	// demande n'est pas posee (elle rendrait TOUT le programme infaisable pour
+	// une lacune d'extraction) — nommee, comme la garde des igniteurs.
+	for(const auto& g : transient) {
+		const uint32_t cc = AliasOf(cdb, g.first);
+		const size_t p = PlaceId(0, cc, kAva);
+		bool producible = false;
+		if(p != static_cast<size_t>(-1))
+			for(size_t t = 0; t < col.size() && !producible; ++t) {
+				auto it = col[t].find(p);
+				producible = it != col[t].end() && it->second > 0;
+			}
+		if(!producible) {
+			std::printf("  demande transitoire SANS PRODUCTEUR lisible : %s @DISPO "
+						"— non posee (garde d'asymetrie : lacune d'extraction, "
+						"pas une preuve)\n",
+						cdb.Name(cc).c_str());
+			continue;
+		}
+		need[p] += g.second;
+		// La protection des codes de but s'applique aussi : jamais de barreau
+		// de consommation sur une carte a resoudre (le poison Liger@CIMETIERE,
+		// s21, vaut pour elle a l'identique).
+		goal_codes.push_back(cc);
+	}
 	col.resize(lp.n_ops);
 	return true;
 }
@@ -2943,10 +2982,11 @@ std::vector<uint32_t> BalanceModel::QuotaHostsFrom(
 double BuildAndSolveBalance(
 	const OperatorTable& tbl, const CardDB& db, const ConstantTable& kt,
 	const std::vector<uint32_t>& deck,
-	const std::vector<std::pair<uint32_t, uint32_t>>& goal) {
+	const std::vector<std::pair<uint32_t, uint32_t>>& goal,
+	const std::vector<std::pair<uint32_t, uint32_t>>& transient) {
 	std::printf("\n=== LE BILAN MATIERE : h(depart) ===\n");
 	BalanceModel m;
-	if(!m.Build(tbl, db, kt, deck, goal)) {
+	if(!m.Build(tbl, db, kt, deck, goal, transient)) {
 		std::printf("  (aucun but donne)\n");
 		return -1.0;
 	}
