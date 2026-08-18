@@ -1376,6 +1376,13 @@ struct Options {
 	// mesures. 0 = eteint — un mecanisme est un drapeau le temps de le
 	// mesurer.
 	uint64_t refine_after = 0;
+	// LA BOUCLE INTERNE (s23, directive operateur ; forme Go-Explore/ExIt —
+	// docs/etat-de-lart-boucle-interne.md) : le budget --solve-ms se decoupe
+	// en N rounds internes ; entre deux rounds, la meilleure ligne JOINTE
+	// ecrite est reinjectee comme approche du suivant. « Une commande, un
+	// resultat final » — la reinjection n'est plus le travail de l'operateur.
+	// 1 = comportement historique (aucune banniere, aucun round).
+	uint64_t rounds = 1;
 	// Poids soustrait au logit d'un changement de phase. 0 = eteint (le temoin).
 	double phase_w = 0.0;
 	// CHANTIER 2 (session 19) : LE CHAINAGE ARRIERE COMME BIAIS.
@@ -2053,6 +2060,9 @@ void Usage() {
 		"                     lieu d'etre chainee sur nos effets — la vraie\n"
 		"                     menace adverse\n"
 		"  --approach <f.yrp> approche d'une session passee (best_approach_*.yrp)\n"
+		"  --rounds <n>       boucle INTERNE : n rounds se partagent --solve-ms,\n"
+		"                     la meilleure ligne jointe de chaque round est\n"
+		"                     reinjectee au suivant (defaut 1 = historique)\n"
 		"                     servie au finisseur comme racine supplementaire\n"
 		"                     (chemin complet + reculs). Repetable. Doit avoir\n"
 		"                     ete produite sur le MEME duel de depart (et le\n"
@@ -2169,6 +2179,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--max-nodes",    &Options::max_nodes },
 				{ "--refine-after", &Options::refine_after },
 				{ "--turns",        &Options::turns },
+				{ "--rounds",       &Options::rounds },
 			};
 			bool matched = false;
 			for(const auto& f : kU64Flags)
@@ -6610,10 +6621,21 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 static BalanceModel g_balance_model;
 static bool g_balance_armed = false;
 
+// Le RESULTAT d'un appel, pour la boucle interne (s23) : ce que le round
+// suivant doit savoir — combien de solutions, et quelle ligne jointe
+// reinjecter. Rempli sur le chemin de la cible POSEE (le mode des rounds).
+struct TransplantOutcome {
+	size_t solutions = 0;
+	uint32_t best_overlap = 0;
+	uint32_t joint_rp = 0, joint_overlap = 0;
+	std::string joint_file;   // vide : rien d'ecrit ce round
+};
+
 void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_yrp,
 						const Options& opt, Arena& arena, const LineResult& ref,
 						CardDB& db, ScriptProvider& scripts, uint32_t patience,
-						const LineConstraints& cons) {
+						const LineConstraints& cons,
+						TransplantOutcome* outres = nullptr) {
 	std::printf("\n=== transplantation du combo sur un autre deck ===\n");
 	if(!cons.opp_hand.empty()) {
 		std::printf("  main adverse   : +%zu carte(s) (--opp-hand) :",
@@ -10209,14 +10231,26 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						  target.codes.size());
 			std::string jpath = opt.outdir + "/" + name;
 			std::string werr;
-			if(WriteYrp1(jpath, start_yrp, best_joint_path, werr))
+			if(WriteYrp1(jpath, start_yrp, best_joint_path, werr)) {
 				std::printf("  meilleure ligne JOINTE ecrite : %s (%u rip(s), "
 							"%u/%zu au board, %zu decisions, PAS une "
 							"solution)\n",
 							jpath.c_str(), best_joint_rp, best_joint_overlap,
 							target.codes.size(), best_joint_path.size());
-			else
+				if(outres)
+					outres->joint_file = jpath;
+			} else
 				std::printf("  !! %s\n", werr.c_str());
+		}
+		if(outres) {
+			// Les solutions des racines d'approche comptent : une conversion
+			// venue de la ligne reinjectee doit arreter la boucle interne.
+			outres->solutions = sols.size();
+			for(const ApproachSols& AR : approach_runs)
+				outres->solutions += AR.sols.size();
+			outres->best_overlap = best_overlap;
+			outres->joint_rp = best_joint_rp;
+			outres->joint_overlap = best_joint_overlap;
 		}
 		return;
 	}
@@ -11386,10 +11420,64 @@ int main(int argc, char** argv) {
 								"de controle sur une cible\n   qu'elle "
 								"n'atteint pas).\n");
 					exit_code = 1;
-				} else if(synth_ok)
-					RunTransplantSolve(duel, *yrp, synth, opt, *arena_ptr,
-									   first, db, scripts, patience, cons);
-				else if(!opt.deck_file.empty()) {
+				} else if(synth_ok) {
+					// LA BOUCLE INTERNE (s23, directive operateur ; forme
+					// Go-Explore / Expert Iteration —
+					// docs/etat-de-lart-boucle-interne.md §3). Une commande,
+					// N rounds : chaque round est un run d'aujourd'hui a
+					// l'octet pres (budget = part egale du restant) ; entre
+					// deux rounds, la meilleure ligne JOINTE ecrite est
+					// reinjectee comme approche du suivant — l'archive
+					// Go-Explore qui persiste, sans que l'operateur n'itere.
+					// Elle REMPLACE la ligne du round precedent (pas
+					// d'empilement) ; les --approach de la commande restent.
+					// rounds=1 : un appel, zero banniere — l'historique.
+					Options ropt = opt;
+					const double total_ms = opt.solve_ms;
+					const auto tstart = Clock::now();
+					const uint64_t nrounds = (std::max<uint64_t>)(1, opt.rounds);
+					for(uint64_t round = 0; round < nrounds; ++round) {
+						ropt.solve_ms = (std::max)(0.0,
+							(total_ms - MsSince(tstart)) /
+								double(nrounds - round));
+						if(nrounds > 1)
+							std::printf("\n===== ROUND %llu/%llu — budget "
+										"%.0f s%s =====\n",
+										(unsigned long long)(round + 1),
+										(unsigned long long)nrounds,
+										ropt.solve_ms / 1000.0,
+										ropt.approach_files.size() >
+												opt.approach_files.size()
+											? ", ligne jointe reinjectee"
+											: "");
+						TransplantOutcome tout;
+						RunTransplantSolve(duel, *yrp, synth, ropt, *arena_ptr,
+										   first, db, scripts, patience, cons,
+										   &tout);
+						if(tout.solutions) {
+							if(nrounds > 1)
+								std::printf("\n===== ROUND %llu/%llu : %zu "
+											"solution(s) — la boucle "
+											"s'arrete =====\n",
+											(unsigned long long)(round + 1),
+											(unsigned long long)nrounds,
+											tout.solutions);
+							break;
+						}
+						if(round + 1 >= nrounds)
+							break;
+						if(tout.joint_file.empty()) {
+							std::printf("\n===== ROUND %llu/%llu : aucune "
+										"ligne jointe ecrite — la boucle "
+										"s'arrete =====\n",
+										(unsigned long long)(round + 1),
+										(unsigned long long)nrounds);
+							break;
+						}
+						ropt.approach_files = opt.approach_files;
+						ropt.approach_files.push_back(tout.joint_file);
+					}
+				} else if(!opt.deck_file.empty()) {
 					// --deck demande mais depart inconstructible : ne pas
 					// retomber en silence sur un autre mode.
 					exit_code = 1;
