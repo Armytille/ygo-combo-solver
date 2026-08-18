@@ -2130,6 +2130,17 @@ struct SearchConfig {
 	// et le tournoi travaillent inchanges sur l'echelle raffinee. UN niveau
 	// pour commencer, mesure. 0 = eteint (drapeau le temps de la mesure).
 	uint32_t refine_after = 0;
+	// LA GRILLE (rips x overlap) — s24quater, derivee de la forme close
+	// raffinee (tools/s24_forme_close_raffinee.py, 13/13). La cle de cellule
+	// devient (resolutions, overlap) : un ELITE par cellule de la grille
+	// 4x7 (28 cellules), au lieu du hachage de board sous score scalaire —
+	// (R1) archiver chaque frontiere de choix rend le cout de
+	// l'entrelacement additif (le scalaire perd 2*b^(l_t-1)/L ~ 4e7 aux
+	// valeurs mesurees) ; la re-entree devient UNIFORME sur les cellules
+	// non vides ((R6) : C-competitive, C <= 28 — le tournoi de 2 serait une
+	// re-scalarisation). Ne mord que SANS serialisation armee (le regime
+	// MIN degraisse) et avec --resolve. Faux par defaut.
+	bool grid = false;
 	// LES QUOTAS DU CHEMIN DANS LE LP (s24, chantier 4 — red-black). Au
 	// raffinement, les usages observes des hotes a quota (quota_uses, la meme
 	// comptabilite que la cle de cellule) entrent dans les capacites du LP :

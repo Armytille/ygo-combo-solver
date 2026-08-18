@@ -1907,12 +1907,24 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	// vecteur mais a quotas differents cessent de partager un representant —
 	// c'etait le membre invisible de la conjonction, et le representant
 	// « chemin court » etait systematiquement l'etat qui n'avait pas paye.
+	//
+	// LA GRILLE (s24quater, cfg.grid, regime sans serialisation) : la cellule
+	// EST (resolutions, overlap) — 28 cellules au plus, un elite chacune. Le
+	// score scalaire ne decide plus QUELLES familles survivent (theoreme de
+	// scalarisation : il ne retenait que les extremites du front) ; il ne
+	// departage plus que DANS une cellule, ou rips et overlap sont fixes —
+	// il y reste exactement le « moins profond a progres egal » que (R2)
+	// prescrit (la queue ~profondeur du score).
 	const uint64_t cell =
-		cfg.serial_reqs.empty()
-			? here.hash
-			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
-			   (sp2_vec * 0x9E3779B97F4A7C15ull) ^
-			   (rvec * 0xA24BAED4963EE407ull));
+		cfg.grid && cfg.serial_reqs.empty() && !cfg.resolve_min.empty()
+			? (0x6A1DBA5E00000000ull |
+			   (static_cast<uint64_t>((std::min)(rp, 15u)) << 8) |
+			   (std::min)(overlap, 255u))
+			: cfg.serial_reqs.empty()
+				  ? here.hash
+				  : (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
+					 (sp2_vec * 0x9E3779B97F4A7C15ull) ^
+					 (rvec * 0xA24BAED4963EE407ull));
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
@@ -3958,7 +3970,11 @@ void Search::InitSerialBase() {
 
 void Search::ReenterMaybe(uint64_t& rng) {
 	reenter_active = false;
-	if(cfg.reenter <= 0.0f || cfg.serial_reqs.empty() || archive.empty())
+	// La re-entree exige une STRUCTURE de cellules : l'echelle (serialisation
+	// armee) ou la GRILLE (rips x overlap, s24quater). Sans l'une des deux,
+	// l'archive est un cache, pas une frontiere.
+	if(cfg.reenter <= 0.0f || archive.empty() ||
+	   (cfg.serial_reqs.empty() && !cfg.grid))
 		return;
 	auto next = [&rng] {
 		rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
@@ -3978,10 +3994,43 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	// garde le meilleur score (le score classe deja le progres en tete) :
 	// la masse double sur la moitie haute de l'echelle, et aucun palier bas
 	// n'est abandonne (Go-Explore : les hauts peuvent etre des impasses).
-	const ArchiveEntry* pick = &archive[next() % archive.size()];
-	const ArchiveEntry* other = &archive[next() % archive.size()];
-	if(other->score > pick->score)
-		pick = other;
+	//
+	// SOUS LA GRILLE (s24quater) : UNIFORME sur les cellules RIPPEES
+	// SEULEMENT (r > 0), pas de tournoi. ⚠️ LES DEUX VARIANTES SONT
+	// REFUTEES EN PROPORTION (4 graines, 180 s, temoin MIN au meme binaire) :
+	//   V1 (uniforme sur TOUTES les cellules) : 3/4 graines a ZERO rip —
+	//      l'archive du debut de run n'a que des cellules (0 rips, o), la
+	//      re-entree y verse la masse et la politique NRPA PARTAGEE s'adapte
+	//      sur ces continuations : le chercheur de rips meurt.
+	//   V2 (rippees seulement, ce code) : >=3 libre = 0 sur 4/4 et jointes
+	//      DEGRADEES (3r∧1/6 contre 3r∧5/6 du temoin) — les cellules r>0
+	//      sont massivement a bas overlap, la politique s'adapte sur des
+	//      continuations pauvres en board, et les lignes ENTRELACEES que le
+	//      temoin trouve depuis la racine disparaissent.
+	// La lecon (troisieme mesure du meme canal apres l'echelle) : la
+	// re-entree par rejeu COUPLE la politique adaptative partagee a la
+	// famille re-entree, quelle qu'elle soit — l'hypothese d'independance
+	// de la course (R6, forme close raffinee) est violee par ce canal, et
+	// le cout additif C_grille est INATTEIGNABLE par « rejeu + adaptation
+	// partagee » ensemble. Le mecanisme reste cable comme TEMOIN de sa
+	// propre refutation ; tout successeur doit DECOUPLER l'adaptation des
+	// lignes re-entrees, et repasser par l'A/B en proportion.
+	const ArchiveEntry* pick = nullptr;
+	if(cfg.grid && cfg.serial_reqs.empty()) {
+		static thread_local std::vector<const ArchiveEntry*> ripped;
+		ripped.clear();
+		for(const ArchiveEntry& e : archive)
+			if(e.resolves > 0)
+				ripped.push_back(&e);
+		if(ripped.empty())
+			return;
+		pick = ripped[next() % ripped.size()];
+	} else {
+		pick = &archive[next() % archive.size()];
+		const ArchiveEntry* other = &archive[next() % archive.size()];
+		if(other->score > pick->score)
+			pick = other;
+	}
 	if(want_refine) {
 		size_t best_i = 0;
 		for(size_t i = 1; i < archive.size(); ++i)

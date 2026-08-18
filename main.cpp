@@ -1366,6 +1366,15 @@ struct Options {
 	// juge mandate : 0 etat infaisable NOUVEAU le long de la reference).
 	// Faux par defaut le temps de la mesure.
 	bool quota_h = false;
+	// LA GRILLE (rips x overlap) — s24quater, derivee de la forme close
+	// raffinee (sympy 13/13). Cle d'archive = cellule (resolutions, overlap),
+	// un elite par cellule (28 max) ; re-entree UNIFORME sur les cellules ;
+	// racines A2 = TOUTES les cellules rippees. Le geste canonique
+	// MAP-Elites/Pareto-MCTS, et la seule cle sous laquelle le cout de
+	// l'entrelacement de la conjonction est additif (le scalaire perd
+	// ~2*b^(l_t-1)/L = 4e7 aux valeurs mesurees). Regime sans serialisation
+	// (MIN degraisse), exige --resolve. Faux par defaut le temps de l'A/B.
+	bool grid = false;
 	// GO-EXPLORE COMPLET, premiere moitie (s24) : les archives des recherches
 	// du FINISSEUR (A1/A2/phase 2) entrent dans l'archive globale, chemins
 	// re-enracines au depart. Jusqu'ici elles MOURAIENT avec leur phase — la
@@ -2162,6 +2171,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--op-recipes",       &Options::op_recipes },
 				{ "--quota-legacy",     &Options::quota_legacy },
 				{ "--quota-h",          &Options::quota_h },
+				{ "--grid",             &Options::grid },
 				{ "--archive-fin",      &Options::archive_fin },
 				{ "--carry",            &Options::carry },
 				{ "--resolve-legacy",   &Options::resolve_legacy },
@@ -3752,6 +3762,9 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	// raffinement — sans refine_after ni modele, il est inerte, et
 	// ReportMechanisms le DIT.
 	cfg.quota_h = opt.quota_h;
+	// La grille (rips x overlap), s24quater. Ne mord que sans serialisation
+	// armee et avec --resolve — ReportMechanisms le DIT.
+	cfg.grid = opt.grid;
 }
 
 // LE CONTROLE QUI MANQUAIT, et il est la vraie lecon de 9.28 (f).
@@ -3803,11 +3816,21 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 		dep(cfg.landmarks != nullptr, "landmark-w %.2f", cfg.landmark_weight);
 	if(cfg.landmark_h > 0.0f)
 		dep(cfg.landmarks != nullptr, "landmark-h %.2f", cfg.landmark_h);
-	// Le retour au barreau exige l'ECHELLE (serial_reqs) : sans elle, une
-	// cellule d'archive est un cache, pas un barreau — et le mecanisme est
-	// volontairement inerte. Le dire ici evite un bras d'A/B mort-ne.
+	// Le retour au barreau exige une STRUCTURE de cellules : l'echelle
+	// (serial_reqs) ou la grille (s24quater). Sans l'une des deux, une
+	// cellule d'archive est un cache, pas une frontiere — et le mecanisme
+	// est volontairement inerte. Le dire ici evite un bras d'A/B mort-ne.
 	if(cfg.reenter > 0.0f)
-		dep(!cfg.serial_reqs.empty(), "reenter %.2f", cfg.reenter);
+		dep(!cfg.serial_reqs.empty() ||
+				(cfg.grid && !cfg.resolve_min.empty()),
+			"reenter %.2f", cfg.reenter);
+	// La grille exige --resolve (la dimension rips de la cellule) et un
+	// regime SANS serialisation armee (sous echelle, la cle d'echelle garde
+	// la main — la combinaison est une mesure future, pas un defaut).
+	if(cfg.grid)
+		dep(!cfg.resolve_min.empty() && cfg.serial_reqs.empty() &&
+				cfg.archive_k != 0,
+			"grid");
 	// Le raffinement (s22) exige l'echelle ET le modele de bilan prete.
 	if(cfg.refine_after)
 		dep(!cfg.serial_reqs.empty() && cfg.balance != nullptr,
@@ -9557,12 +9580,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						  [](const ArchiveEntry* x, const ArchiveEntry* y) {
 							  return x->score > y->score;
 						  });
-				if(ripped.size() > 3)
-					ripped.resize(3);
-				if(deepest &&
-				   std::find(ripped.begin(), ripped.end(), deepest) ==
-					   ripped.end())
-					ripped.push_back(deepest);
+				// SOUS LA GRILLE (s24quater) : TOUTES les cellules rippees
+				// sont racines — elles sont au plus 21 (3 paliers de rips x
+				// 7 d'overlap), la file de travail les sert toutes, et le
+				// top-3 par score etait exactement la re-scalarisation qui
+				// masquait la famille fermable (2r a overlap haut).
+				if(!opt.grid) {
+					if(ripped.size() > 3)
+						ripped.resize(3);
+					if(deepest &&
+					   std::find(ripped.begin(), ripped.end(), deepest) ==
+						   ripped.end())
+						ripped.push_back(deepest);
+				}
 				for(size_t i = 0; i < ripped.size(); ++i) {
 					// Reculs DERIVES de la longueur du chemin archive, plus
 					// une constante d'etalon ({0,20,40} : sous le point de

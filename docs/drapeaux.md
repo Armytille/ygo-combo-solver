@@ -1,5 +1,19 @@
 # Les drapeaux — inventaire d'audit (session 18, tenu à jour en 19, 21, 22, 23, 24)
 
+> **s24quater** : `--grid` — **RÉFUTÉ en deux variantes, gardé comme témoin
+> de sa propre réfutation** (défaut off, périmètre à l'octet). Clé d'archive
+> = cellule (rips, overlap), un élite par cellule, ré-entrée uniforme,
+> racines A2 = toutes cellules rippées — dérivé de la forme close raffinée
+> (`tools/s24_forme_close_raffinee.py`, 13/13). Mesures (4 graines × 180 s,
+> témoin MIN au même binaire) : V1 (toutes cellules) → 3/4 graines à ZÉRO
+> rip ; V2 (rippées seulement) → ≥3 libre = 0 en 4/4 et jointes dégradées
+> (3r∧1/6 contre 3r∧5/6 au témoin). Cause mesurée trois fois (échelle, V1,
+> V2) : la ré-entrée par rejeu COUPLE la politique NRPA partagée à la
+> famille ré-entrée — l'hypothèse d'indépendance (R6) est violée par le
+> canal d'apprentissage. Tout successeur doit DÉCOUPLER l'adaptation des
+> lignes ré-entrées. La commande nue de référence reste le bras MIN
+> (`--no-serial`, 180 s : 3r∧5/6 sur 3/4 graines, crête-rip 5/6).
+
 > **s24** : trois ajouts, tous FAUX par défaut (témoin = l'historique à l'octet,
 > vérifié sur bancs A et B).
 >
