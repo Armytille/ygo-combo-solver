@@ -7836,10 +7836,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::vector<std::vector<uint8_t>> best_joint_path;
 	auto merge_joint = [&](const SearchStats& st,
 						   const std::vector<std::vector<uint8_t>>& pre) {
+		const size_t cand_len = pre.size() + st.best_joint_path.size();
 		if(st.best_joint_rp &&
 		   (st.best_joint_rp > best_joint_rp ||
 			(st.best_joint_rp == best_joint_rp &&
-			 st.best_joint_overlap > best_joint_overlap))) {
+			 (st.best_joint_overlap > best_joint_overlap ||
+			  (st.best_joint_overlap == best_joint_overlap &&
+			   !best_joint_path.empty() &&
+			   cand_len < best_joint_path.size()))))) {
 			best_joint_rp = st.best_joint_rp;
 			best_joint_overlap = st.best_joint_overlap;
 			best_joint_path = pre;
@@ -7847,6 +7851,20 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								   st.best_joint_path.begin(),
 								   st.best_joint_path.end());
 		}
+	};
+	// Un chemin enracine sur une APPROCHE n'est start-roote que si l'approche
+	// partage le GABARIT du depart — vrai pour les best_joint/best_approach
+	// ecrits par ce pipeline (WriteYrp1 copie graine et parametres), VERIFIE
+	// et non suppose : l'it3 de la s23 a perdu sa meilleure ligne jointe
+	// (3r_3of6, workers d'approche) parce que l'exclusion etait aveugle.
+	auto same_gabarit = [&](const Replay* src) {
+		return src &&
+			   std::equal(std::begin(src->seed), std::end(src->seed),
+						  std::begin(start_yrp.seed)) &&
+			   src->duel_flags == start_yrp.duel_flags &&
+			   src->start_lp == start_yrp.start_lp &&
+			   src->start_hand == start_yrp.start_hand &&
+			   src->draw_count == start_yrp.draw_count;
 	};
 	// Budget GLOBAL : les trois passes se partagent solve_ms, elles ne
 	// l'empilent pas — un --solve-ms de 600 s doit durer ~600 s.
@@ -9309,6 +9327,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									AR.sols.push_back(std::move(x));
 									found.fetch_add(1);
 								}
+								// La ligne jointe de la conversion LTS aussi
+								// (gabarit verifie) : c'est ICI qu'une
+								// approche a rips complets se referme.
+								if(same_gabarit(ap))
+									merge_joint(st, pre);
 							}
 							fa.Pop();
 						} else {
@@ -9621,12 +9644,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 												st.best_path.begin(),
 												st.best_path.end());
 										}
-										// La ligne jointe aussi — seulement
-										// depuis le duel de DEPART (un prefixe
-										// d'approche ne se rejoue pas depuis
-										// le gabarit).
-										if(R.a < 0)
+										// La ligne jointe aussi — depuis le duel
+										// de DEPART, ou depuis une approche au
+										// MEME gabarit (verifie, pas suppose).
+										if(R.a < 0) {
 											merge_joint(st, R.pre);
+										} else {
+											ApproachSols& JAR = approach_runs
+												[static_cast<size_t>(R.a)];
+											const Replay* asrc =
+												JAR.holder->IsStreamed()
+													? JAR.holder->Embedded()
+													: JAR.holder.get();
+											if(same_gabarit(asrc))
+												merge_joint(st, R.pre);
+										}
 									}
 								}
 							} else {

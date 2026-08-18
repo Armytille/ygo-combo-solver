@@ -1553,13 +1553,20 @@ bool Search::GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,
 	if(resolve_total && rp_here >= resolve_total &&
 	   common > stats.best_overlap_ripped)
 		stats.best_overlap_ripped = common;
-	// La meilleure ligne JOINTE (s23) : max lexicographique (rips, board).
-	// Copie rare (au plus quelques ameliorations par recherche) — c'est le
-	// chemin qui se reinjecte par --approach a la session suivante.
+	// La meilleure ligne JOINTE (s23) : max lexicographique (rips, board,
+	// chemin COURT). Le troisieme axe est une lecon payee : la ligne 3r+3/6
+	// de l'it4 arrivait a 239 decisions en fin de tour SANS ressources — la
+	// conversion LTS depuis son recul 0 s'epuisait a 34 expansions. A rips et
+	// board egaux, la ligne courte a garde sa reserve et son tour : c'est
+	// elle qui se referme. Copie rare (au plus quelques ameliorations par
+	// recherche) — le chemin se reinjecte par --approach.
 	if(rp_here &&
 	   (rp_here > stats.best_joint_rp ||
 		(rp_here == stats.best_joint_rp &&
-		 common > stats.best_joint_overlap))) {
+		 (common > stats.best_joint_overlap ||
+		  (common == stats.best_joint_overlap &&
+		   !stats.best_joint_path.empty() &&
+		   path.size() < stats.best_joint_path.size()))))) {
 		stats.best_joint_rp = rp_here;
 		stats.best_joint_overlap = common;
 		stats.best_joint_path = path;
