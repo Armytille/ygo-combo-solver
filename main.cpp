@@ -11849,6 +11849,15 @@ int main(int argc, char** argv) {
 			}
 			std::printf("\n");
 		}
+		// La vie du cache de scripts (s24) : combien de relectures disque le
+		// run aurait payees sans lui. Un chiffre eleve nomme le trafic
+		// « script charge apres le Push racine, annule par chaque Restore » —
+		// invisible jusqu'ici parce que rien ne le comptait.
+		if(scripts.CacheHits())
+			std::printf("\n  cache de scripts : %llu relecture(s) disque "
+						"evitee(s) (%zu script(s) en memoire)\n",
+						(unsigned long long)scripts.CacheHits(),
+						scripts.CacheEntries());
 		if(g_depth_fallbacks.load(std::memory_order_relaxed))
 			std::printf("\n  !! %llu recherche(s) de finisseur ont recu le "
 						"plafond de profondeur de REPLI (%u decisions) :\n"

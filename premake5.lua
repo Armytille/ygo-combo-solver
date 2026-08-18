@@ -89,6 +89,18 @@ project "solver_lua"
 	includedirs { path.join(ocgdir, "lua"), here }
 	forceincludes { "luaconf-customize.h" }
 	warnings "Off"
+	-- Leviers de codegen s24, CORE et LUA SEULEMENT (82-86 % du temps par
+	-- decision vit dans OCG_DuelProcess ; le solveur, lui, porte le simplexe
+	-- en double — on ne touche pas a son codegen pour garder les h des bancs
+	-- a l'octet). AVX2 : la machine est un Zen 5 ; /fp:precise ne contracte
+	-- pas en FMA (VS2022), l'arithmetique Lua reste bit-identique. /GS- :
+	-- pas de cookie de pile sur des fonctions chaudes minuscules. /Ob3 :
+	-- inlining agressif (VS2019+). Chaque levier est juge par la mesure
+	-- µs/appel de Process (tools/s24_perf_mesure.ps1) ET par les bancs.
+	filter "configurations:Release"
+		vectorextensions "AVX2"
+		buildoptions { "/GS-", "/Ob3" }
+	filter {}
 
 project "solver_ocgcore"
 	kind "StaticLib"
@@ -96,6 +108,11 @@ project "solver_ocgcore"
 	includedirs { ocgdir, path.join(ocgdir, "lua/src") }
 	rtti "Off"
 	warnings "Off"
+	-- Memes leviers que solver_lua (voir le commentaire au-dessus).
+	filter "configurations:Release"
+		vectorextensions "AVX2"
+		buildoptions { "/GS-", "/Ob3" }
+	filter {}
 
 project "solver_lzma"
 	kind "StaticLib"

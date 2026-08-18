@@ -94,7 +94,23 @@ public:
 	// Renvoie le contenu du script, BOM retire. Vide si introuvable.
 	// Appelable depuis plusieurs threads : le provider est partage entre les
 	// workers, seul le journal des manquants est mutable.
+	//
+	// CACHE MEMOIRE (s24, chantier perf). Un script charge APRES le Push
+	// racine d'une arene est ANNULE par chaque Restore : le core le redemande
+	// au tirage suivant, et chaque redemande etait une passe de repertoires +
+	// fopen/fread. Le contenu d'un script est IMMUABLE pendant un run (les
+	// depots ne bougent pas sous nos pieds) : premiere lecture au disque,
+	// toutes les suivantes en memoire. La recompilation Lua, elle, reste —
+	// seule l'E/S disparait. `CacheHits()` est la vie du mecanisme.
 	std::vector<char> Read(const std::string& name);
+	uint64_t CacheHits() const {
+		std::lock_guard<std::mutex> lock(misses_mutex);
+		return cache_hits;
+	}
+	size_t CacheEntries() const {
+		std::lock_guard<std::mutex> lock(misses_mutex);
+		return cache.size();
+	}
 
 	const std::vector<std::string>& Dirs() const { return dirs; }
 	std::unordered_set<std::string> Misses() const {
@@ -117,6 +133,11 @@ private:
 	mutable std::mutex misses_mutex;
 	std::unordered_set<std::string> misses;
 	std::unordered_set<std::string> unreadable;
+	// Cache memoire des scripts lus (s24) — cle : nom normalise. Les echecs
+	// ne sont PAS caches : ils sont rares, deja journalises (misses), et un
+	// cache negatif masquerait une erreur d'E/S transitoire.
+	std::unordered_map<std::string, std::vector<char>> cache;
+	uint64_t cache_hits = 0;
 };
 
 } // namespace solver

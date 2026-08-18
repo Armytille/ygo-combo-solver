@@ -265,6 +265,18 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 	while(name.rfind("./", 0) == 0)
 		name.erase(0, 2);
 
+	// Le cache d'abord (s24) : un script deja lu ne repaye ni la passe de
+	// repertoires ni l'E/S. Copie rendue par valeur — le tampon du cache
+	// appartient a l'hote (ArenaPause), l'appelant fait ce qu'il veut du sien.
+	{
+		std::lock_guard<std::mutex> lock(misses_mutex);
+		auto it = cache.find(name);
+		if(it != cache.end()) {
+			++cache_hits;
+			return it->second;
+		}
+	}
+
 	// `bad_read` distingue « le fichier n'est pas la » de « le fichier est la et
 	// je n'ai pas su le lire ». Confondre les deux faisait tomber le chargeur au
 	// depot SUIVANT et charger la MEME carte depuis une autre version du jeu de
@@ -298,13 +310,19 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 		return buf;
 	};
 
+	auto remember = [&](const std::vector<char>& buf) {
+		std::lock_guard<std::mutex> lock(misses_mutex);
+		cache.emplace(name, buf);
+	};
 	std::error_code ec;
 	for(const auto& d : dirs) {
 		fs::path p = fs::path(d) / name;
 		if(fs::is_regular_file(p, ec)) {
 			auto buf = slurp(p);
-			if(!buf.empty())
+			if(!buf.empty()) {
+				remember(buf);
 				return buf;
+			}
 			if(bad_read)
 				break;   // ne PAS se rabattre sur une autre version
 		}
@@ -313,8 +331,10 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 		fs::path direct = fs::path(workdir) / name;
 		if(fs::is_regular_file(direct, ec)) {
 			auto buf = slurp(direct);
-			if(!buf.empty())
+			if(!buf.empty()) {
+				remember(buf);
 				return buf;
+			}
 		}
 	}
 	{
