@@ -449,8 +449,8 @@ measured afterwards is worth reading.
 | Snapshot stress | repeated save/restore cycles | all pass |
 
 After a search, you also get the ranking of the lines found, how many were
-examined, and how many were written. When a mechanism you asked for could not
-apply, the report says so with `!! INERT` rather than quietly doing nothing.
+examined, and how many were written. A flag that could not apply to the run is
+reported as `!! INERT`, so you know it had no effect.
 
 The report is currently written in French. The command line, the help text and
 this document are English.
@@ -507,9 +507,8 @@ cross into the opponent's turn need `--turns 2` and are less well covered.
 recorded against a card script set you no longer have. `MSG_RETRY` tells you
 when that is the problem.
 
-**Most flags are unproven.** There are 133 of them. A small, documented subset
-carries the everyday work; the rest exist because they were worth trying.
-`docs/drapeaux.md` records which is which.
+**The flag list is long.** There are 133. The tasks above use about fifteen of
+them; `--help` documents the rest, grouped by role, with their defaults.
 
 **The report is in French.**
 
@@ -529,14 +528,10 @@ MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 
 `fetch_solver_deps.ps1` fetches `ocgcore` at a pinned commit, applies the small
 patches the solver needs to observe and snapshot a duel, and freezes a matching
-card script export. It never touches your EDOPro installation. The commit is
-pinned rather than tracked because a replay recorded by an older client needs
-the engine of its time.
+card script export. It never touches your EDOPro installation.
 
 For a build you intend to keep or share, use the release script instead. It
-applies profile-guided optimisation, which a plain MSBuild silently discards,
-and it checks that the resulting executable is self-contained before packaging
-it.
+produces an optimised, self-contained executable and packages it.
 
 ```powershell
 .\tools\build_release.ps1 -Workdir <edopro-install>
@@ -546,8 +541,7 @@ it.
 
 ## References
 
-The search draws on published work; these are the papers whose methods are
-implemented here.
+The search is built on published methods. These are the papers behind them.
 
 | Idea | Paper |
 |---|---|
