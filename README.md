@@ -22,6 +22,7 @@ lines".
 - [What it does](#what-it-does)
 - [Requirements](#requirements)
 - [Build](#build)
+- [Release](#release)
 - [Usage](#usage)
 - [The constraint grammar](#the-constraint-grammar)
 - [The flag you cannot forget](#the-flag-you-cannot-forget)
@@ -138,7 +139,10 @@ External dependencies, all outside this repository:
 MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-The binary lands in `bin\Release\combosolver.exe`.
+The binary lands in `bin\Release\combosolver.exe`. That is the build for
+iterating; for anything you intend to keep or hand to someone, see
+[Release](#release) below — an ordinary MSBuild silently discards the
+profile-guided optimisation.
 
 `fetch_solver_deps.ps1` never writes into the machine's EDOPro installation. It
 extracts one ocgcore commit plus the matching `lua/src` commit into
@@ -162,6 +166,46 @@ The processor state matters more than it looks. The public API only exposes the
 zones, so two instants in the middle of the same chain resolution — same field,
 same hand, same prompt — hash to the same value without it. They then get merged
 by the transposition table and the combo branch is pruned at the start, silently.
+
+---
+
+## Release
+
+```powershell
+.\tools\build_release.ps1 -Workdir <edopro-install>
+```
+
+Roughly ten minutes: an instrumented link, three training runs, an optimised
+relink, a self-containment check, then `dist\` and a zip beside it. Pass
+`-NoPgo` to skip the training and get a plain LTO build in about two.
+
+**Why a script rather than MSBuild.** MSVC applies a profile at *link* time,
+through the `_LINK_` environment variable. Any ordinary build relinks without
+`/USEPROFILE` and throws the profile away without saying so, which means a
+release has to be built here and rebuilt here after every engine change.
+
+**What the profile is worth.** 11.06 → 10.55 µs per `Process` call, a 4.6 %
+median gain over three interleaved repetitions. All six runs made exactly
+49 280 calls, so this is a fixed-work comparison, and the two distributions
+are disjoint. It is well below the 21.4 % recorded in the design notes, which
+was trained on seven regimes including the benchmark it was then measured on;
+the profile this script builds is narrower, and buys less. The judge is µs per
+call — never the rollout counter, whose dispersion at a fixed seed is larger
+than the effect.
+
+**The binary is the deliverable.** It is statically linked and imports
+`KERNEL32.dll` and nothing else; the build script fails if that ever stops
+being true. Nothing is resolved relative to the executable, so it runs from
+anywhere, with any working directory:
+
+```powershell
+$env:COMBOSOLVER_WORKDIR = "C:\Games\ProjectIgnis"
+C:\anywhere\combosolver.exe .\gabarits\etalon_a_lunalight.yrp --solve --outdir out
+```
+
+Card databases and scripts are read from the EDOPro installation; `--outdir`
+is resolved against the current directory. The zip carries the executable, this
+README and the replay template used by the examples.
 
 ---
 
@@ -461,7 +505,7 @@ the board, so only what holds is written out.
 | `operators.h` / `.cpp` | static analysis of the deck's Lua scripts, and the LP over the operator table |
 | `premake5.lua` | build definition (solver, ocgcore, Lua, LZMA) |
 | `gabarits/` | a small replay used by the smoke run above |
-| `tools/` | dependency fetch, replay inspection, and the sympy proofs of the formulas in the code |
+| `tools/` | dependency fetch, release build, replay inspection, and the sympy proofs of the formulas in the code |
 | `docs/` | design notes, flag inventory, session reports |
 
 `docs/combo-solver-design.md` is the long form: the trade-offs, the

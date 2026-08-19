@@ -13,6 +13,10 @@ archive_runs/
 m[A-Z]*_*/
 s[0-9A-Z]*_*/
 
+# Release packaging (tools/build_release.ps1)
+dist/
+combosolver-*.zip
+
 # Logs and working files
 *.log
 
