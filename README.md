@@ -1,171 +1,102 @@
-# combosolver
+# ygo-combo-solver
 
-A headless combo solver for [EDOPro](https://github.com/edo9300/edopro) replays.
+Finds Yu-Gi-Oh! combo lines by searching inside a real duel.
 
-Give it a `.yrpX`. It replays the recorded line inside a real `ocgcore` duel,
-captures the board the player ends their turn on, and then searches for other
-ways to reach that same board — from the same duel, from another decklist, or
-from a hand you write out by hand. What it writes back are `.yrp` replays you
-can open in EDOPro.
+The solver links [`ocgcore`](https://github.com/edo9300/ygopro-core) statically.
+It replays a `.yrpX` recording in a live duel, captures the board the player
+finishes their turn on, then searches for other move sequences that reach the
+same board. Results are written as `.yrp` replays that open in EDOPro.
 
-There is no rules engine of our own here. Every legality question is answered by
-`ocgcore` itself, and every move the solver considers is a move the core offered
-at a `MSG_SELECT_*` prompt. What the project adds is the ability to *back up*: a
-memory arena that snapshots and restores a live duel in a fraction of a
-millisecond, which is what turns "replay one line" into "search a space of
-lines".
+The solver implements no game rules. Legality is decided by `ocgcore`, and every
+move it considers comes from a `MSG_SELECT_*` prompt the core issued. The
+project supplies a memory arena that snapshots and restores a live duel in
+0.12 ms, making tree search over duel states practical.
 
 ---
 
 ## Contents
 
-- [What it does](#what-it-does)
 - [Requirements](#requirements)
 - [Build](#build)
 - [Release](#release)
-- [Usage](#usage)
-- [The constraint grammar](#the-constraint-grammar)
-- [The flag you cannot forget](#the-flag-you-cannot-forget)
-- [What a run prints](#what-a-run-prints)
-- [How it works](#how-it-works)
-- [The search stack](#the-search-stack)
+- [Modes](#modes)
+- [Flags](#flags)
+- [Script sets and replay fidelity](#script-sets-and-replay-fidelity)
+- [Constraint grammar](#constraint-grammar)
+- [Opponent test](#opponent-test)
+- [Output](#output)
+- [Design](#design)
+- [Search algorithms](#search-algorithms)
 - [Repository layout](#repository-layout)
-- [State of the work](#state-of-the-work)
+- [Conventions](#conventions)
+- [Limitations](#limitations)
 - [References](#references)
-
----
-
-## What it does
-
-Four modes, all driven from the same binary.
-
-**1. Instrumented replay (no search).** The default. It replays the line, prints
-what the core offered at every decision, captures the target board, and then
-runs its own self-checks: restore fidelity and a snapshot stress test.
-
-```bash
-combosolver.exe duel.yrpX --scriptdir <scripts> --workdir <edopro-install>
-```
-
-**2. A better line to the same board, in the same duel.** Bounded-discrepancy
-search seeded on the recorded line: follow the reference and allow at most *k*
-deviations. At zero deviations it replays the reference, so it always finds at
-least one solution — which makes "no solution" a defect signal rather than a
-possible result.
-
-```bash
-combosolver.exe duel.yrpX --scriptdir <scripts> --solve --outdir solutions
-```
-
-**3. The same board from another duel** — another deck, another hand, another
-seed. The recorded answers designate nothing there, so what travels is the
-line's *intent*: each decision is identified by the cards it engages, not by the
-index it happened to have.
-
-```bash
-# from another replay
-combosolver.exe ref.yrpX --scriptdir <scripts> --start other.yrpX --outdir solutions
-
-# from a decklist plus an opening hand, with no starting replay
-combosolver.exe ref.yrpX --scriptdir <scripts> \
-    --deck "<edopro-install>\deck\Lunalight.ydk" \
-    --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom" \
-    --outdir solutions
-```
-
-The hand is forced through `DUEL_PSEUDO_SHUFFLE` and then **verified** on a
-throwaway duel before any search starts: which end of the deck the core draws
-from is not guessed, it is checked, and a mismatch is a hard error rather than a
-search on a hand you only believe you have.
-
-**4. Goal-only mode.** No reference line at all: the replay is demoted to a duel
-template (flags, life points, opponent deck) and the target board is written out
-by hand.
-
-```bash
-combosolver.exe template.yrpX --scriptdir <scripts> \
-    --deck Lunalight.ydk --hand "57103969|57103969|57103969" \
-    --no-ref --target 54701958 --target 54701958 --target 54701958 \
-    --target "90590304@DEF" --max-decisions 700
-```
-
-**As a judge.** With the same constraint flags and no `--solve`, the tool checks
-whether *any* replay — one it produced, or one played by hand — respects the
-discipline you asked for.
-
-```bash
-combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> \
-    --guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
-```
 
 ---
 
 ## Requirements
 
-Windows x64, Visual Studio 2022 build tools, PowerShell, Python 3 for the
-verification scripts in `tools/` (sympy, for the ones that check a formula).
+Windows x64, Visual Studio 2022 build tools, PowerShell. Python 3 with sympy for
+the formula-checking scripts in `tools/`.
 
-A working EDOPro installation, pointed at by `--workdir`. It must contain
-`cards.cdb`, `expansions/`, `repositories/` and the card scripts — the solver
-reads them the way the client does, and never writes into that tree.
+A working EDOPro installation containing `cards.cdb`, `expansions/`,
+`repositories/` and the card scripts. The solver reads that tree the way the
+client does and never writes to it.
 
-There is no default: the binary contains no absolute path. Either pass
-`--workdir` on every run, or set it once in the environment:
+The binary contains no absolute path. Point it at the installation with
+`--workdir` on each run, or set the location once:
 
 ```powershell
 setx COMBOSOLVER_WORKDIR "C:\Games\ProjectIgnis"
 ```
 
-`--workdir` wins over the variable. With neither, the run refuses to start
-rather than guess.
+`--workdir` takes precedence over the variable. With neither set, the run stops
+with an error.
 
-External dependencies, all outside this repository:
+Dependencies fetched or expected outside this repository:
 
-| Path | Role |
+| Path | Contents |
 |---|---|
-| `../edopro/ocgcore` | the git repository ocgcore is extracted from, at a chosen commit |
-| `../edopro/gframe/lzma` | LZMA sources (compressed replays) |
-| `../deps/ocgcore` | the extracted, patched copy, produced by the script below |
-| `../deps/scripts_<date>` | a frozen export of the card scripts |
-| `../vcpkg` | sqlite3, `x64-windows-static` |
+| `../edopro/ocgcore` | source repository for `ocgcore`, checked out at a pinned commit |
+| `../edopro/gframe/lzma` | LZMA sources, used for compressed replays |
+| `../deps/ocgcore` | patched copy produced by `tools/fetch_solver_deps.ps1` |
+| `../deps/scripts_<date>` | frozen export of the card scripts |
+| `../vcpkg` | sqlite3, triplet `x64-windows-static` |
 
 ---
 
 ## Build
 
 ```powershell
-.\tools\fetch_solver_deps.ps1        # extract and patch ocgcore, lua and the scripts
+.\tools\fetch_solver_deps.ps1
 ..\premake5\premake5.exe vs2022 --vcpkg-root=..\..\vcpkg
 MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-The binary lands in `bin\Release\combosolver.exe`. That is the build for
-iterating; for anything you intend to keep or hand to someone, see
-[Release](#release) below — an ordinary MSBuild silently discards the
-profile-guided optimisation.
+The binary is written to `bin\Release\combosolver.exe`. Use this build for
+development. For a build you intend to keep or distribute, see
+[Release](#release): an ordinary MSBuild discards the profile-guided
+optimisation without reporting it.
 
-`fetch_solver_deps.ps1` never writes into the machine's EDOPro installation. It
-extracts one ocgcore commit plus the matching `lua/src` commit into
-`../deps/ocgcore`, applies the patches below, and freezes a card script export
-next to it.
+`fetch_solver_deps.ps1` extracts one `ocgcore` commit and the matching `lua/src`
+commit into `../deps/ocgcore`, applies the patches listed below, and freezes a
+card script export next to it. It does not modify the EDOPro installation.
 
-### The ocgcore patches
+### Patches applied to ocgcore
 
-Three files are modified in the extracted copy, and each one is load-bearing.
-
-| Target | Why |
+| File | Change |
 |---|---|
-| `lua/luaconf-customize.h` | deterministic string hash seed, and the declaration of the arena allocator hook |
-| `lua/src/lauxlib.c` | routes the Lua heap into the arena — without it the duel's state cannot be captured at all |
+| `lua/luaconf-customize.h` | fixed string hash seed; declaration of the arena allocator hook |
+| `lua/src/lauxlib.c` | routes the Lua heap through the arena allocator |
 | `ocgapi.cpp` / `ocgapi.h` | adds `OCG_DuelQueryProcessorState`: phase, resolution stack, current chain, once-per-turn counters |
 
-The C++ side of the core is **not** patched: its allocations are captured by a
-global `operator new` overload on the solver's side.
+The C++ side of the core is unpatched. Its allocations are captured by a global
+`operator new` overload on the solver side.
 
-The processor state matters more than it looks. The public API only exposes the
-zones, so two instants in the middle of the same chain resolution — same field,
-same hand, same prompt — hash to the same value without it. They then get merged
-by the transposition table and the combo branch is pruned at the start, silently.
+`OCG_DuelQueryProcessorState` is required for correct state hashing. The public
+API exposes only the zones, so two instants inside the same chain resolution —
+identical field, hand and prompt — produce the same hash without it. The
+transposition table then merges them and prunes the branch.
 
 ---
 
@@ -175,100 +106,188 @@ by the transposition table and the combo branch is pruned at the start, silently
 .\tools\build_release.ps1 -Workdir <edopro-install>
 ```
 
-Roughly ten minutes: an instrumented link, three training runs, an optimised
-relink, a self-containment check, then `dist\` and a zip beside it. Pass
-`-NoPgo` to skip the training and get a plain LTO build in about two.
+Takes about ten minutes: instrumented link, three training runs, optimised
+relink, self-containment check, then `dist\` and a zip beside it. `-NoPgo` skips
+the training and produces a plain LTO build in about two minutes.
 
-**Why a script rather than MSBuild.** MSVC applies a profile at *link* time,
-through the `_LINK_` environment variable. Any ordinary build relinks without
-`/USEPROFILE` and throws the profile away without saying so, which means a
-release has to be built here and rebuilt here after every engine change.
+MSVC applies a profile at link time through the `_LINK_` environment variable.
+An ordinary MSBuild relinks without `/USEPROFILE` and silently drops the
+profile, so releases must be built with this script and rebuilt with it after
+every engine change.
 
-**What the profile is worth.** 11.06 → 10.55 µs per `Process` call, a 4.6 %
-median gain over three interleaved repetitions. All six runs made exactly
-49 280 calls, so this is a fixed-work comparison, and the two distributions
-are disjoint. It is well below the 21.4 % recorded in the design notes, which
-was trained on seven regimes including the benchmark it was then measured on;
-the profile this script builds is narrower, and buys less. The judge is µs per
-call — never the rollout counter, whose dispersion at a fixed seed is larger
-than the effect.
+Measured gain from the profile this script produces: 11.06 → 10.55 µs per
+`Process` call, a 4.6 % median improvement over three interleaved repetitions.
+All six runs made exactly 49 280 calls, making this a fixed-work comparison, and
+the two distributions do not overlap. The design notes record 21.4 % for a
+profile trained on seven regimes including the benchmark it was measured on;
+this script trains on the replay template in `gabarits/` only. The metric is µs
+per call. The rollout counter is unusable here because its dispersion at a fixed
+seed exceeds the effect size.
 
-**The binary is the deliverable.** It is statically linked and imports
-`KERNEL32.dll` and nothing else; the build script fails if that ever stops
-being true. Nothing is resolved relative to the executable, so it runs from
-anywhere, with any working directory:
+The binary is statically linked and imports `KERNEL32.dll` only; the build
+script fails if that changes. No path is resolved relative to the executable, so
+it runs from any location with any working directory:
 
 ```powershell
 $env:COMBOSOLVER_WORKDIR = "C:\Games\ProjectIgnis"
 C:\anywhere\combosolver.exe .\gabarits\etalon_a_lunalight.yrp --solve --outdir out
 ```
 
-Card databases and scripts are read from the EDOPro installation; `--outdir`
-is resolved against the current directory. The zip carries the executable, this
-README and the replay template used by the examples.
+Card databases and scripts are read from the EDOPro installation. `--outdir` is
+resolved against the current directory. The zip contains the executable, this
+README, and the replay template used by the examples.
 
 ---
 
-## Usage
+## Modes
 
-`combosolver.exe --help` prints all 133 flags with their defaults. The ones you
-actually need to know:
+### 1. Instrumented replay
+
+The default. Replays the recorded line, reports what the core offered at each
+decision, captures the target board, and runs its self-checks.
+
+```bash
+combosolver.exe duel.yrpX --scriptdir <scripts> --workdir <edopro-install>
+```
+
+### 2. Search in the same duel
+
+Bounded-discrepancy search seeded on the recorded line: follow the reference and
+allow at most *k* deviations. At zero deviations it reproduces the reference, so
+this mode always returns at least one solution. An empty result signals a
+defect.
+
+```bash
+combosolver.exe duel.yrpX --scriptdir <scripts> --solve --outdir solutions
+```
+
+### 3. Same board, different duel
+
+Another deck, another hand, another seed. Recorded answers are indices and mean
+nothing in a different duel, so each decision is re-identified by the cards it
+engages.
+
+```bash
+# starting from another replay
+combosolver.exe ref.yrpX --scriptdir <scripts> --start other.yrpX --outdir solutions
+
+# starting from a decklist and an opening hand
+combosolver.exe ref.yrpX --scriptdir <scripts> \
+    --deck "<edopro-install>\deck\Lunalight.ydk" \
+    --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom" \
+    --outdir solutions
+```
+
+The requested hand is forced through `DUEL_PSEUDO_SHUFFLE` and then verified on
+a throwaway duel before the search starts. Which end of the deck the core draws
+from is checked rather than assumed, and a mismatch stops the run.
+
+### 4. Goal-only
+
+No reference line. The replay supplies the duel template — flags, life points,
+opponent deck — and the target board is written out explicitly.
+
+```bash
+combosolver.exe template.yrpX --scriptdir <scripts> \
+    --deck Lunalight.ydk --hand "57103969|57103969|57103969" \
+    --no-ref --target 54701958 --target 54701958 --target 54701958 \
+    --target "90590304@DEF" --max-decisions 700
+```
+
+### 5. Judge
+
+With constraint flags and without `--solve`, the tool checks whether a replay —
+one it produced, or one played by hand — satisfies the constraints.
+
+```bash
+combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> \
+    --guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
+```
+
+---
+
+## Flags
+
+`combosolver.exe --help` lists all 133 flags with their defaults. The ones in
+regular use:
 
 | Flag | Meaning |
 |---|---|
-| `--workdir <dir>` | EDOPro installation (or `COMBOSOLVER_WORKDIR`) |
-| `--scriptdir <dir>` | card script set, highest priority first (see below) |
-| `--player <0\|1>` | whose turn is being optimised |
-| `--outdir <dir>` | where the replays are written |
-| `--solve` | search instead of only replaying |
+| `--workdir <dir>` | EDOPro installation, or set `COMBOSOLVER_WORKDIR` |
+| `--scriptdir <dir>` | card script set, highest priority first; repeatable |
+| `--player <0\|1>` | whose turn is optimised |
+| `--outdir <dir>` | destination for the replays produced |
+| `--solve` | search instead of replaying only |
 | `--solve-ms <ms>` | search time budget |
-| `--threads <n>` | search workers (default: every core) |
-| `--start <replay>` / `--deck <f.ydk>` | rebuild the board from another duel or decklist |
-| `--target <card[@ATK\|DEF]>` | build the target board from scratch |
-| `--optimize` | keep searching for cheaper lines instead of stopping at the first |
-| `--profile` | hot path profile, per phase |
+| `--threads <n>` | search workers; defaults to every core |
+| `--start <replay>` | rebuild the board starting from another duel |
+| `--deck <file.ydk>` | rebuild the board starting from a decklist |
+| `--target <card[@ATK\|DEF]>` | define the target board explicitly; repeatable |
+| `--optimize` | keep searching for cheaper lines rather than stopping at the first |
+| `--profile` | per-phase profile of the hot paths |
 
-For reproducible measurements, `--max-rollouts` replaces the wall-clock budget
-with a rollout count. At `--threads 1` two executions then do exactly the same
-work; the wall-clock budget is what made runs at an identical seed diverge.
+### Reproducible runs
+
+`--max-rollouts` replaces the wall-clock budget with a rollout count. At
+`--threads 1`, two executions then perform identical work. Under a wall-clock
+budget, two runs at an identical seed diverge.
 
 ```powershell
 combosolver.exe ... --threads 1 --max-rollouts 20000 --max-nodes 500000 `
-    --solve-ms 900000   # time must never be the binding bound here
+    --solve-ms 900000   # large enough that time never binds
 ```
 
-This is an attribution instrument, not the production mode: a single worker
-costs roughly five to six times the throughput.
+A single worker costs roughly five to six times the throughput, so this mode is
+for attribution, not for production runs.
 
 ---
 
-## The constraint grammar
+## Script sets and replay fidelity
 
-Constraints are not filters applied after the fact — most of them remove the
-branch from the enumeration.
+`--scriptdir` is required in practice.
 
-**Zones**: `hand`, `field`, `grave` (or `graveyard`), `banished`, `extra`.
-Default `field`. The French spellings the earlier command lines used
-(`main`, `terrain`, `cimetiere`, `banni`) are still accepted.
+A `.yrpX` replays faithfully only with the core and the Lua card scripts
+contemporary with its recording. With a different script set the replay diverges
+without any error: the core asks a different question, the recorded answer no
+longer applies, and the tool continues printing plausible measurements.
 
-**Attributes** (`--material`): `light`, `dark`, `earth`, `water`, `fire`,
-`wind`, `divine`.
+The `MSG_RETRY` counter in the report is the detector. On the reference replay:
+218 retries against the live scripts, 0 against the pinned export produced by
+`fetch_solver_deps.ps1`.
+
+The same constraint applies to the core, which is why the fetch script pins a
+commit instead of tracking `HEAD`. A replay recorded by an older client requires
+an older core even though its scripts update independently.
+
+---
+
+## Constraint grammar
+
+Most constraints remove branches from the enumeration rather than filtering
+results afterwards.
+
+Zones: `hand`, `field`, `grave` (also `graveyard`), `banished`, `extra`.
+Default `field`. The French spellings used by earlier command lines — `main`,
+`terrain`, `cimetiere`, `banni` — remain accepted.
+
+Attributes, for `--material`: `light`, `dark`, `earth`, `water`, `fire`, `wind`,
+`divine`.
 
 ```bash
 # the n-th summon must be one of these cards
 --summon "5:Zalen|Crystal Wing"
 
-# from the 5th summon on, at every OPPONENT response window at least one
-# clause must hold. A clause is a conjunction of card@zone atoms.
+# from the 5th summon onward, at every opponent response window at least one
+# clause must hold; a clause is a conjunction of card@zone atoms
 --guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
 
 # the guard stops being required once the opponent's hand is down to 2 cards
 --guard-off "opphand<=2"
 
-# a state predicate instead of a card: N opponent cards banished
+# state predicate instead of a card: N opponent cards banished
 --guard "5:Dis Pater@field+oppbanished>=1"
 
-# the line must resolve this effect twice, activated FROM THE FIELD
+# the line must resolve this effect twice, activated from the field
 --resolve "PSY-Framelord Omega@field:2"
 
 # the line must summon this card at least once
@@ -284,22 +303,25 @@ Default `field`. The French spellings the earlier command lines used
 --no-chain "Crystal Wing"
 ```
 
-Two distinctions that are easy to get wrong:
+Three details that are easy to misread:
 
-- `--guard` says "when the window opens, a counter is available". It does not
-  say the guard *is* the n-th summon; it may already be in play.
-- `--resolve` is checked **at the goal**, not along the line: a conforming board
-  without the resolutions is not a solution, and the search keeps going.
-- `@zone` on `--resolve` restricts the **activation** zone. Without `@field`,
-  an Omega that rips from the field and an Omega effect resolving from the
-  graveyard both count, which is a measured false positive.
+- `--guard` asserts that an answer is available when the window opens. It does
+  not require the guard to be the n-th summon; the card may already be in play.
+- `--resolve` is checked at the goal, not along the line. A board that matches
+  the target without the required resolutions is rejected and the search
+  continues.
+- `@zone` on `--resolve` restricts the activation zone. Without `@field`, an
+  Omega banishing from the field and an Omega effect resolving from the
+  graveyard both count. This produced a measured false positive.
 
-### Opponent test
+---
 
-`--guard` is a static proxy: it asserts that an answer is available. `--fire`
-plays the threat for real. The card is added to the opponent's hand and
-activated at every window where it is legal — one attempt per window — and the
-search must close the board back up from the post-injection state.
+## Opponent test
+
+`--guard` is a static check: it asserts that an answer is available. `--fire`
+plays the threat. The named card is added to the opponent's hand and activated
+at every window where doing so is legal, one attempt per window, and the search
+must rebuild the board from the resulting state.
 
 ```bash
 combosolver.exe duel.yrpX --scriptdir <scripts> \
@@ -307,44 +329,22 @@ combosolver.exe duel.yrpX --scriptdir <scripts> \
     --resolve "PSY-Framelord Omega@field:2"
 ```
 
-`--fire-spare` names cards that may be spent answering: the target board without
+`--fire-spare` lists cards that may be spent answering; the target board without
 them is also accepted at the goal. `--fire-open` restricts injection to windows
-where the chain is empty, so the threat *starts* a chain instead of being
-chained onto our own effects.
+with an empty chain, so the threat starts a chain instead of being chained onto
+the player's own effects.
 
-Note that a hand test start gives the opponent no hand at all. With no playable
-card across the table the core never opens a response window, the guard is
-satisfied vacuously and a handrip rips nothing — `--opp-hand` is what gives it
-something to work with, and the replays produced only replay with the same
-`--opp-hand`.
-
----
-
-## The flag you cannot forget
-
-**`--scriptdir` is mandatory in practice.**
-
-A `.yrpX` only replays faithfully with the core *and* the Lua card scripts
-contemporary with its recording. With the wrong script set the replay diverges
-**silently**: the core asks a different question, the recorded answer becomes
-invalid, and the tool goes on printing normal-looking measurements.
-
-The one detector is the `MSG_RETRY` counter in the report. On the reference
-replay: 218 retries against the live scripts, **0** against the pinned export
-that `fetch_solver_deps.ps1` produces.
-
-The same applies to the core itself, which is why the fetch script pins a
-commit rather than following `HEAD`. A replay recorded by an older client needs
-an older core, even though its scripts update themselves.
+A hand test start gives the opponent no hand. With no playable card across the
+table the core never opens a response window, the guard passes vacuously and a
+handrip removes nothing. `--opp-hand` supplies the opponent with cards. Replays
+produced under `--opp-hand` only replay with the same `--opp-hand`.
 
 ---
 
-## What a run prints
+## Output
 
-Every run, search or not, ends with self-checks. Their point is that a wrong
-number is worse than no number: if the replay does not reproduce, or if the
-snapshot does not restore the state exactly, nothing measured afterwards means
-anything.
+Every run ends with self-checks. If the replay does not reproduce, or if a
+snapshot does not restore the state exactly, no later measurement is meaningful.
 
 ```
 === resultats ===
@@ -370,197 +370,193 @@ anything.
   ligne complete rejouee apres stress          1/1   ok
 ```
 
-(Reproduce it with `combosolver.exe gabarits\etalon_a_lunalight.yrp --workdir
-<your EDOPro>`. The report text is still French; see
-[State of the work](#state-of-the-work).)
+Reproduce with `combosolver.exe gabarits\etalon_a_lunalight.yrp --workdir <your
+EDOPro>`. The report text is French; see [Limitations](#limitations).
 
-That last block is the one that pays for everything else. Restoring costs
-0.12 ms where re-simulating from the root costs 16.9 ms, and the ratio is what
-makes searching viable at all.
+The search depends on the ratio between the two figures above: 0.12 ms to
+restore a state against 16.9 ms to re-simulate it from the root.
 
-Beyond the self-checks, a run reports what it *cut* and whether each mechanism
-was actually **alive**. A counter that is not printed is not an instrument, and
-several mechanisms in this repository spent whole sessions switched off while
-announcing themselves as active. `!! INERT` in a report means the arm is
-disposable before it is launched, not after.
+Runs also report what was pruned and whether each mechanism was active.
+Mechanisms in this project have stayed switched off for entire sessions while
+reporting as active, so each one now prints a liveness counter. A report
+carrying `!! INERT` invalidates the run before the budget is spent.
 
 ---
 
-## How it works
+## Design
 
-### The arena
+### Memory arena
 
-The OCG API offers no state cloning, and a hand-written serialiser is out of
-reach: at a `MSG_SELECT_*`, Lua coroutines sit suspended in the middle of an
-effect resolution, with their stacks and their upvalues. So the project does not
-save the game — it saves **the memory**.
+The OCG API provides no state cloning. A hand-written serialiser is impractical:
+at a `MSG_SELECT_*`, Lua coroutines are suspended mid-resolution with their
+stacks and upvalues live. The solver saves the memory instead of the game state.
 
-All the duel's mutable memory is confined to an address range under our control:
-the Lua heap through the allocator passed to `lua_newstate`, and the core's C++
-objects through the global `operator new` overload. A restore happens **at the
-same base address**, so every absolute pointer stays valid with no relocation
-and the duel never knows it was restored.
+All mutable duel memory is confined to a controlled address range: the Lua heap
+through the allocator passed to `lua_newstate`, and the core's C++ objects
+through the global `operator new` overload. Restores happen at the same base
+address, so absolute pointers stay valid without relocation and the duel is
+unaware of the restore.
 
-Restores are the frequent operation, and the cheap one: only the pages the child
-dirtied are copied back. Under Windows that uses `GetWriteWatch`; the WebAssembly
-port replaces it with a software write barrier (`arena.cpp`) whose completeness
-is checked by a verifier rather than assumed.
+Restore is the frequent operation and copies back only the pages the child
+dirtied. On Windows this uses `GetWriteWatch`. The WebAssembly port replaces it
+with a software write barrier (`arena.cpp`) whose completeness is checked by a
+verifier.
 
 An allocation that does not fit in the arena goes to the host heap and cannot be
-restored. That is not a statistic but a **stop condition**: the arena is marked
-poisoned and the worker aborts, because everything it measured afterwards would
-describe a duel the restore can no longer reconstitute.
+restored. The arena is then marked poisoned and the worker aborts, because any
+subsequent measurement would describe a duel the restore can no longer
+reconstruct.
 
-### Searching the state graph, not the action tree
+### State graph rather than action tree
 
-The action tree is not enumerable at any speed — 10^97 along the reference line
-alone. What makes exploration possible is searching the **state graph**:
-activating A then B and B then A converge on the same node, and the
-transposition table merges them.
+The action tree along the reference line alone contains about 10^97 sequences.
+The search instead explores the state graph: activating A then B and B then A
+converge on the same node, and the transposition table merges them.
 
-The transposition key covers the visible zones, the prompt payload (which is
-where the once-per-turn counters hide) and the processor state. **Under-hashing
-is the failure mode to watch**: it makes solutions disappear without saying so.
-The report therefore counts merges along the reference line, whose states are
-pairwise distinct by construction.
+The transposition key covers the visible zones, the prompt payload — which is
+where once-per-turn counters appear — and the processor state. Under-hashing
+removes solutions without any error, so the report counts merges along the
+reference line, whose states are pairwise distinct by construction.
 
-Equivalence is chosen, not incidental, and each choice is written down:
+Equivalence decisions:
 
-- Two boards that differ only by a battle position are the **same board** for
-  the goal test; the state digest keeps the full position.
-- Two artworks of one card are the same card (`QUERY_ALIAS`), so a line recorded
-  on one deck recognises itself in another.
-- Deck order **is** a game state (draws, excavations and flips read it), so it is
-  hashed as is; hand and graveyard order is not, so those are sorted.
+| Rule | Reason |
+|---|---|
+| Battle position is ignored for the goal test, kept in the state digest | two boards differing only by position are the same board |
+| Card artworks are collapsed via `QUERY_ALIAS` | a line recorded on one deck must be recognised on another |
+| Deck order is hashed as is | draws, excavations and flips read it |
+| Hand and graveyard order is sorted before hashing | neither is a game state |
 
-### Novelty and serialisation
+### Novelty pruning and subgoals
 
-The transposition table only merges *identical* states, yet two lines differing
-by one card in the graveyard are distinct and not distinctly interesting.
-Novelty pruning (Iterated Width) keeps a state only when it makes at least one
-atom true that has never been true before. The patience is not guessed: the
-`--width` mode measures the longest mute run along the reference line first,
-because chain resolutions go through states that change nothing on the board.
+The transposition table merges identical states only. Two lines differing by one
+card in the graveyard are distinct without being usefully different. Novelty
+pruning (Iterated Width) keeps a state only when it makes at least one atom true
+that has never been true before. `--width` derives the patience parameter from
+a measurement: it records the longest run of states that change nothing along
+the reference line, since chain resolutions produce such runs.
 
-The harder problem is that reaching a subgoal consumes what the next one needs.
-The plain heuristic — how many target cards are on the field — is flat over
-roughly 90 % of a line, so there is nothing to descend. Two mechanisms attack
-that:
+Reaching one subgoal consumes the resources the next one needs. The plain
+heuristic — target cards currently on the field — is flat over roughly 90 % of a
+line, leaving nothing to descend. Two mechanisms address this:
 
-- a **recipe graph**, learned from the summons actually observed (and seeded
-  from card text and from the declared operators), which counts the summons
-  still to be made rather than the cards still missing;
-- a **material balance** solved as a small linear program, whose firing vector
-  `x*` yields intermediate subgoals that exist from the first brick placed. The
-  simplex is two-phase with Bland's rule and self-tests on instances with known
-  solutions before it is allowed to serve.
+- a **recipe graph**, learned from observed summons and seeded from card text
+  and declared operators, counting the summons still required rather than the
+  cards still missing;
+- a **material balance** solved as a small linear program whose firing vector
+  `x*` yields intermediate subgoals that exist from the first card placed. The
+  simplex is two-phase with Bland's rule, and self-tests on instances with known
+  solutions run before it is used.
 
-Neither ever prunes. A product with no known recipe is worth 1, never infinity,
-so at worst the landscape falls back to the flat heuristic and nothing is lost.
+Neither mechanism prunes. A product with no known recipe is worth 1 rather than
+infinity, so the worst case falls back to the flat heuristic.
 
 ---
 
-## The search stack
+## Search algorithms
 
-Rollouts, then a finisher. Rollouts know how to climb; the last step is a needle
-sampling does not find.
+Rollouts first, then a finisher. Rollouts make progress towards the board;
+sampling rarely reaches the last few decisions, so a complete search closes the
+line.
 
-- **NRPA** (Nested Rollout Policy Adaptation): one weight per move *identity*,
-  softmax sampling, adaptation towards the best sequence at each level. The move
-  identity is semantic — the cards a choice engages — so a policy learned on one
-  deck means something on another.
-- **Levin Tree Search** as the finisher: a complete best-first search ordered by
-  `d(n)/pi(n)`, where `pi` is the product of the policy's probabilities along
-  the path. The number of expansions before finding a solution is bounded by the
-  policy's quality, which is what sampling can never promise.
-- **Go-Explore archive**: the K best *distinct* states are kept with the path
-  that reaches them, and the finisher takes its roots there. Returning to a
-  state is cheap here (replay the prefix, restore the arena), which is exactly
-  the part Go-Explore normally has to pay for.
-- **Options**: macros mined from a corpus of solved lines and offered as a
-  single sampling unit. They attack the exponent rather than the base — a
-  160-decision line becomes a ~20-decision one when eight decisions collapse
-  into one action. Selection is by Levin loss, so the catalogue's size is a
-  result rather than a parameter, and mining can run online, inside the run.
+**NRPA** (Nested Rollout Policy Adaptation). One weight per move identity,
+softmax sampling, adaptation towards the best sequence at each level. Move
+identity is semantic — the cards a choice engages — so a policy learned on one
+deck transfers to another.
 
-Every candidate is **verified before it is written**: replayed from scratch in a
-fresh duel, board compared, constraints re-checked. A search that deduplicates
-and canonicalises gives no a priori guarantee that its answer sequence rebuilds
-the board, so only what holds is written out.
+**Levin Tree Search**, used as the finisher. Complete best-first search ordered
+by `d(n)/pi(n)`, where `pi` is the product of the policy's probabilities along
+the path. The number of expansions before a solution is found is bounded by the
+policy's quality.
+
+**Go-Explore archive.** The K best distinct states are kept together with the
+path that reaches them, and the finisher roots itself there. Returning to a
+state costs a prefix replay plus an arena restore. In other Go-Explore
+implementations that return step is the expensive one.
+
+**Options.** Macros mined from a corpus of solved lines and offered as a single
+sampling unit. They reduce the number of decisions rather than the branching
+factor: a 160-decision line becomes roughly 20 decisions when eight collapse
+into one action. Selection is by Levin loss, which derives the catalogue size
+from the corpus. Mining can run inside the search.
+
+Every candidate is verified before being written: replayed from scratch in a
+fresh duel, board compared, constraints re-checked. Deduplication and
+canonicalisation give no guarantee that an answer sequence rebuilds the board,
+so only verified candidates are written out.
 
 ---
 
 ## Repository layout
 
-| File | Role |
+| File | Contents |
 |---|---|
-| `main.cpp` | CLI, the three search drivers, every report, and the instrumented replay |
-| `search.h` / `search.cpp` | the search itself: transposition, novelty, NRPA, LTS, archive, recipe graph, landmarks |
-| `arena.h` / `arena.cpp` | the snapshottable memory arena, its allocator, the hot path profiler |
+| `main.cpp` | CLI, the three search drivers, all reports, instrumented replay |
+| `search.h` / `search.cpp` | transposition, novelty, NRPA, LTS, archive, recipe graph, landmarks |
+| `arena.h` / `arena.cpp` | snapshottable memory arena, allocator, hot path profiler |
 | `duel.h` / `duel.cpp` | wrapper around one statically linked `ocgcore` duel |
-| `enumerate.h` / `.cpp` | decoding a `MSG_SELECT_*` into legal answers, and the equivalence classes |
+| `enumerate.h` / `.cpp` | decoding `MSG_SELECT_*` into legal answers; equivalence classes |
 | `prompt.h` / `prompt.cpp` | branching-factor accounting per prompt type |
 | `replay.h` / `replay.cpp` | reading and writing `.yrpX` / `.yrp1` |
 | `assets.h` / `assets.cpp` | serving `cards.cdb` rows and Lua scripts to the core |
-| `operators.h` / `.cpp` | static analysis of the deck's Lua scripts, and the LP over the operator table |
-| `premake5.lua` | build definition (solver, ocgcore, Lua, LZMA) |
-| `gabarits/` | a small replay used by the smoke run above |
-| `tools/` | dependency fetch, release build, replay inspection, and the sympy proofs of the formulas in the code |
+| `operators.h` / `.cpp` | static analysis of the deck's Lua scripts; LP over the operator table |
+| `lp_fuzz_cases.inc` | LP instances solved in exact rationals by sympy, compiled in as self-tests |
+| `premake5.lua` | build definition: solver, ocgcore, Lua, LZMA |
+| `gabarits/` | replay template used by the examples |
+| `tools/` | dependency fetch, release build, replay inspection, sympy proofs |
 | `docs/` | design notes, flag inventory, session reports |
 
-`docs/combo-solver-design.md` is the long form: the trade-offs, the
-measurements, and the dead ends, including the abandoned ones and why.
-`docs/drapeaux.md` is the flag inventory — judged, refuted, never judged.
+`docs/combo-solver-design.md` is the long-form record of trade-offs,
+measurements and abandoned approaches. `docs/drapeaux.md` is the flag inventory,
+classified as judged, refuted, or never judged.
 
 ---
 
-## State of the work
+## Conventions
 
-This is a research tool, and its README should say what it does not do.
+**Defaults carry the behaviour.** The project rule: a defect is fixed in the
+code, never behind a flag. A mechanism gets a flag only while it is being
+measured; once judged it becomes the default and the flag inverts to `--no-…`
+so the A/B stays reproducible.
 
-**It converts, but not reliably.** On the harder of the two benchmarks the
-solver writes solutions in some runs and none in others at an identical seed;
-the design notes record a judge returning `0, 0, 0, 89, 2239` over five
-executions of the same command. That is a rare event, not measurement noise. Any
-comparison on that benchmark needs N runs per arm and must be read as a
-*proportion* of runs that succeed, never as one counter's value.
+**Mechanisms report their own activity.** `--assign-bias` was inert for two
+sessions while the run reported it as active. Every mechanism now prints a
+liveness counter, and `!! INERT` invalidates a run.
 
-**Most flags have never been judged.** There are 133 of them.
-`docs/drapeaux.md` classifies each one, and the honest total of "written,
-instrumented, no verdict" is large. A flag that has never been judged is a debt,
-not an option.
+**Measurements are judged on µs per call and on structural outputs.**
+Rollout and state counters vary by 10 to 18 % at a fixed seed, which
+exceeds most of the effects being measured.
 
-**The default must be good.** A user cannot be expected to know which four flags
-make the solver work; if that is what it takes, the defect is in the defaults.
-The rule the project now follows: a defect fix is never a flag; a mechanism is a
-flag only for as long as it takes to measure it, after which it becomes the
-default and the flag goes negative (`--no-…`) so the A/B stays replayable.
+---
 
-**A mechanism must prove it is switched on before its effect is measured.**
-`--assign-bias` was completely inert for two sessions while the run printed that
-it was acting. Every mechanism now prints its own liveness, and a report
-carrying `!! INERT` invalidates the arm before the budget is spent.
+## Limitations
 
-**Known gaps in this repository as published.** The diagnostic report is still
-printed in French — the code comments, the `--help` text and the constraint
-grammar are English; the report text is not yet. The design notes and session
-reports under `docs/` are French throughout.
+**Conversion is unreliable on the harder benchmark.** At an identical seed and
+command, a judge returned solution counts of 0, 0, 0, 89 and 2239 over five
+executions. The dispersion comes from a rare event, not from measurement noise.
+Comparisons on that benchmark require N runs per arm and must be read as the
+proportion of runs that succeed.
 
-The per-session measurement harnesses that produced the figures quoted here
-are **not in this repository**. One file per A/B, each hard-coding this
-machine's paths, usually a seed and a budget, and a third of them an output
-directory left by an earlier session: reproducible on the machine that ran
-them, on no other. `docs/` names them as `measurements/<name>.ps1` so the
-provenance of a number is still traceable, but the files themselves are
-ignored. What remains in `tools/` builds or inspects the project.
+**Most flags have no verdict.** Of the 133 flags, a large share is written and
+instrumented but never judged. `docs/drapeaux.md` classifies each one.
 
-There is no license file yet.
+**Report language.** The diagnostic report is printed in French. Code comments,
+`--help` and the constraint grammar are English. `docs/` is French throughout.
+
+**Measurement harnesses are not in this repository.** The scripts that produced
+the figures quoted here are one file per A/B, each hard-coding a machine path,
+usually a seed and a budget, and about a third of them an output directory left
+by an earlier session. `docs/` cites them as `measurements/<name>.ps1` so the
+provenance of a number remains traceable. `tools/` contains only what builds or
+inspects the project.
+
+**No license file.**
 
 ---
 
 ## References
 
-Papers that are actually implemented here, not a reading list.
+Papers implemented in this codebase.
 
 | Idea | Paper |
 |---|---|
