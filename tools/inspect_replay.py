@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Inspecteur de replay EDOPro (.yrpX / .yrp).
+"""EDOPro replay inspector (.yrpX / .yrp).
 
-Etape 0.a du combo solver : valider qu'un replay est exploitable (yrp1 embarque
-present, decks lisibles, reponses recuperables) et sortir les metriques de
-reference avant d'ecrire quoi que ce soit en C++.
+Checks that a replay is usable (embedded yrp1 present, decks readable, answers
+recoverable) and prints the reference metrics before anything is written in
+C++.
 
-Format decode d'apres edopro/gframe/replay.cpp et edopro/gframe/replay.h.
+Format decoded from edopro/gframe/replay.cpp and edopro/gframe/replay.h.
 """
 
 import lzma
@@ -61,8 +61,8 @@ MSG_NAMES = {
     180: "CUSTOM_MSG", 190: "REMOVE_CARDS", 231: "OLD_REPLAY_MODE",
 }
 
-# Prompts qui exigent une reponse du joueur : ce sont les points de branchement
-# du solveur (cf. Processors::NeedsAnswer, processor_visit.cpp:19).
+# Prompts that require an answer from the player: the solver's branch points
+# (see Processors::NeedsAnswer, processor_visit.cpp:19).
 PROMPTS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26,
            140, 141, 142, 143}
 
@@ -234,7 +234,7 @@ PHASES = {
 
 
 def segment_turns(packets):
-    """Decoupe le flux aux MSG_NEW_TURN et compte les actions de chaque tour."""
+    """Splits the stream at MSG_NEW_TURN and counts each turn's actions."""
     segs = []
     cur = None
     for msg, buf in packets:

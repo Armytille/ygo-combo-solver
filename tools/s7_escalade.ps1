@@ -1,5 +1,5 @@
-# Session 7 — escalade enracinee sur la meilleure ligne connue (19/55/259).
-# Trois graines sequentielles, budgets 600 s. Aucune mesure en parallele.
+# Climb rooted on the best known line (19/55/259). Three sequential seeds,
+# 600 s budgets. No measurement runs in parallel.
 param([string[]]$Seeds = @('888','999','1234'),
       [string]$Approach = 'sZ6_slack255/solution_00_b19_a55.yrp',
       [int]$Ms = 600000)

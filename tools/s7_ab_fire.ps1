@@ -1,10 +1,10 @@
-# Session 7 — A/B du rejeu d'ADAPTATION (chantier 5bis) sur l'ETALON 2 :
-# les fenetres --fire OUVERTES, le mur des rips precoces.
+# A/B of the ADAPTATION replay on BENCHMARK 2: the OPEN --fire windows, the
+# wall of the early rips.
 #
-# Meme corpus que le prior par POIDS de la session 6 (sF_final/), meme graine,
-# meme budget, meme point d'injection : la seule difference entre les deux bras
-# est la FORME du signal — prime par coup (refutee) contre gradient
-# discriminatif. Les bras sont sequentiels (jamais deux mesures en parallele).
+# Same corpus as the WEIGHT prior, same seed, same budget, same injection
+# point: the only difference between the two arms is the FORM of the signal, a
+# per-move bonus (refuted) against a discriminative gradient. The arms run
+# sequentially (never two measurements in parallel).
 param([string]$Corpus = 'sF_final',
       [int]$Passes = 4,
       [int]$FireMs = 300000,

@@ -1,15 +1,15 @@
-# Prolongement du CADRAN alpha de sqrt-LTS-H (session 8).
+# Extension of the alpha DIAL of sqrt-LTS-H.
 #
-# Le premier cadran (8 / 15 / 25) a rendu 18 / 20 / 21 cartes cumulees sur les
-# quatre reculs limites par le budget, le temoin valant 20. Trois bras ordonnes
-# par un seul reglage donnent trois resultats ordonnes : c'est la forme d'un
-# vrai resultat (piege 46), et elle appelle un point de plus au-dessus. La
-# fenetre calculee par ForecastSearchCost s'arretait a 28,8 ; on regarde donc
-# 40 et 60, c'est-a-dire DEHORS, pour savoir si le gain continue ou si la
-# fenetre etait la bonne prediction.
+# The first dial (8 / 15 / 25) returned 18 / 20 / 21 cumulated cards over the
+# four backtracks the budget allowed, against 20 for the control. Three arms
+# ordered by a single setting giving three ordered results is the shape of a
+# real result, and it calls for one more point above. The window computed by
+# ForecastSearchCost stopped at 28.8, so we look at 40 and 60, i.e. OUTSIDE it,
+# to find out whether the gain continues or whether the window was the right
+# prediction.
 #
-# Meme montage deterministe que tools/s8_ab_finisseur.ps1 : memes racines
-# (--approach), meme politique (--no-nrpa, donc vide partout), meme budget.
+# Same deterministic setup as tools/s8_ab_finisseur.ps1: same roots
+# (--approach), same policy (--no-nrpa, hence empty everywhere), same budget.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
       [string]$Seed = '888',

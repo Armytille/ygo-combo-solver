@@ -1,31 +1,30 @@
-# Lunalight v3 — reglages corriges et orientation tiree du combo de reference
-# (ygocombo #105, 108 etapes, Nyarla remplace par Dugares).
+# Lunalight v3: corrected settings, and the orientation taken from the reference
+# combo (ygocombo #105, 108 steps, Nyarla replaced by Dugares).
 #
-# CE QUE LA LIGNE DE REFERENCE A APPRIS, ET QUI EST ENCODE ICI
+# WHAT THE REFERENCE LINE TAUGHT, AND WHAT IS ENCODED HERE
 #
-# Les trois Liger Dancer passent par TROIS voies distinctes, pas trois fois la
-# meme :
-#   1. Polymerization ordinaire, avec Kaleido Chick ayant copie le nom d'un Leo
-#      Dancer envoye de l'Extra au cimetiere.
-#   2. Polymerization qui BANNIT DEPUIS LE CIMETIERE — possible seulement apres
-#      la seconde resolution de Lunalight Masquerade.
-#   3. Lunalight WOLF en zone Pendule, qui fusionne en bannissant les materiaux
-#      du cimetiere.
-# Les voies 2 et 3 sont donc conditionnees a deux resolutions PRECISES et rares.
-# C'est exactement le cas d'usage de --resolve : un evenement rare, controle au
-# but, qui entre aussi dans le gradient et le biais d'echantillonnage.
+# The three Liger Dancer come through THREE distinct routes, not the same one
+# three times:
+#   1. an ordinary Polymerization, with Kaleido Chick having copied the name of a
+#      Leo Dancer sent from the Extra to the graveyard.
+#   2. a Polymerization that BANISHES FROM THE GRAVEYARD, only possible after
+#      Lunalight Masquerade's second resolution.
+#   3. Lunalight WOLF in the Pendulum Zone, fusing by banishing the materials
+#      from the graveyard.
+# Routes 2 and 3 are therefore conditioned on two PRECISE and rare resolutions.
+# That is exactly --resolve's use case: a rare event, checked at the goal, which
+# also enters the gradient and the sampling bias.
 #
-# DEUX REGLAGES PRECEDENTS QUI TUAIENT LE COMBO, CORRIGES ICI
+# TWO EARLIER SETTINGS THAT KILLED THE COMBO, FIXED HERE
 #
-#  * --no-chain sur Silver Hound est RETIRE. Il visait son effet de negate, mais
-#    la ligne l'utilise a l'etape 5 pour ressusciter Kaleido Chick depuis le
-#    Deck — une activation en chaine, que le drapeau interdisait. Ses deux
-#    effets s'activant depuis le cimetiere, aucun drapeau ne les separe : le
-#    controle « ne nege pas nos propres cartes » se fera A POSTERIORI, en mode
-#    juge sur la ligne trouvee.
-#  * --max-decisions 700. Le plafond par defaut vaut 1,5x la reference + 32,
-#    soit 399 ici : la reference ne pose qu'UN Liger en 245 decisions, la cible
-#    en veut trois. La recherche etait tronquee avant la fin, sans le dire.
+#  * --no-chain on Silver Hound is REMOVED. It targeted its negation effect, but
+#    the line uses it at step 5 to revive Kaleido Chick from the Deck, a chained
+#    activation the flag forbade. Both of its effects activate from the
+#    graveyard, so no flag separates them: the "do not negate our own cards"
+#    check is done AFTERWARDS, in judge mode on the line found.
+#  * --max-decisions 700. The default ceiling is 1.5x the reference + 32, i.e.
+#    399 here: the reference places only ONE Liger in 245 decisions, and the
+#    target wants three. The search was truncated before the end, silently.
 param([int]$Ms = 1800000, [string]$Seed = '888', [string]$Out = 's7_luna_v6')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

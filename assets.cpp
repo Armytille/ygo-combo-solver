@@ -15,8 +15,8 @@ namespace {
 
 constexpr uint32_t TYPE_LINK = 0x4000000;
 
-// EDOPro traite un cards.cdb vide comme absent ; sqlite l'ouvrirait sans
-// erreur et renverrait zero carte, ce qui masquerait le probleme.
+// EDOPro treats an empty cards.cdb as missing; sqlite would open it without
+// error and return zero cards, which would hide the problem.
 bool UsableFile(const fs::path& p) {
 	std::error_code ec;
 	return fs::is_regular_file(p, ec) && fs::file_size(p, ec) > 0;
@@ -59,12 +59,12 @@ bool CardDB::LoadFile(const std::string& path) {
 		if(!row.setcodes.empty())
 			row.setcodes.push_back(0);
 
-		// Les monstres Lien rangent leurs fleches dans la colonne def.
+		// Link monsters keep their arrows in the def column.
 		if(row.type & TYPE_LINK) {
 			row.link_marker = static_cast<uint32_t>(row.defense);
 			row.defense = 0;
 		}
-		// Niveaux negatifs (cartes "?") : data_manager.cpp:145.
+		// Negative levels ("?" cards): data_manager.cpp:145.
 		row.level = (level < 0) ? static_cast<uint32_t>(-(level & 0xff))
 								: static_cast<uint32_t>(level & 0xff);
 		row.lscale = (level >> 24) & 0xff;
@@ -75,7 +75,7 @@ bool CardDB::LoadFile(const std::string& path) {
 	}
 	sqlite3_finalize(st);
 
-	// Les noms ne servent qu'aux rapports : leur absence n'est pas une erreur.
+	// Names are only used in reports: a missing one is not an error.
 	sqlite3_stmt* ns = nullptr;
 	if(sqlite3_prepare_v2(db, "SELECT id,name,desc FROM texts", -1, &ns,
 						  nullptr) == SQLITE_OK) {
@@ -84,10 +84,10 @@ bool CardDB::LoadFile(const std::string& path) {
 			const unsigned char* nm = sqlite3_column_text(ns, 1);
 			if(nm && *nm)
 				names[id] = reinterpret_cast<const char*>(nm);
-			// PREMIERE LIGNE du texte : pour un monstre d'extra deck c'est la
-			// ligne de MATERIAUX, et c'est tout ce dont l'amorce du graphe de
-			// recettes a besoin. On ne garde pas le reste : le texte complet
-			// pese des centaines de Mo sur l'ensemble des bases.
+			// FIRST LINE of the text: for an extra deck monster that is the MATERIALS
+			// line, and that is all the recipe graph bootstrap needs. The rest is
+			// dropped, because full card text weighs hundreds of megabytes across all
+			// the databases.
 			const unsigned char* ds = sqlite3_column_text(ns, 2);
 			if(ds && *ds) {
 				std::string d = reinterpret_cast<const char*>(ds);
@@ -165,9 +165,9 @@ bool CardDB::Load(const std::string& workdir, std::string& error) {
 	for(const auto& p : paths)
 		LoadFile(p.string());
 
-	// Index nom EXACT -> code canonique. Deux illustrations de la meme carte
-	// portent le meme nom : on garde le code canonique, sinon un materiau nomme
-	// par le texte designerait un exemplaire et non une carte.
+	// Exact name -> canonical code index. Two artworks of the same card share a
+	// name: we keep the canonical code, otherwise a material named in text would
+	// designate one printing rather than a card.
 	for(const auto& [code, name] : names) {
 		const uint32_t canon = Canonical(code);
 		by_name.emplace(name, canon);
@@ -217,7 +217,7 @@ void ScriptProvider::Init(const std::string& wd,
 	workdir = wd;
 	std::error_code ec;
 
-	// Un dossier de scripts et ses sous-dossiers directs.
+	// A script directory and its immediate subdirectories.
 	auto expand = [&](const fs::path& root) {
 		if(!fs::is_directory(root, ec))
 			return;
@@ -232,8 +232,8 @@ void ScriptProvider::Init(const std::string& wd,
 			dirs.push_back(s.string());
 	};
 
-	// Les depots passent devant l'installation de base : beaucoup de cartes
-	// n'existent QUE dans le depot (game.cpp:2959).
+	// Repositories come before the base installation: many cards exist ONLY in
+	// the repository (game.cpp:2959).
 	if(!override_roots.empty()) {
 		for(const auto& r : override_roots)
 			expand(r);
@@ -254,10 +254,10 @@ void ScriptProvider::Init(const std::string& wd,
 }
 
 std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
-	// Rien de ce que fait cette fonction n'appartient au duel : ni le tampon
-	// rendu, ni surtout le journal des manquants, PARTAGE entre workers. Le
-	// laisser allouer dans l'arene du thread appelant ferait liberer plus tard,
-	// depuis un autre thread, un pointeur qu'aucune arene ne reconnait.
+	// Nothing this function does belongs to the duel: neither the returned buffer
+	// nor, above all, the miss log, which is SHARED between workers. Letting it
+	// allocate in the calling thread's arena would later free, from another
+	// thread, a pointer no arena recognises.
 	ArenaPause off;
 
 	std::string name = raw_name;
@@ -265,9 +265,9 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 	while(name.rfind("./", 0) == 0)
 		name.erase(0, 2);
 
-	// Le cache d'abord (s24) : un script deja lu ne repaye ni la passe de
-	// repertoires ni l'E/S. Copie rendue par valeur — le tampon du cache
-	// appartient a l'hote (ArenaPause), l'appelant fait ce qu'il veut du sien.
+	// Cache first: a script already read pays neither the directory sweep nor the
+	// I/O again. The copy is returned by value; the cached buffer belongs to the
+	// host (ArenaPause), and the caller owns its own.
 	{
 		std::lock_guard<std::mutex> lock(misses_mutex);
 		auto it = cache.find(name);
@@ -277,12 +277,12 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 		}
 	}
 
-	// `bad_read` distingue « le fichier n'est pas la » de « le fichier est la et
-	// je n'ai pas su le lire ». Confondre les deux faisait tomber le chargeur au
-	// depot SUIVANT et charger la MEME carte depuis une autre version du jeu de
-	// scripts : une erreur d'E/S fabriquait exactement le decalage de jeux de
-	// scripts que ce depot redoute le plus, sans jamais atteindre l'ensemble
-	// `misses` qui l'aurait signale (4.7).
+	// `bad_read` separates "the file is not there" from "the file is there and I
+	// could not read it". Conflating the two made the loader fall through to the
+	// NEXT repository and load the SAME card from another version of the script
+	// set: an I/O error manufactured exactly the script-set mismatch this project
+	// fears most, without ever reaching the `misses` set that would have
+	// reported it.
 	bool bad_read = false;
 	std::string bad_path;
 	auto slurp = [&](const fs::path& p) -> std::vector<char> {
@@ -295,14 +295,14 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 		std::vector<char> buf(size > 0 ? static_cast<size_t>(size) : 0);
 		if(buf.empty() ||
 		   std::fread(buf.data(), 1, buf.size(), fp) != buf.size()) {
-			// Fichier vide OU lecture courte : dans les deux cas le fichier
-			// EXISTE et ne donne pas son contenu. On ne se rabat pas.
+			// Empty file OR short read: either way the file EXISTS and does not give up
+			// its contents. We do not fall through.
 			buf.clear();
 			bad_read = true;
 			bad_path = p.string();
 		}
 		std::fclose(fp);
-		// BOM UTF-8 : Lua ne le tolere pas en tete de chunk.
+		// UTF-8 BOM: Lua does not tolerate one at the head of a chunk.
 		if(buf.size() >= 3 && static_cast<unsigned char>(buf[0]) == 0xEF &&
 		   static_cast<unsigned char>(buf[1]) == 0xBB &&
 		   static_cast<unsigned char>(buf[2]) == 0xBF)
@@ -324,7 +324,7 @@ std::vector<char> ScriptProvider::Read(const std::string& raw_name) {
 				return buf;
 			}
 			if(bad_read)
-				break;   // ne PAS se rabattre sur une autre version
+				break;   // do NOT fall through to another version
 		}
 	}
 	if(!bad_read) {

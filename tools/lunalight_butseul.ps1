@@ -1,44 +1,43 @@
-# ETALON A en MODE BUT SEUL — Lunalight, sans replay de reference.
+# BENCHMARK A in GOAL-ONLY MODE: Lunalight, with no reference replay.
 #
-# CE QUI CHANGE PAR RAPPORT A tools/lunalight3.ps1, ET RIEN D'AUTRE
+# WHAT CHANGES FROM tools/lunalight3.ps1, AND NOTHING ELSE
 #
-#  * --no-ref : _LastReplay.yrpX n'est plus qu'un GABARIT de duel (drapeaux,
-#    LP, taille de main, deck adverse). Sa ligne, son board de fin de tour et
-#    son REPERTOIRE sont tous ecartes. Le rapport imprime le gabarit pour que
-#    ce soit verifiable et non promis.
-#  * --target : le board cible est POSE, plus edite. lunalight3 partait de la
-#    capture de la reference et la vidait par six --board-remove ; ces six
-#    codes etaient de l'information sur ce que la reference avait pose.
+#  * --no-ref: _LastReplay.yrpX is only a duel TEMPLATE now (flags, life points,
+#    hand size, opponent deck). Its line, its end-of-turn board and its
+#    REPERTOIRE are all set aside. The report prints the template so that this
+#    is verifiable rather than promised.
+#  * --target: the target board is POSTED, no longer edited. lunalight3 started
+#    from the reference's capture and emptied it with six --board-remove; those
+#    six codes were information about what the reference had placed.
 #
-# CE QUI RESTE, ET POURQUOI CE N'EST PAS DE LA REFERENCE DEGUISEE
+# WHAT REMAINS, AND WHY IT IS NOT THE REFERENCE IN DISGUISE
 #
-#  --resolve / --summon-min / --hint / --max-decisions sont des CONNAISSANCES
-#  DE DOMAINE ecrites a la main : « la ligne doit resoudre Masquerade deux
-#  fois », « il faut trois Liger ». Au sens de Bonet & Geffner c'est un SKETCH,
-#  pas une demonstration (cf. docs/etat-de-lart-but-seul.md, direction 3). Les
-#  --hint restent la partie la plus discutable : ils ont ete choisis en
-#  regardant le combo de reference. Le bras HINTLESS les retire pour chiffrer
-#  ce qu'ils valent.
+#  --resolve / --summon-min / --hint / --max-decisions are DOMAIN KNOWLEDGE
+#  written by hand: "the line must resolve Masquerade twice", "three Ligers are
+#  needed". In Bonet & Geffner's sense that is a SKETCH, not a demonstration
+#  (see docs/etat-de-lart-but-seul.md, direction 3). The --hint entries stay the
+#  most debatable part: they were chosen by looking at the reference combo. The
+#  HINTLESS arm removes them to quantify what they are worth.
 #
-# LA VERITE TERRAIN, ET CE QU'IL FAUT BATTRE
+# GROUND TRUTH, AND WHAT HAS TO BE BEATEN
 #
-#  Le deck atteint 3x Liger Dancer en 108 etapes (ygocombo #105) : la cible est
-#  ATTEIGNABLE, c'est ce qui fait le prix de cet etalon.
+#  The deck reaches 3x Liger Dancer in 108 steps (ygocombo #105): the target is
+#  REACHABLE, and that is what makes this benchmark worth having.
 #
-#  Meilleur resultat connu, AVEC repertoire (s7_luna_v6, 1800 s, graine 888) :
+#  Best known result, WITH the repertoire (s7_luna_v6, 1800 s, seed 888):
 #    tirages   1 246 s, 12,66 M tirages, best 1/4
-#    finisseur best 1/4 (une racine monte a 2/4 en recul 40)
-#    LDS a 0 ecart  2 038 555 etats, 294 s, best 2/4  <-- LE MEILLEUR
+#    finisher best 1/4 (one root climbs to 2/4 at backtrack 40)
+#    LDS at 0 deviations  2 038 555 states, 294 s, best 2/4  <-- THE BEST
 #    board atteint : 1 Liger + Bagooska ; MANQUE 2x Liger. 0 erreur de core.
 #
-#  Le meilleur venait donc de la passe qui suit LE PLAN. En --no-plan cette
-#  passe devient structurellement VIDE (mesure sur l'etalon B : 26 etats a tous
-#  les niveaux d'ecart) : le mode but seul perd exactement le mecanisme qui
-#  avait produit le 2/4. C'est a chiffrer, pas a contourner.
+#  So the best came from the pass that FOLLOWS THE PLAN. Under --no-plan that
+#  pass becomes structurally EMPTY (measured on benchmark B: 26 states at every
+#  deviation level): goal-only mode loses exactly the mechanism that produced
+#  the 2/4. That is to be quantified, not worked around.
 #
-#  Et le HER propositionnel (arXiv:2512.19355, domaine Delivery) predit que
-#  « n exemplaires de la meme chose » est precisement la forme de but ou ces
-#  methodes apprennent a en poser UN et s'y arretent.
+#  And propositional HER (arXiv:2512.19355, the Delivery domain) predicts that
+#  "n copies of the same thing" is precisely the goal shape where these methods
+#  learn to place ONE and stop there.
 param([int]$Ms = 1800000, [string]$Seed = '888', [string]$Bras = 'tous')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

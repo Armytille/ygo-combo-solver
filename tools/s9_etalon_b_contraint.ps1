@@ -1,41 +1,41 @@
-# ETALON B AVEC SES CONTRAINTES DE LIGNE (session 9).
+# BENCHMARK B WITH ITS LINE CONSTRAINTS.
 #
-# POURQUOI CE MONTAGE MANQUAIT, ET CE QU'IL CORRIGE
+# WHY THIS SETUP WAS MISSING, AND WHAT IT FIXES
 #
-# Tous les montages de l'etalon B — ceux de la session 8 comme les miens —
-# tournaient SANS AUCUNE contrainte : ni --resolve, ni --summon-min, ni --guard.
-# Le solveur y etait donc libre d'atteindre les huit codes du board par
-# n'importe quel raccourci, et c'est exactement ce qu'il a fait : un run de 90 s
+# Every earlier benchmark B setup ran WITHOUT ANY constraint: no --resolve, no
+# --summon-min, no --guard. The solver was therefore free to reach the board's
+# eight codes by any shortcut, and that is exactly what it did: a 90 s run found
+# lines CHEAPER than the reference because they do LESS. Those lines neither rip
 # a rendu dix lignes a 8/8, cout 16/47/226 contre 19/56/276 pour la reference —
-# MOINS CHER parce qu'il fait MOINS. Ces lignes ne rippent pas et ne gardent pas.
+# nor guard.
 #
-# « 8/8 » sans contraintes veut dire « les huit codes sont sur le terrain », pas
-# « la ligne marche ». Comme metrique d'A/B c'est valide (la meme dans tous les
+# "8/8" with no constraints means "the eight codes are on the field", not "the
+# line works". As an A/B metric it is valid (the same in every arm), but it is
 # bras) ; comme jugement de qualite, non (pieges 66 et 67).
 #
-# LES CONTRAINTES, reprises telles quelles des montages de la session 7 qui
-# faisaient tourner ce deck (tools/s7_ab_reroot.ps1) :
+# not the combo. THE CONSTRAINTS, taken as they stand from the earlier setups
+# that ran this deck (tools/s7_ab_reroot.ps1):
 #
 #   --guard "5:Crystal Wing|Zalen@terrain+Junk Signal@main"
-#       des la 5e invocation, la ligne doit tenir de quoi repondre a Nibiru :
-#       Crystal Wing ou Zalen au terrain, PLUS Junk Signal en main.
+#       from the 5th summon on, the line must hold an answer to Nibiru: Crystal
+#       Wing or Zalen on the field, PLUS Junk Signal in hand.
 #   --guard-off "mainadv<=2"
-#       la garde s'eteint quand la main adverse est descendue a 2 cartes : un
-#       deck handrip a alors deja retire la menace.
+#       the guard goes off once the opponent's hand is down to 2 cards: a
+#       handrip deck has removed the threat by then.
 #   --resolve "PSY-Framelord Omega@terrain:2"
 #   --resolve "Trishula, Dragon of the Ice Barrier@terrain"
-#       LES RIPS. C'est la raison d'etre de cette ligne, et c'est precisement ce
-#       que le montage sans contraintes n'exigeait pas. Filtres par zone
-#       d'ACTIVATION : l'effet de cimetiere d'Omega ne compte pas pour le
+#       THE RIPS. That is this line's reason for existing, and precisely what
+#       the unconstrained setup did not require. Filtered by ACTIVATION zone:
+#       Omega's graveyard effect does not count towards the handrip.
 #       handrip (faux positif mesure, piege 38).
 #   --no-activate "Duel Evolution - Assault Zone"
 #       effet igne superflu, ecarte a l'enumeration.
 #
-# CE QU'IL FAUT LIRE
+# WHAT TO READ
 #
-# La colonne `rips` des lignes de tirages, et le compte de lignes atteignant le
-# board. Une ligne qui atteint 8/8 AVEC 3 rips et la garde tenue est le combo ;
-# une ligne a 8/8 sans rip est le raccourci que le montage precedent recompensait.
+# The `rips` column of the rollout lines, and the count of lines reaching the
+# board. A line that reaches 8/8 WITH 3 rips and the guard held is the combo; a
+# line at 8/8 with no rip is the shortcut the previous setup rewarded.
 param([int]$Ms = 90000, [string]$Seed = '888')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

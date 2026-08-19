@@ -2,10 +2,10 @@
 
 #include <cstring>
 
-#include "luaconf-customize.h"   // combosolver_lua_alloc (patch d'arene)
+#include "luaconf-customize.h"   // combosolver_lua_alloc (arena patch)
 
-// Sans extern "C" : Lua est compile en C++ ici (cf. premake5.lua), ses symboles
-// sont donc mangles comme ceux du core.
+// Without extern "C": Lua is compiled as C++ here (see premake5.lua), so its
+// symbols are mangled like the core's.
 #include "lua.h"
 
 namespace solver {
@@ -37,18 +37,18 @@ void Duel::CardReaderThunk(void* payload, uint32_t code, OCG_CardData* data) {
 	std::memset(data, 0, sizeof(*data));
 	const CardRow* row = self->db.Find(code);
 	if(!row) {
-		// Carte inconnue : le core sait faire, il ne lui donnera aucun effet.
-		// C'est precisement le probleme — une VANILLE MUETTE la ou le deck
-		// attend un effet. Releve pour le bilan, comme les scripts manquants
-		// (4.6) : sans cela le duel demarre, la ligne diverge, et rien ne le dit.
+		// Unknown card: the core copes, it simply gives the card no effect. That is
+		// exactly the problem, a SILENT VANILLA where the deck expects an effect.
+		// Recorded in the summary, like missing scripts: without it the duel starts,
+		// the line diverges, and nothing says so.
 		self->db.NoteUnknown(code);
 		data->code = code;
 		return;
 	}
 	data->code = row->code;
 	data->alias = row->alias;
-	// Le core ne conserve pas le pointeur au-dela de l'appel (duel::read_card
-	// copie dans card_data), donc pointer dans la base est sur.
+	// The core does not keep the pointer past the call (duel::read_card copies
+	// into card_data), so pointing into the database is safe.
 	data->setcodes = row->setcodes.empty()
 						 ? nullptr
 						 : const_cast<uint16_t*>(row->setcodes.data());
@@ -67,21 +67,21 @@ int Duel::ScriptReaderThunk(void* payload, OCG_Duel duel, const char* name) {
 	auto* self = static_cast<Duel*>(payload);
 	std::vector<char> buf;
 	{
-		// Appele DEPUIS le core, donc arene active : le tampon de lecture
-		// appartient a l'hote, il ne doit pas etre alloue dans l'arene.
+		// Called FROM the core, so the arena is live: the read buffer belongs to the
+		// host and must not be allocated in the arena.
 		ArenaPause off;
 		buf = self->scripts.Read(name);
 	}
 	if(buf.empty())
 		return 0;
-	// En revanche le chargement lui-meme alloue dans Lua : arene active.
+	// The load itself, on the other hand, allocates inside Lua: arena live.
 	return OCG_LoadScript(duel, buf.data(), static_cast<uint32_t>(buf.size()), name);
 }
 
 void Duel::LogThunk(void* payload, const char* msg, int type) {
 	if(type != OCG_LOG_TYPE_ERROR)
 		return;
-	// Le journal survit aux restaurations : il doit vivre hors arene.
+	// The log outlives restores, so it has to live outside the arena.
 	ArenaPause off;
 	static_cast<Duel*>(payload)->errors.emplace_back(msg ? msg : "");
 }
@@ -105,9 +105,9 @@ bool Duel::Create(const uint64_t seed[4], uint64_t flags, uint32_t lp,
 	opts.enableUnsafeLibraries = 1;
 
 	ArenaScope scope(arena);
-	// Branche le heap Lua sur l'arene avant que le core ne cree son lua_State
-	// (patch lauxlib.c). Sans cela, les coroutines suspendues resteraient hors
-	// de l'instantane et la restauration serait incoherente.
+	// Points the Lua heap at the arena before the core creates its lua_State
+	// (lauxlib.c patch). Without this, suspended coroutines would sit outside the
+	// snapshot and the restore would be inconsistent.
 	if(arena) {
 		combosolver_lua_alloc = &Arena::LuaAlloc;
 		combosolver_lua_alloc_ud = arena;
@@ -148,14 +148,14 @@ bool Duel::Setup(const Replay& yrp, std::string& error,
 			OCG_DuelNewCard(handle, &info);
 		}
 	}
-	// Le mode hand test laisse le champ au script de debug plutot qu'a une
-	// mise en place classique (old_replay_mode.cpp:167).
+	// Hand test mode hands the field to the debug script rather than to a regular
+	// setup (old_replay_mode.cpp:167).
 	if(yrp.IsHandTest() && !ExecLua("Debug.ReloadFieldEnd()")) {
 		error = "Debug.ReloadFieldEnd() a echoue";
 		return false;
 	}
-	// Apres le ReloadFieldEnd du hand test (qui reconstruit le terrain), avant
-	// le demarrage : les cartes ajoutees arrivent en main telles quelles.
+	// After the hand test's ReloadFieldEnd (which rebuilds the field) and before
+	// the start: the added cards land in hand as they are.
 	if(extra_hand) {
 		for(uint32_t code : *extra_hand) {
 			OCG_NewCardInfo info{ extra_hand_team, 0, code, extra_hand_team,
@@ -187,9 +187,9 @@ void Duel::Messages(std::vector<Message>& out) {
 		ArenaScope scope(arena);
 		base = static_cast<uint8_t*>(OCG_DuelGetMessage(handle, &len));
 	}
-	// Le vecteur appartient a l'hote ; les Message pointent en revanche
-	// dans le tampon du core, donc dans l'arene : a copier avant toute
-	// restauration.
+	// The vector belongs to the host; the Messages, however, point into the
+	// core's buffer, hence into the arena, so they must be copied before any
+	// restore.
 	if(!base || !len)
 		return;
 	uint32_t off = 0;
@@ -217,11 +217,11 @@ uint32_t Duel::Count(uint8_t team, uint32_t loc) {
 
 bool Duel::LastChainLink(uint8_t* trigger_player) {
 	const std::vector<uint8_t>& b = ProcessorState();
-	// Layout : voir le patch OCG_DuelQueryProcessorState (ocgapi.cpp), la
-	// source de verite. phase u16, turn i16, turn_player u8, puis par joueur
-	// (lp i32, summon_count i32, used_location u32, extra_p_count u32), puis
-	// unites (u32 n + 3n octets), sous-unites (idem), puis la chaine
-	// (u32 n + 11n octets : chain_id u16, joueur u8, event u32, flag u32).
+	// Layout: see the OCG_DuelQueryProcessorState patch (ocgapi.cpp), the source
+	// of truth. phase u16, turn i16, turn_player u8, then per player (lp i32,
+	// summon_count i32, used_location u32, extra_p_count u32), then units (u32 n
+	// + 3n bytes), subunits (same), then the chain (u32 n + 11n bytes: chain_id
+	// u16, player u8, event u32, flag u32).
 	size_t off = 2 + 2 + 1 + 2 * 16;
 	auto take_u32 = [&](uint32_t& v) {
 		if(off + 4 > b.size())
@@ -233,13 +233,13 @@ bool Duel::LastChainLink(uint8_t* trigger_player) {
 	uint32_t n = 0;
 	if(!take_u32(n) || off + 3ull * n > b.size())
 		return false;
-	off += 3ull * n;   // unites
+	off += 3ull * n;   // units
 	if(!take_u32(n) || off + 3ull * n > b.size())
 		return false;
-	off += 3ull * n;   // sous-unites
+	off += 3ull * n;   // subunits
 	if(!take_u32(n) || n == 0 || off + 11ull * n > b.size())
 		return false;
-	off += 11ull * (n - 1) + 2;   // dernier maillon, apres son chain_id
+	off += 11ull * (n - 1) + 2;   // last link, after its chain_id
 	if(off >= b.size())
 		return false;
 	if(trigger_player)
@@ -256,12 +256,11 @@ const std::vector<uint8_t>& Duel::ProcessorState() {
 		data = static_cast<const uint8_t*>(
 			OCG_DuelQueryProcessorState(handle, &len));
 	}
-	// Un tampon nul ou vide DEFAIT le patch C1 en silence : sans la composante
-	// d'etat de processeur, deux instants distincts d'une meme resolution de
-	// chaine portent le meme digest, sont fusionnes par la table de
-	// transposition, et la branche du combo est elaguee des le debut. Le comptage
-	// rend la panne lisible au lieu de la laisser se deguiser en « il n'y a rien
-	// a trouver » (audit 18).
+	// A null or empty buffer silently undoes the processor-state patch: without
+	// that component, two distinct instants of the same chain resolution carry
+	// the same digest, get merged by the transposition table, and the combo
+	// branch is pruned right away. Counting makes the failure readable instead of
+	// letting it pass for "there is nothing to find".
 	if(!data || !len)
 		++empty_processor_states;
 	processor_state.assign(data, data + (data ? len : 0));
@@ -302,8 +301,8 @@ void Duel::QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out) {
 	}
 	if(!data || len <= 4)
 		return;
-	// Meme decoupage que ParseQueryStream, reduit aux deux champs utiles :
-	// Code() = alias sinon code (identite de board, cf. QueriedCard::Code).
+	// Same split as ParseQueryStream, reduced to the two useful fields:
+	// Code() = alias when there is one, else code (board identity, see QueriedCard::Code).
 	const uint8_t* p = data + 4;
 	uint32_t n = len - 4, off = 0;
 	uint32_t code = 0, alias = 0;
@@ -312,7 +311,7 @@ void Duel::QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out) {
 		uint16_t size = 0;
 		std::memcpy(&size, p + off, 2);
 		off += 2;
-		if(size == 0)   // emplacement vide
+		if(size == 0)   // empty slot
 			continue;
 		if(off + size > n)
 			break;
@@ -336,7 +335,7 @@ void Duel::QueryCodes(uint8_t con, uint32_t loc, std::vector<uint32_t>& out) {
 }
 
 bool Duel::LoadScript(const std::string& name) {
-	auto buf = scripts.Read(name);   // hors arene : appel depuis l'hote
+	auto buf = scripts.Read(name);   // outside the arena: called from the host
 	if(buf.empty())
 		return false;
 	ArenaScope scope(arena);
@@ -375,7 +374,7 @@ void ParseQueryStreamInto(const uint8_t* data, uint32_t len,
 		uint16_t size = 0;
 		std::memcpy(&size, data + off, 2);
 		off += 2;
-		if(size == 0) {           // emplacement vide (ocgapi.cpp:207)
+		if(size == 0) {           // empty slot (ocgapi.cpp:207)
 			out.push_back(QueriedCard{});
 			continue;
 		}
@@ -418,7 +417,7 @@ void ParseQueryStreamInto(const uint8_t* data, uint32_t len,
 				cur.counters.push_back(Take<uint32_t>(body));
 			break;
 		}
-		default: break;       // champ non demande ou non exploite
+		default: break;       // field not requested, or requested and unused
 		}
 	}
 	if(building) {

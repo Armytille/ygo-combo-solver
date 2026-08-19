@@ -1,8 +1,8 @@
-// Lecture des replays EDOPro (.yrpX et .yrp1 embarque).
+// Reading EDOPro replays (.yrpX, and the .yrp1 embedded inside it).
 //
-// Version allegee de edopro/gframe/replay.cpp : on ne garde que ce dont le
-// solveur a besoin (decks, seed, parametres de duel, reponses du joueur) et on
-// se passe de toute dependance a Irrlicht / au reste de gframe.
+// Trimmed-down version of edopro/gframe/replay.cpp: only what the solver needs
+// (decks, seed, duel parameters, player answers), with no dependency on
+// Irrlicht or on the rest of gframe.
 #pragma once
 
 #include <cstdint>
@@ -28,7 +28,7 @@ struct Deck {
 	std::vector<uint32_t> extra;
 };
 
-// Un paquet du flux diffuse (yrpX) : le type de message et sa charge utile.
+// One packet of the broadcast stream (yrpX): message type and payload.
 struct Packet {
 	uint8_t message{};
 	std::vector<uint8_t> data;
@@ -36,15 +36,15 @@ struct Packet {
 
 class Replay {
 public:
-	// Renvoie false et remplit `error` si le fichier est illisible.
+	// Returns false and fills `error` when the file cannot be read.
 	bool Load(const std::string& path, std::string& error);
 	bool LoadFromBuffer(std::vector<uint8_t> contents, std::string& error);
 
 	bool IsStreamed() const { return id == REPLAY_YRPX; }
 	bool IsHandTest() const { return (flag & FLAG_HAND_TEST) != 0; }
 
-	// Le yrp1 embarque porte les reponses du joueur ; sans lui, aucune
-	// reconstitution n'est possible (cf. docs/combo-solver-design.md 2.2).
+	// The embedded yrp1 carries the player answers; without it nothing can be
+	// reconstructed.
 	const Replay* Embedded() const { return yrp.get(); }
 
 	uint32_t id{}, version{}, flag{}, timestamp{}, datasize{};
@@ -69,11 +69,11 @@ private:
 	std::unique_ptr<Replay> yrp;
 };
 
-// Ecrit un replay rejouable par EDOPro : meme position de depart que `base`
-// (noms, parametres, graine, decks) mais avec les reponses fournies.
+// Writes a replay EDOPro can play back: same starting position as `base`
+// (names, parameters, seed, decks) but with the answers supplied here.
 //
-// `base` doit etre un yrp1 — c'est lui qui porte decks et parametres ; le yrpX
-// qui l'enveloppe n'est qu'un flux de diffusion, non rejouable seul.
+// `base` must be a yrp1 -- that is what carries the decks and the parameters;
+// the yrpX wrapping it is only a broadcast stream, not replayable on its own.
 bool WriteYrp1(const std::string& path, const Replay& base,
 			   const std::vector<std::vector<uint8_t>>& responses,
 			   std::string& error);

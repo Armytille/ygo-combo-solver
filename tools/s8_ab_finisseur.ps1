@@ -1,32 +1,31 @@
-# A/B DU REROOTER A RACINES IDENTIQUES (session 8).
+# A/B OF THE REROOTER WITH IDENTICAL ROOTS.
 #
-# POURQUOI CE MONTAGE REMPLACE L'A/B BOUT-EN-BOUT
+# WHY THIS SETUP REPLACES THE END-TO-END A/B
 #
-# --reroot et --reroot-h ne touchent QU'A RunLevin, le finisseur. Tout ce qui
-# precede — sonde gloutonne, tirages NRPA, archive — est le meme code dans tous
-# les bras et ne differe que par le timing des echanges entre workers. Comparer
-# des runs entiers revient donc a lire surtout le bruit des tirages : la
-# session 6 avait deja etabli que les compteurs de tirages ne sont pas des
-# metriques d'A/B.
+# --reroot and --reroot-h touch ONLY RunLevin, the finisher. Everything before
+# it (greedy probe, NRPA rollouts, archive) is the same code in every arm and
+# differs only by the timing of the exchanges between workers. Comparing whole
+# runs therefore mostly reads the rollouts' noise; rollout counters were already
+# established not to be A/B metrics.
 #
-# Ici les racines du finisseur sont IMPOSEES et identiques dans tous les bras :
-# --approach sert la meme approche a tous, --finisher-min lui donne l'essentiel
-# du budget, et les lignes « appr0 recul N » du rapport se comparent une a une
-# (expansions, meilleur recouvrement, EPUISE ou budget). C'est le seul endroit
-# ou le mecanisme agit, donc le seul endroit ou il doit se mesurer.
+# Here the finisher's roots are IMPOSED and identical in every arm: --approach
+# serves the same approach to all, --finisher-min gives it most of the budget,
+# and the "appr0 backtrack N" rows of the report compare one by one
+# (expansions, best overlap, EXHAUSTED or budget). That is the only place the
+# mechanism acts, hence the only place it should be measured.
 #
-# --no-plan est conserve : on reste dans le REGIME BUT SEUL (suffixes a
-# reconstruire de zero), qui est le regime ou la prevision de cout annoncait le
-# gain de sqrt-LTS.
+# --no-plan is kept: we stay in the GOAL-ONLY regime (suffixes to rebuild from
+# scratch), which is the regime where the cost forecast announced the sqrt-LTS
+# gain.
 #
-# --no-nrpa ferme le dernier canal de bruit. La politique servie au finisseur
-# est la FUSION des poids appris par les workers NRPA ; elle differe donc d'un
-# bras a l'autre par le seul timing des echanges. Sans NRPA elle est VIDE dans
-# tous les bras, donc identique. Racines identiques + politique identique =
-# l'A/B devient DETERMINISTE : ce qui bouge dans la table « appr0 recul N » ne
-# peut venir que de la fonction de cout, c'est-a-dire du rerooter. C'est le
-# prix a payer : on mesure le mecanisme sur une politique uniforme, ce qui est
-# precisement le point de depart du mode but seul.
+# --no-nrpa closes the last noise channel. The policy served to the finisher is
+# the MERGE of the weights learned by the NRPA workers, so it differs from one
+# arm to the next by the timing of the exchanges alone. Without NRPA it is
+# EMPTY in every arm, hence identical. Identical roots + identical policy = the
+# A/B becomes DETERMINISTIC: whatever moves in the "appr0 backtrack N" table can
+# only come from the cost function, i.e. from the rerooter. That is the price:
+# the mechanism is measured on a uniform policy, which is precisely the starting
+# point of goal-only mode.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
       [string]$Seed = '888',

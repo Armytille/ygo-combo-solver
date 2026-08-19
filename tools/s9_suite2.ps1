@@ -1,10 +1,10 @@
-# SUITE 2 : la verification de C1, puis l'A/B du graphe AMORCE.
+# SUITE 2: the partition fix, then the A/B of the SEEDED graph.
 #
-# 1. VERIFICATION DE C1 — le test exact, et il est bon marche.
+# 1. THE PARTITION FIX: the exact test, and it is cheap.
 #
-#    Le §9.15 ecrivait : « sans plan, la passe a ecarts bornes devient VIDE :
-#    26 etats a tous les niveaux d'ecart », et en tirait un fait STRUCTUREL du
-#    mode but seul. Le releve de la session 8 (s8_B_noplan.log) :
+#    An earlier note wrote "with no plan, the bounded-discrepancy pass becomes
+#    EMPTY: 26 states at every deviation level", and took that for a STRUCTURAL
+#    fact of goal-only mode. The record (s8_B_noplan.log):
 #
 #      ecarts  solutions   etats   transpos.  coupures
 #      0            0          1        0         0
@@ -13,16 +13,16 @@
 #      3            0         26       16         0
 #      ...          0         26       16         0     <-- CONSTANT
 #
-#    C1 explique ce chiffre entierement : `claims_size = plan.size() + 1` vaut 1
-#    quand le plan est vide, donc UN jeton de partition pour seize workers, et
-#    toute deviation est supprimee.
+#    The defect explains that figure entirely: `claims_size = plan.size() + 1`
+#    is 1 when the plan is empty, so ONE partition token for sixteen workers,
+#    and every deviation is suppressed.
 #
-#    APRES CORRECTION, le nombre d'etats doit CROITRE avec le niveau d'ecart.
-#    S'il reste a 26, C1 n'est pas dans le binaire. Lire aussi la colonne
-#    `partition` : non nulle = le travail est CEDE (partage), ce que la session 8
-#    ne pouvait pas distinguer d'une SUPPRESSION.
+#    AFTER THE FIX, the number of states must GROW with the deviation level. If
+#    it stays at 26, the fix is not in the binary. Read the `partition` column
+#    too: non-zero = the work is CEDED (shared), which could not be told apart
+#    from a SUPPRESSION.
 #
-# 2. A/B DU GRAPHE AMORCE (tools/s9_recettes_amorce.ps1).
+# 2. A/B OF THE SEEDED GRAPH (tools/s9_recettes_amorce.ps1).
 param([int]$Ms = 90000, [string]$Seed = '888')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

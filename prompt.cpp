@@ -10,8 +10,8 @@
 namespace solver {
 namespace {
 
-// Lecteur qui signale le debordement au lieu de lire hors du tampon : les
-// charges utiles varient d'une version du core a l'autre.
+// Reader that reports overflow instead of running off the end of the buffer:
+// payload layouts differ from one core version to the next.
 class Buf {
 public:
 	Buf(const uint8_t* d, uint32_t n) : data(d), len(n) {}
@@ -39,8 +39,8 @@ private:
 	bool ok{ true };
 };
 
-// Nombre de sous-ensembles de taille lo..hi parmi n. Sature plutot que de
-// deborder : au-dela, seul l'ordre de grandeur compte.
+// Number of subsets of size lo..hi out of n. Saturates instead of overflowing:
+// past that point only the order of magnitude matters.
 long double Subsets(uint32_t n, uint32_t lo, uint32_t hi) {
 	if(hi > n)
 		hi = n;
@@ -121,11 +121,11 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 
 	switch(message) {
 	case MSG_SELECT_IDLECMD: {
-		// playerop.cpp:169 — cinq listes de cartes puis les activations.
+		// playerop.cpp:169: five card lists, then the activations.
 		info.player = b.Get<uint8_t>();
 		long long counts[5]{};
 		long long dedup_total = 0;
-		const uint32_t strides[5] = { 10, 10, 7, 10, 10 }; // repos ecrit seq sur 1 octet
+		const uint32_t strides[5] = { 10, 10, 7, 10, 10 }; // reposition writes seq on a single byte
 		for(int g = 0; g < 5; ++g) {
 			uint32_t n = b.Get<uint32_t>();
 			std::set<uint32_t> distinct;
@@ -199,8 +199,8 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		uint32_t hi = b.Get<uint32_t>();
 		uint32_t n = b.Get<uint32_t>();
 		std::set<uint32_t> distinct;
-		// SELECT_TRIBUTE ecrit sequence sur 4 octets + release_param, pas un
-		// loc_info complet (playerop.cpp:672).
+		// SELECT_TRIBUTE writes sequence on four bytes plus release_param, not a full
+		// loc_info (playerop.cpp:672).
 		const uint32_t stride = (message == MSG_SELECT_CARD) ? kLocInfoSize : 7;
 		for(uint32_t i = 0; i < n && b.Ok(); ++i) {
 			distinct.insert(b.Get<uint32_t>());
@@ -230,7 +230,7 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		uint32_t n_un = b.Get<uint32_t>();
 		if(!b.Ok())
 			return info;
-		// Une seule carte est choisie par tour de boucle, pas un sous-ensemble.
+		// One card is picked per loop turn, not a subset.
 		long double stop = (finishable || cancelable) ? 1 : 0;
 		info.raw = static_cast<long double>(n + n_un) + stop;
 		info.dedup = static_cast<long double>(distinct.size() + n_un) + stop;
@@ -241,8 +241,8 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		info.player = b.Get<uint8_t>();
 		uint8_t spe = b.Get<uint8_t>();
 		uint8_t forced = b.Get<uint8_t>();
-		b.Get<uint32_t>();                  // hint timing joueur
-		b.Get<uint32_t>();                  // hint timing adversaire
+		b.Get<uint32_t>();                  // hint timing, player
+		b.Get<uint32_t>();                  // hint timing, opponent
 		uint32_t n = b.Get<uint32_t>();
 		std::set<std::pair<uint32_t, uint64_t>> distinct;
 		for(uint32_t i = 0; i < n && b.Ok(); ++i) {
@@ -267,7 +267,7 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		uint32_t flag = b.Get<uint32_t>();
 		if(!b.Ok())
 			return info;
-		// Un bit a 1 = zone interdite (playerop.cpp:590).
+		// A bit set means the zone is forbidden (playerop.cpp:590).
 		uint32_t free_zones = 0;
 		for(int owner = 0; owner < 2; ++owner) {
 			for(int seq = 0; seq < 7; ++seq)
@@ -297,7 +297,7 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 	}
 	case MSG_SELECT_COUNTER: {
 		info.player = b.Get<uint8_t>();
-		b.Get<uint16_t>();                  // type de compteur
+		b.Get<uint16_t>();                  // counter type
 		uint16_t count = b.Get<uint16_t>();
 		uint32_t n = b.Get<uint32_t>();
 		if(!b.Ok())
@@ -318,8 +318,8 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		uint32_t n = b.Get<uint32_t>();
 		if(!b.Ok())
 			return info;
-		// La contrainte de somme n'est verifiable qu'en interrogeant le core :
-		// on majore par tous les sous-ensembles non vides.
+		// The sum constraint can only be checked by asking the core, so we bound it
+		// from above by every non-empty subset.
 		info.raw = info.dedup = Subsets(n, 1, n);
 		info.detail = Detail({ { "n", n }, { "must", n_must }, { "mode", mode } });
 		return info;
@@ -333,12 +333,12 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		for(uint32_t i = 2; i <= n && i <= 12; ++i)
 			fact *= i;
 		info.raw = fact;
-		info.dedup = 1;   // l'ordre du deck n'entre pas dans l'equivalence de board
+		info.dedup = 1;   // deck order plays no part in board equivalence
 		info.detail = Detail({ { "n", n } });
 		return info;
 	}
 	default:
-		return info;      // ANNOUNCE_* : espace de valeurs, pas une liste
+		return info;      // ANNOUNCE_*: a value space, not a list
 	}
 }
 

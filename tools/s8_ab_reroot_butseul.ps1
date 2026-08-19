@@ -1,23 +1,22 @@
-# A/B sqrt-LTS dans le REGIME BUT SEUL (session 8).
+# A/B of sqrt-LTS in the GOAL-ONLY regime.
 #
-# Pourquoi ce montage, et pas celui de la session 7ter. L'A/B precedent faisait
-# partir le finisseur de reculs d'une solution CONNUE : suffixes courts, forte
-# probabilite, regime ou le rerooting n'a rien a decomposer. Ici la reference
-# est neutralisee (--no-plan) : la politique demarre uniforme et le finisseur
-# reconstruit des lignes DE ZERO. C'est le regime sur lequel portait la
-# prevision de cout (borne monolithique 10^26-10^60 contre 10^5,8-10^12,5
-# decomposee) et le seul ou sqrt-LTS soit cense rendre.
+# Why this setup rather than the earlier one. The previous A/B started the
+# finisher from backtracks of a KNOWN solution: short suffixes, high
+# probability, a regime where the rerooting has nothing to decompose. Here the
+# reference is neutralised (--no-plan): the policy starts uniform and the
+# finisher rebuilds lines FROM SCRATCH. That is the regime the cost forecast
+# covered (monolithic bound 10^26-10^60 against 10^5.8-10^12.5 decomposed) and
+# the only one where sqrt-LTS is supposed to deliver.
 #
-# Cinq bras, meme graine, meme budget, sequentiels :
-#   T    temoin (aucun rerooter)
-#   R    --reroot        rerooter DUR sur les indices (2412.05196, session 7ter)
-#   H8   --reroot-h 8    rerooter HEURISTIQUE doux (2605.30664 3.2)
-#   H15  --reroot-h 15   alpha ~ log de la borne de cout par segment que la
-#   H25  --reroot-h 25   prevision annoncait (10^5,8 -> 13,4 ; 10^12,5 -> 28,8)
+# Five arms, same seed, same budget, sequential:
+#   T    control (no rerooter)
+#   R    --reroot        HARD rerooter on the hints (arXiv:2412.05196)
+#   H8   --reroot-h 8    soft HEURISTIC rerooter (arXiv:2605.30664 3.2)
+#   H15  --reroot-h 15   alpha ~ log of the per-segment cost bound the
+#   H25  --reroot-h 25   forecast announced (10^5.8 -> 13.4; 10^12.5 -> 28.8)
 #
-# Le cadran H8/H15/H25 est la pour que le resultat soit lisible : une perte ou
-# un gain MONOTONE dans le cadran est un vrai resultat, un point isole non
-# (piege 46).
+# The H8/H15/H25 dial exists so the result is readable: a MONOTONIC loss or
+# gain across the dial is a real result, an isolated point is not.
 param([int]$Ms = 600000, [string]$Seed = '888')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

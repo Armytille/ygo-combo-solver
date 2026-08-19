@@ -1,37 +1,37 @@
-# ETALON A EN MODE BUT SEUL, RE-MESURE APRES C1 (session 9).
+# BENCHMARK A IN GOAL-ONLY MODE, RE-MEASURED AFTER THE PARTITION FIX.
 #
-# POURQUOI CETTE MESURE EXISTE
+# WHY THIS MEASUREMENT EXISTS
 #
-# Le §9.15 (e) comparait un bras arme du repertoire a un bras but seul, et
-# concluait que le repertoire valait « la partie difficile ». Mais les deux bras
-# ne differaient pas d'un seul facteur : ils differaient du repertoire ET d'un
-# MECANISME CASSE. La passe LDS — celle qui avait produit le meilleur resultat
-# du bras arme (2/4, 2 038 555 etats) — etait paralysee par le defaut C1 quand
-# le plan est vide : `claims_size = plan.size() + 1` valait 1, soit UN jeton de
-# partition pour seize workers, et toute deviation etait supprimee.
+# An earlier note compared an arm armed with the repertoire against a goal-only
+# arm and concluded the repertoire was worth "the hard part". But the two arms
+# did not differ by a single factor: they differed by the repertoire AND by a
+# BROKEN MECHANISM. The LDS pass, the one that produced the armed arm's best
+# result (2/4, 2 038 555 states), was paralysed when the plan is empty:
+# `claims_size = plan.size() + 1` was 1, i.e. ONE partition token for sixteen
+# workers, and every deviation was suppressed.
 #
-# C1 est corrige (ClaimTable a cle entiere, echec ouvert, refus comptes). Cette
-# mesure refait donc le bras but seul sur un moteur ou la passe LDS fonctionne.
+# That is fixed (a ClaimTable with a full key, failing open, refusals counted).
+# This measurement redoes the goal-only arm on an engine where LDS works.
 #
-# CE QU'IL FAUT LIRE, ET DANS CET ORDRE
+# WHAT TO READ, IN THIS ORDER
 #
-# 1. LA VERIFICATION DE C1, avant tout resultat : dans la table « recherche a
-#    ecarts bornes autour du plan », le nombre d'ETATS doit CROITRE avec le
-#    niveau d'ecart. Avant correction il valait 26, CONSTANT a tous les niveaux
-#    — c'est ce chiffre que le §9.15 avait pris pour un fait structurel du mode.
-#    S'il est encore constant, C1 n'est pas dans le binaire.
-# 2. La colonne `partition` de la ligne d'elagage. Non nulle = le travail est
-#    CEDE a un autre worker (partage) ; c'est ce que la session 8 ne pouvait pas
-#    distinguer d'une SUPPRESSION.
-# 3. Seulement ensuite : le board atteint, contre le 2/4 du bras arme.
+# 1. THE FIX ITSELF, before any result: in the "bounded-discrepancy search
+#    around the plan" table, the number of STATES must GROW with the deviation
+#    level. Before the fix it was 26, CONSTANT at every level, and that figure
+#    had been taken for a structural fact of the mode. If it is still constant,
+#    the fix is not in the binary.
+# 2. The `partition` column of the pruning line. Non-zero = the work is CEDED
+#    to another worker (shared); that is what could not be told apart from a
+#    SUPPRESSION.
+# 3. Only then: the board reached, against the armed arm's 2/4.
 #
-# Reference AVEC repertoire (s7_luna_v6, 1800 s, graine 888) :
+# Reference WITH the repertoire (s7_luna_v6, 1800 s, seed 888):
 #   tirages 1 246 s / 12,66 M tirages / best 1/4
-#   LDS a 0 ecart 2 038 555 etats / 294 s / best 2/4   <-- LE MEILLEUR
+#   LDS at 0 deviations 2 038 555 states / 294 s / best 2/4   <-- THE BEST
 #   board atteint : 1 Liger + Bagooska ; MANQUE 2x Liger. 0 erreur de core.
 #
-# La cible est ATTEIGNABLE (ygocombo #105, 108 etapes) : c'est ce qui fait le
-# prix de cet etalon.
+# The target is REACHABLE (ygocombo #105, 108 steps), and that is what makes
+# this benchmark worth having.
 param([int]$Ms = 1800000, [string]$Seed = '888')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

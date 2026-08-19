@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Liaison ctypes vers ocgcore.dll (x64) + lecteurs de cartes et de scripts.
+"""ctypes binding to ocgcore.dll (x64), plus card and script providers.
 
-Sert de socle au spike du combo solver : permet de piloter un duel EDOPro
-complet depuis Python, sans rendu et sans build C++.
+Backs the Python spike of the combo solver: it drives a complete EDOPro duel
+from Python, with no rendering and no C++ build.
 
-La DLL x64 se construit depuis le clone avec :
+The x64 DLL is built from the clone with:
     MSBuild build\\ygo.sln /p:Configuration=Release /p:Platform=x64 /t:ocgcoreshared
-(la ocgcore.dll installee avec EDOPro est en x86, inutilisable ici.)
+(the ocgcore.dll shipped with EDOPro is x86, and unusable here.)
 """
 
 import ctypes
@@ -17,7 +17,7 @@ import struct
 from ctypes import (CFUNCTYPE, POINTER, Structure, byref, c_char_p, c_int,
                     c_int32, c_uint8, c_uint16, c_uint32, c_uint64, c_void_p)
 
-# --- constantes du core (ocgcore/common.h) --------------------------------
+# --- core constants (ocgcore/common.h) -------------------------------------
 
 LOCATION_DECK, LOCATION_HAND, LOCATION_MZONE, LOCATION_SZONE = 0x01, 0x02, 0x04, 0x08
 LOCATION_GRAVE, LOCATION_REMOVED, LOCATION_EXTRA = 0x10, 0x20, 0x40
@@ -49,7 +49,7 @@ POS_NAMES = {1: "ATK", 2: "FD-ATK", 4: "DEF", 8: "FD-DEF",
              5: "FACEUP", 10: "FACEDOWN", 3: "ATK?", 12: "DEF?"}
 
 
-# --- structures de l'API --------------------------------------------------
+# --- API structures --------------------------------------------------------
 
 class OCG_CardData(Structure):
     _fields_ = [("code", c_uint32), ("alias", c_uint32),
@@ -92,10 +92,10 @@ class OCG_QueryInfo(Structure):
                 ("seq", c_uint32), ("overlay_seq", c_uint32)]
 
 
-# --- base de cartes -------------------------------------------------------
+# --- card database --------------------------------------------------------
 
 class CardDB:
-    """Agrege toutes les .cdb comme le fait DataManager (data_manager.cpp:100)."""
+    """Aggregates every .cdb the way DataManager does (data_manager.cpp:100)."""
 
     def __init__(self, workdir):
         self.cards = {}
@@ -149,20 +149,20 @@ class CardDB:
         return len(self.cards)
 
 
-# --- lecteur de scripts ---------------------------------------------------
+# --- script provider ------------------------------------------------------
 
 class ScriptProvider:
-    """Reproduit l'ordre de recherche de Game::FindScript (game.cpp:4120)."""
+    """Reproduces the search order of Game::FindScript (game.cpp:4120)."""
 
     def __init__(self, workdir, override_roots=None):
-        """override_roots : jeux de scripts a placer en tete.
+        """override_roots: script sets to place first.
 
-        Un replay n'est fidelement rejouable qu'avec les scripts de son epoque.
-        Passer ici un export daté du depot (cf. --scriptdir) remplace les
-        depots vivants de l'installation, qui ont pu diverger depuis.
+        A replay only replays faithfully with the scripts of its own time.
+        Passing a dated export of the repository here (see --scriptdir)
+        replaces the installation's live repositories, which may have moved.
         """
         def expand(root):
-            """Un dossier de scripts et ses sous-dossiers directs."""
+            """A script directory and its immediate subdirectories."""
             if not os.path.isdir(root):
                 return []
             out = [root]
@@ -172,9 +172,9 @@ class ScriptProvider:
                     out.append(sub)
             return out
 
-        # Ordre de Game::FindScript : les depots passent devant (game.cpp:2959),
-        # puis expansions/script, puis ./script. Le depot fait autorite : c'est
-        # lui qui porte les scripts a jour, ./script peut etre une copie datee.
+        # Order of Game::FindScript: the repositories come first (game.cpp:2959),
+        # then expansions/script, then ./script. The repository is authoritative:
+        # it carries the up-to-date scripts, and ./script may be a dated copy.
         self.dirs = []
         if override_roots:
             for root in override_roots:
@@ -207,7 +207,7 @@ class ScriptProvider:
         return None
 
 
-# --- pilote de duel -------------------------------------------------------
+# --- duel driver ----------------------------------------------------------
 
 class Core:
     def __init__(self, dll_path):
@@ -240,7 +240,7 @@ class Core:
 
 
 class Duel:
-    """Un duel vivant. Garde les callbacks en vie cote Python."""
+    """A live duel. Keeps the callbacks alive on the Python side."""
 
     def __init__(self, core, db, scripts, seed, flags, lp, hand, draw,
                  log=None):
@@ -342,7 +342,7 @@ class Duel:
         return self.core.lib.OCG_DuelProcess(self.handle)
 
     def messages(self):
-        """Renvoie la liste des (type, payload) produits depuis le dernier appel."""
+        """Returns the (type, payload) list produced since the last call."""
         ln = c_uint32()
         ptr = self.core.lib.OCG_DuelGetMessage(self.handle, byref(ln))
         if not ptr or ln.value == 0:
@@ -369,8 +369,8 @@ class Duel:
                                                   byref(info))
         if not ptr or ln.value <= 4:
             return []
-        # OCG_DuelQueryLocation prefixe le buffer par la taille utile
-        # (ocgapi.cpp:234) : on la saute.
+        # OCG_DuelQueryLocation prefixes the buffer with its useful size
+        # (ocgapi.cpp:234), so we skip it.
         return parse_query_stream(ctypes.string_at(ptr, ln.value)[4:])
 
     def count(self, team, loc):
@@ -382,15 +382,15 @@ class Duel:
             self.handle = c_void_p()
 
 
-# --- decodage des queries (card::get_infos, card.cpp:118) -----------------
+# --- query decoding (card::get_infos, card.cpp:118) -----------------------
 
 def parse_query_stream(raw):
-    """Decoupe un buffer de query en liste de cartes (None = zone vide)."""
+    """Splits a query buffer into a list of cards (None = an empty slot)."""
     out, off, cur = [], 0, None
     while off + 2 <= len(raw):
         size = struct.unpack_from("<H", raw, off)[0]
         off += 2
-        if size == 0:                      # emplacement vide
+        if size == 0:                      # empty slot
             out.append(None)
             continue
         if off + size > len(raw):

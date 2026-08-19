@@ -1,7 +1,7 @@
-// Decodage des MSG_SELECT_* : ce sont les points de branchement du solveur.
+// Decoding of the MSG_SELECT_* messages: the solver's branch points.
 //
-// Chaque message porte deja la liste des choix legaux, on n'a donc aucune regle
-// de jeu a reimplementer (docs/combo-solver-design.md 2.3).
+// Every message already carries the list of legal choices, so no game rule has
+// to be reimplemented here.
 #pragma once
 
 #include <cstdint>
@@ -9,12 +9,12 @@
 
 namespace solver {
 
-// -1 = message non reconnu ou tronque.
+// -1 when the message is unrecognised or truncated.
 struct PromptInfo {
 	uint8_t type{};
 	int player{ -1 };
-	long double raw{ -1 };    // nombre de reponses distinctes offertes
-	long double dedup{ -1 };  // apres fusion des choix equivalents par code
+	long double raw{ -1 };    // number of distinct answers offered
+	long double dedup{ -1 };  // after merging choices that share a code
 	std::string detail;
 };
 

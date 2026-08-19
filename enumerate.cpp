@@ -4,7 +4,7 @@
 #include <atomic>
 #include <cstring>
 
-#include "arena.h"   // sonde de profil (--profile)
+#include "arena.h"   // profile probe (--profile)
 #include "ocgapi_constants.h"
 
 namespace solver {
@@ -28,8 +28,8 @@ private:
 	bool ok{ true };
 };
 
-// Ecrivent EN PLACE dans la reponse d'un Choice reutilise : resize() sur un
-// vecteur deja capacitaire n'alloue pas.
+// Write IN PLACE into the response of a reused Choice: resize() on a vector
+// that already has the capacity does not allocate.
 void PutInt32(std::vector<uint8_t>& r, int32_t v) {
 	r.resize(4);
 	std::memcpy(r.data(), &v, 4);
@@ -51,32 +51,28 @@ uint64_t Mix(uint64_t h, uint64_t v) {
 	return h;
 }
 
-// LE CODE QUE PORTE UNE DESCRIPTION, et le decalage n'est PAS celui que le
-// dossier croyait.
+// THE CODE A DESCRIPTION CARRIES.
 //
-// `MSG_SELECT_YESNO` ne transporte aucun code : la description le porte pour
-// lui. La session 18ter (9.27 (b)) a ecrit cette recuperation en `desc >> 4`,
-// d'apres la convention « aux.Stringid(id, n) = id * 16 + n ». C'EST FAUX pour
-// le core contemporain : `utility.lua:834` fait `(n & 0xfffff) | code << 20`.
-// Le harnais d'operateurs de la session 19 l'a montre en une mesure — les
-// descriptions relevees sur le plan resolu valent `code << 20`, et pas une
-// seule ne s'appariait.
+// `MSG_SELECT_YESNO` carries no code: the description carries it instead. The
+// convention is NOT `desc >> 4` (from "aux.Stringid(id, n) = id * 16 + n"): the
+// contemporary core does `(n & 0xfffff) | code << 20` in `utility.lua:834`, and
+// the descriptions recorded on a resolved plan are worth `code << 20`.
 //
-// Ce n'etait pas visible sans instrument : `Find()` echouait sur le code faux,
-// le code restait a ZERO, et le prompt gardait une identite (l'arete porte
-// `desc`) tout en perdant sa CARTE — donc le biais d'indices et les sondes
-// d'offre etaient aveugles au pivot du combo, en silence.
+// Getting it wrong is invisible without an instrument: `Find()` fails on the
+// wrong code, the code stays at ZERO, and the prompt keeps an identity (the
+// edge carries `desc`) while losing its CARD, so the hint bias and the offer
+// probes go blind on the pivot of the combo, silently.
 //
-// LES DEUX FORMATS SONT ESSAYES, le large d'abord, et un candidat n'est retenu
-// que si la BASE le connait : un decalage faux fabriquerait sinon un code
-// plausible, c'est-a-dire une identite fausse creditee a une autre carte.
+// BOTH FORMATS ARE TRIED, the wide one first, and a candidate is kept only when
+// the DATABASE knows it: a wrong shift would otherwise manufacture a plausible
+// code, i.e. a false identity credited to another card.
 uint32_t CodeFromDesc(uint64_t desc, const CardDB* db) {
 	if(!db || !desc)
 		return 0;
 	const uint32_t wide = static_cast<uint32_t>(desc >> 20);
 	if(wide && db->Find(wide))
 		return wide;
-	// Ancien format 32 bits : n'a de sens que si la description y tient.
+	// Old 32-bit format: only meaningful when the description fits in it.
 	if(desc < (1ull << 32)) {
 		const uint32_t narrow = static_cast<uint32_t>(desc >> 4);
 		if(narrow && db->Find(narrow))
@@ -92,8 +88,8 @@ uint64_t EdgeOf(uint8_t message, std::initializer_list<uint64_t> parts) {
 	return h;
 }
 
-// Label construit seulement si demande : chaque label est une allocation de
-// chaine par choix, et les chemins chauds n'en lisent aucun.
+// Label built only on request: each label is one string allocation per choice,
+// and hot paths read none of them.
 void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
 			  uint64_t num, bool with_num = true) {
 	if(!opt.labels)
@@ -103,23 +99,21 @@ void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
 		c.label += std::to_string(num);
 }
 
-// Sous-ensembles de `n` elements de taille lo..hi, plafonnes, livres au
-// callback un par un — aucun stockage intermediaire.
+// Subsets of `n` elements of size lo..hi, capped, delivered to the callback one
+// at a time, with no intermediate storage.
 //
-// LES TAILLES SONT PARCOURUES EN ALTERNANT DEPUIS LES DEUX BOUTS : lo, hi,
-// lo+1, hi-1... Une selection minimale (economie de ressources) et une
-// selection maximale sont les deux qui portent l'essentiel de l'information.
+// SIZES ARE WALKED ALTERNATING FROM BOTH ENDS: lo, hi, lo+1, hi-1... A minimal
+// selection (saving resources) and a maximal one are the two that carry most of
+// the information.
 //
-// Le commentaire d'origine annoncait deja ce parcours ; la boucle, elle,
-// montait de lo a hi et s'arretait au plafond. Avec cap = 24 et 24 candidats,
-// les 24 emissions etaient donc les 24 SINGLETONS — aucune paire, jamais. Sur
-// MSG_SELECT_SUM (somme de niveaux, tributs) une selection d'une seule carte ne
-// satisfait presque jamais la contrainte : le prompt devenait sterile sans que
-// rien ne le dise, et toute preuve d'absence portant sur une invocation
-// Synchro ou par tribut s'en trouvait affaiblie (C9).
+// Going from lo upwards and stopping at the cap is a trap: with cap = 24 and 24
+// candidates, the 24 emissions are the 24 SINGLETONS, never a pair. On
+// MSG_SELECT_SUM (level sums, tributes) a single-card selection almost never
+// satisfies the constraint, so the prompt goes sterile without saying so and
+// any proof of absence bearing on a Synchro or tribute summon is worthless.
 //
-// `capped`, non nul, recoit +1 quand le plafond a effectivement coupe : une
-// enumeration tronquee doit pouvoir se distinguer d'une enumeration complete.
+// `capped`, when non-null, gets +1 whenever the cap actually truncated: a
+// truncated enumeration must be distinguishable from a complete one.
 template<typename F>
 void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 				   uint64_t* capped = nullptr, bool ascending = false) {
@@ -142,7 +136,7 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 			++klo;
 		} else {
 			k = khi;
-			--khi;   // khi > klo >= 0 ici : pas de debordement
+			--khi;   // khi > klo >= 0 here: no overflow
 		}
 		from_low = !from_low;
 		if(k == 0) {
@@ -156,13 +150,13 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 		for(;;) {
 			f(cur.data(), k);
 			if(++emitted >= cap) {
-				// Le plafond mord : il reste soit des combinaisons de cette
-				// taille, soit des tailles entieres non visitees.
+				// The cap bites: either combinations of this size, or whole
+				// sizes, remain unvisited.
 				if(capped)
 					++*capped;
 				return;
 			}
-			// combinaison suivante en ordre lexicographique
+			// next combination in lexicographic order
 			int i = static_cast<int>(k) - 1;
 			while(i >= 0 && cur[i] == n - k + i)
 				--i;
@@ -177,16 +171,15 @@ void ForEachSubset(uint32_t n, uint32_t lo, uint32_t hi, uint32_t cap, F&& f,
 
 constexpr uint32_t kLocInfo = 1 + 1 + 4 + 4;
 
-// ASSIGNATION RESOLUE (session 17, chantier 1) — emet les sous-ensembles
-// EXTREMES au sens de `opt.assign_useful`, que la troncature de ForEachSubset
-// cache des que C(n,k) depasse `max_subsets`.
+// RESOLVED ASSIGNMENT: emits the EXTREME subsets by `opt.assign_useful`, which
+// ForEachSubset's truncation hides as soon as C(n,k) exceeds `max_subsets`.
 //
-// DEUX TAILLES (la minimale et la maximale) x DEUX EXTREMES (le plus utile et
-// le moins utile) = au plus quatre choix de plus, dedoublonnes contre ce qui a
-// deja ete emis. On n'en ajoute donc jamais un qui existait : le mecanisme
-// comble un TROU de l'enumeration, il ne repondere pas ce qu'elle couvrait.
+// TWO SIZES (minimal and maximal) x TWO EXTREMES (most useful and least useful)
+// = at most four extra choices, deduplicated against what has already been
+// emitted. So we never add one that already existed: the mechanism fills a HOLE
+// in the enumeration, it does not reweight what the enumeration covered.
 //
-// `pool` indexe `codes` et porte deja la deduplication par code de l'appelant.
+// `pool` indexes `codes` and already carries the caller's per-code dedup.
 void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 						const std::vector<uint8_t>& pool,
 						const std::vector<uint32_t>& codes, uint32_t lo,
@@ -197,9 +190,9 @@ void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 	auto is_useful = [&useful](uint32_t code) {
 		return std::find(useful.begin(), useful.end(), code) != useful.end();
 	};
-	// Positions de `pool` triees par utilite decroissante. Tri STABLE : deux
-	// runs a la meme graine doivent emettre exactement les memes sous-ensembles,
-	// sans quoi l'A/B compare deux espaces d'actions differents.
+	// Positions in `pool` sorted by decreasing usefulness. STABLE sort: two runs
+	// with the same seed must emit exactly the same subsets, otherwise an A/B
+	// compares two different action spaces.
 	static thread_local std::vector<uint8_t> rank, sel;
 	rank.resize(pool.size());
 	for(size_t i = 0; i < pool.size(); ++i)
@@ -222,10 +215,10 @@ void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 			sel.clear();
 			for(uint32_t j = 0; j < k; ++j)
 				sel.push_back(pool[rank[end ? n - 1 - j : j]]);
-			// TRI CROISSANT obligatoire : c'est l'ordre dans lequel
-			// ForEachSubset emet ses membres, et l'arete est un Mix ORDONNE.
-			// Sans ce tri, le meme choix porterait deux aretes differentes et la
-			// deduplication ci-dessous laisserait passer un doublon.
+			// ASCENDING SORT is mandatory: it is the order in which
+			// ForEachSubset emits its members, and the edge is an ORDERED Mix.
+			// Without this sort the same choice would carry two different edges
+			// and the dedup below would let a duplicate through.
 			std::sort(sel.begin(), sel.end());
 			uint64_t h = 0;
 			for(uint8_t ix : sel)
@@ -250,16 +243,16 @@ void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 				  const EnumOptions& opt, ChoiceList& out) {
 	Reader r(data, len);
-	// Les codes lus dans le prompt sont les codes IMPRIMES : deux illustrations
-	// de la meme carte n'y portent pas le meme nombre. Toute arete se construit
-	// donc sur le code canonique, sinon elle ne designe pas une carte mais un
-	// exemplaire — inutilisable pour transposer, et faux pour dedupliquer.
-	// SONDE D'OFFRE greffee sur le point de passage OBLIGE : tout code lu dans
-	// un prompt, quel que soit le message, passe par `canon`. Un marquage par
-	// message aurait manque un prompt en silence, et « jamais proposee » est
-	// exactement la conclusion qu'une sonde incomplete fabriquerait a tort.
-	// Le marquage precede les filtres (dedup, --no-activate, --no-chain) : c'est
-	// voulu, la question est ce que LE JEU propose, pas ce que nous en gardons.
+	// The codes read from the prompt are the PRINTED codes: two artworks of the
+	// same card do not carry the same number there. So every edge is built on the
+	// canonical code, otherwise it designates a printing rather than a card, which
+	// is useless for transposition and wrong for dedup.
+	// OFFER PROBE grafted onto the MANDATORY choke point: every code read from a
+	// prompt, whatever the message, goes through `canon`. Marking per message would
+	// have missed a prompt silently, and "never offered" is exactly the conclusion
+	// an incomplete probe would manufacture.
+	// Marking comes before the filters (dedup, --no-activate, --no-chain), on
+	// purpose: the question is what THE GAME offers, not what we keep of it.
 	auto canon = [&opt](uint32_t code) {
 		const uint32_t c = opt.db ? opt.db->Canonical(code) : code;
 		if(opt.watch_offered && opt.watch) {
@@ -270,22 +263,22 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		}
 		return c;
 	};
-	// Deduplication sans std::set : les listes sont courtes (quelques dizaines),
-	// la recherche lineaire dans un tampon reutilise bat le nid d'allocations.
+	// Dedup without std::set: the lists are short (a few dozen) and a linear scan
+	// through a reused buffer beats a nest of allocations.
 	static thread_local std::vector<uint32_t> seen_codes;
 	static thread_local std::vector<std::pair<uint32_t, uint64_t>> seen_pairs;
 	static thread_local std::vector<uint32_t> codes;
-	// (code, emplacement) pour le dedoublonnage de `SELECT_UNSELECT_CARD` : le
-	// seul code ne suffit pas, cf. le correctif de couverture de la s20.
+	// (code, location) for deduplicating `SELECT_UNSELECT_CARD`: the code alone is
+	// not enough, see the coverage fix below.
 	static thread_local std::vector<uint64_t> seen_keys;
 	static thread_local std::vector<uint64_t> loc_keys;
 
 	switch(message) {
 	case MSG_SELECT_IDLECMD: {
 		r.Get<uint8_t>();   // playerid
-		// t : 0 invocation, 1 invocation speciale, 2 changement de position,
-		// 3 pose de monstre, 4 pose de magie/piege, 5 activation.
-		// La reponse est t | (s << 16)  (playerop.cpp:141)
+		// t: 0 summon, 1 special summon, 2 position change, 3 set monster, 4 set
+		// spell/trap, 5 activation.
+		// The answer is t | (s << 16)  (playerop.cpp:141)
 		static const char* kNames[5] = { "invoquer ", "inv.speciale ",
 										 "reposition ", "poser-mon ", "poser-st " };
 		const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
@@ -312,12 +305,12 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		seen_pairs.clear();
 		for(uint32_t i = 0; i < n_act && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
-			r.Skip(1);                       // controleur
-			uint8_t loc = r.Get<uint8_t>();  // zone d'ou la carte s'active
+			r.Skip(1);                       // controller
+			uint8_t loc = r.Get<uint8_t>();  // zone the card activates from
 			r.Skip(4);                       // sequence
 			uint64_t desc = r.Get<uint64_t>();
 			r.Skip(1);
-			// Activation interdite depuis cette zone : le choix n'existe pas.
+			// Activation forbidden from this zone: the choice does not exist.
 			if(opt.no_activate) {
 				auto it = opt.no_activate->find(code);
 				if(it != opt.no_activate->end() && (it->second & loc))
@@ -338,17 +331,17 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		}
 		uint8_t to_bp = r.Get<uint8_t>();
 		uint8_t to_ep = r.Get<uint8_t>();
-		r.Get<uint8_t>();   // melanger la main : sans effet sur le board
+		r.Get<uint8_t>();   // shuffling the hand: no effect on the board
 		if(!r.Ok()) {
 			out.Clear();
 			return;
 		}
-		// Meme garde-fou qu'au prompt de bataille : un prompt idle sans aucune
-		// commande jouable garde ses sorties de phase, sinon le drapeau
-		// fabriquerait une impasse la ou le jeu en offrait une.
+		// Same safeguard as at the battle prompt: an idle prompt with no playable
+		// command keeps its phase exits, otherwise the flag would manufacture a dead
+		// end where the game offered a way out.
 		{
-			// --mp1-only : la BP disparait tant que la sortie EP existe (ne
-			// jamais retirer la derniere reponse legale d'un prompt).
+			// --mp1-only: the BP disappears as long as the EP exit exists (never
+			// remove the last legal answer of a prompt).
 			if(to_bp && !(opt.mp1_only && to_ep)) {
 				Choice& c = out.Emit();
 				PutInt32(c.response, 6);
@@ -384,26 +377,23 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t n_atk = r.Get<uint32_t>();
 		for(uint32_t i = 0; i < n_atk && r.Ok(); ++i) {
 			uint32_t code = canon(r.Get<uint32_t>());
-			// DEFAUT DE DECODAGE CORRIGE (session 17), verifie contre
-			// `playerop.cpp:37` : dans la liste ATTAQUABLE, `sequence` est un
-			// uint8 et non un uint32 — l'entiere fait
-			//   code u32 | controler u8 | location u8 | sequence u8 | direct u8
-			// soit HUIT octets, la ou ce code en sautait ONZE.
+			// DECODING FIX, checked against `playerop.cpp:37`: in the ATTACKABLE
+			// list, `sequence` is a uint8 and not a uint32, so an entry is
+			//   code u32 | controller u8 | location u8 | sequence u8 | direct u8
+			// that is EIGHT bytes, where this code used to skip ELEVEN.
 			//
-			// CE QUE LE DEFAUT COUTAIT, mesure : trois octets de decalage par
-			// monstre attaquable, donc `r.Ok()` tombe des qu'il y en a UN — ce
-			// qui est le cas de tout board construit. `out.Clear()` s'ensuit,
-			// l'enumeration sort VIDE, et comme `DefaultResponse` ne couvre pas
-			// MSG_SELECT_BATTLECMD, la branche MEURT. Autrement dit : TOUTE
-			// LIGNE QUI ENTRE EN BATTLE PHASE ETAIT CONDAMNEE, donc tout combo
-			// passant par la Main 2 etait hors d'atteinte — en silence, puisque
-			// la mort se lisait comme une impasse ordinaire. Trace : 90 prompts
-			// reduits au defaut et 90 impasses dans le meme run (transplantation
-			// de la ligne Lunalight, 1 ecart).
+			// WHAT THAT COST: three bytes of drift per attackable monster, so
+			// `r.Ok()` falls as soon as there is ONE, which is the case of any
+			// built board. `out.Clear()` follows, the enumeration comes out
+			// EMPTY, and since `DefaultResponse` does not cover
+			// MSG_SELECT_BATTLECMD, the branch DIES. In other words, EVERY LINE
+			// ENTERING THE BATTLE PHASE was doomed, so every combo going through
+			// Main 2 was out of reach, silently, since the death read like an
+			// ordinary dead end.
 			//
-			// Le comptage etait BON dans la liste ACTIVABLE juste au-dessus
-			// (sequence y est un uint32) : c'est la difference entre les deux
-			// listes du meme message qui a fait passer le defaut inapercu.
+			// The count was RIGHT in the ACTIVABLE list just above (sequence is a
+			// uint32 there): the difference between the two lists of the same
+			// message is what kept the defect unnoticed.
 			r.Skip(1 + 1 + 1 + 1);
 			Choice& c = out.Emit();
 			PutInt32(c.response, static_cast<int32_t>(1u | (i << 16)));
@@ -417,13 +407,12 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			out.Clear();
 			return;
 		}
-		// CHANGEMENT DE PHASE AU PROMPT DE BATAILLE (repare session 15).
-		// `allow_phase_change` n'etait lu qu'au prompt IDLE ; ici les deux
-		// sorties de phase etaient emises INCONDITIONNELLEMENT, donc le drapeau
-		// ne fermait qu'une moitie de la porte. Garde-fou : si le prompt ne
-		// propose RIEN d'autre, elles restent emises — retirer la derniere
-		// reponse legale transformerait un prompt en impasse, ce qui n'est pas
-		// un elagage mais une corruption de l'espace.
+		// PHASE CHANGE AT THE BATTLE PROMPT. `allow_phase_change` used to be
+		// read at the IDLE prompt only; here the two phase exits were emitted
+		// UNCONDITIONALLY, so the flag closed only half the door. Safeguard: when
+		// the prompt offers NOTHING else, they stay emitted. Removing the last
+		// legal answer would turn a prompt into a dead end, which is not pruning
+		// but corruption of the space.
 		if(to_m2 && !(opt.mp1_only && to_ep)) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, 2);
@@ -443,28 +432,25 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 
 	case MSG_SELECT_EFFECTYN:
 	case MSG_SELECT_YESNO: {
-		// IDENTITE DU PROMPT OUI/NON (session 18ter, --yn-identity).
+		// IDENTITY OF THE YES/NO PROMPT.
 		//
-		// LE DEFAUT. L'arete valait `EdgeOf(message, {1})` : TOUS les « oui » de
-		// la partie entiere partageaient UN SEUL poids de politique, et tous les
-		// « non » un autre. NRPA ne pouvait apprendre qu'une propension globale a
-		// dire oui. C'est mot pour mot le defaut de 9.23 (h) — « MSG_SELECT_CARD
-		// ne renseignait pas Choice::card, le prompt le plus determinant du
-		// domaine etait invisible au biais » — sur un autre message.
+		// THE DEFECT. The edge was `EdgeOf(message, {1})`: EVERY "yes" of the
+		// whole game shared a SINGLE policy weight, and every "no" another. NRPA
+		// could only learn a global propensity to say yes.
 		//
-		// POURQUOI CE PROMPT-LA COMPTE. Sur l'etalon A, la decision qui debloque
-		// les materiaux du CIMETIERE est un `Duel.SelectYesNo` : l'effet e2 de
-		// `Lunalight Masquerade` propose de defausser une carte, et cette
-		// defausse enregistre EFFECT_EXTRA_FUSION_MATERIAL jusqu'a la End Phase.
-		// Sans elle, les Fusions suivantes n'ont pas acces au cimetiere, ou vit
-		// le materiau nomme. Le plan resolu ne compte que 6 EFFECTYN et 2 YESNO
-		// sur 284 decisions : deux poids pour huit decisions, dont le pivot.
+		// WHY THIS PROMPT MATTERS. On benchmark A, the decision that unlocks the
+		// materials in the GRAVEYARD is a `Duel.SelectYesNo`: effect e2 of
+		// `Lunalight Masquerade` offers to discard a card, and that discard
+		// registers EFFECT_EXTRA_FUSION_MATERIAL until the End Phase. Without it
+		// the following Fusions have no access to the graveyard, where the named
+		// material lives. The resolved plan counts only 6 EFFECTYN and 2 YESNO
+		// out of 284 decisions: two weights for eight decisions, one of them the
+		// pivot.
 		//
-		// CE QUI DONNE L'IDENTITE. `MSG_SELECT_EFFECTYN` transporte le code et la
-		// description ; `MSG_SELECT_YESNO` ne transporte QUE la description. Mais
-		// la convention `aux.Stringid(id, n) = id * 16 + n` est universelle dans
-		// les scripts : la description PORTE le code de la carte. C'est la seule
-		// facon d'attribuer un YESNO, et elle ne nomme aucune carte.
+		// WHAT GIVES THE IDENTITY. `MSG_SELECT_EFFECTYN` carries the code and the
+		// description; `MSG_SELECT_YESNO` carries ONLY the description. But the
+		// `aux.Stringid` convention is universal in the scripts: the description
+		// CARRIES the card's code. It is the only way to attribute a YESNO.
 		uint32_t code = 0;
 		uint64_t desc = 0;
 		{
@@ -520,9 +506,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			r.Skip(kLocInfo);
 			uint64_t desc = r.Get<uint64_t>();
 			r.Skip(1);
-			// --no-chain : cette carte ne se chaine jamais (ses declencheurs
-			// FORCES ne passent pas par ici, forced est exempte ci-dessous).
-			// L'option disparait, "ne pas chainer" demeure.
+			// --no-chain: this card never chains (its FORCED triggers do not
+			// come through here, forced is exempt below).
+			// The option disappears, "do not chain" remains.
 			if(!forced && opt.no_chain &&
 			   std::find(opt.no_chain->begin(), opt.no_chain->end(), code) !=
 				   opt.no_chain->end())
@@ -537,12 +523,11 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			Choice& c = out.Emit();
 			PutInt32(c.response, static_cast<int32_t>(i));
 			c.edge = EdgeOf(message, { code, desc });
-			// La carte engagee : sans elle, les effets RAPIDES (le rip
-			// d'Omega s'active en fenetre de chaine) echappaient au biais des
-			// indices — les invocations etaient biaisees, jamais les
-			// activations en chaine.
+			// The card engaged: without it the QUICK effects (Omega's rip
+			// activates in a chain window) escaped the hint bias, so summons
+			// were biased and chained activations never were.
 			c.card = code;
-			// L'effet engage (s22ter) : la precision de --no-self-negate.
+			// The effect engaged: what gives --no-self-negate its precision.
 			c.desc = desc;
 			SetLabel(c, opt, "chainer ", code);
 		}
@@ -576,8 +561,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			out.Clear();
 			return;
 		}
-		// Les cartes de meme code sont interchangeables : on ne garde qu'un
-		// representant de chaque code avant de former les sous-ensembles.
+		// Cards with the same code are interchangeable: only one representative
+		// per code is kept before forming the subsets.
 		static thread_local std::vector<uint8_t> pool;
 		pool.clear();
 		seen_codes.clear();
@@ -603,10 +588,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  Choice& c = out.Emit();
 						  PutCardIndex(c.response, idx.data(), idx.size());
 						  c.edge = EdgeOf(message, { h, k });
-						  // L'identite du choix, pour que le biais derive de la
-						  // CIBLE puisse s'y appliquer : sans elle, « quelle
-						  // Fusion invoquer » est invisible a
-						  // l'echantillonnage (cf. EnumOptions).
+						  // The identity of the choice, so the target-derived bias can
+						  // apply to it: without it, "which Fusion to summon" is
+						  // invisible to sampling (see EnumOptions).
 						  if(k)
 							  c.card = codes[pool[s[0]]];
 						  if(opt.labels)
@@ -630,22 +614,21 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		uint8_t cancelable = r.Get<uint8_t>();
 		r.Get<uint32_t>(); r.Get<uint32_t>();
 		uint32_t n = r.Get<uint32_t>();
-		// LE `loc_info` EST LU, PAS JETE — et c'est un correctif de couverture,
-		// pas un raffinement.
+		// THE `loc_info` IS READ, NOT THROWN AWAY, and this is a coverage fix, not a
+		// refinement.
 		//
-		// LA MESURE QUI L'IMPOSE (session 20). Sur `replay/liger.yrpX`, la seule
-		// ligne connue qui atteigne le but de l'etalon A, la reference choisit
-		// l'index 3 d'un `SELECT_UNSELECT_CARD` et l'enumerateur n'offrait que
-		// 0, 1, 2 : `dedup_by_code` avait replie l'index 3 sur un doublon de
-		// CODE. Resultat : 251/252 coups retrouves, et UN SEUL coup absent rend
-		// la ligne inatteignable a tout budget.
+		// THE MEASUREMENT THAT FORCES IT. On the only known line that reaches
+		// benchmark A's goal, the reference picks index 3 of a
+		// `SELECT_UNSELECT_CARD` and the enumerator only offered 0, 1, 2:
+		// `dedup_by_code` had folded index 3 onto a CODE duplicate. Result:
+		// 251/252 moves recovered, and ONE missing move makes the line
+		// unreachable at any budget.
 		//
-		// Deux cartes de meme code ne sont PAS interchangeables sur ce prompt :
-		// la liste traverse les zones, et deux exemplaires y different par
-		// l'emplacement, la sequence et la position. Deduire par le seul code
-		// supprime donc de VRAIS coups. On dedoublonne desormais sur la paire
-		// (code canonique, emplacement) — l'octet est deja dans le message,
-		// il etait simplement saute.
+		// Two cards with the same code are NOT interchangeable on this prompt: the
+		// list spans zones, and two copies differ there by location, sequence and
+		// position. Deduplicating on the code alone therefore deletes REAL moves.
+		// We now deduplicate on the (canonical code, location) pair; the byte was
+		// already in the message, it was simply being skipped.
 		codes.clear();
 		loc_keys.clear();
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
@@ -675,9 +658,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		seen_keys.clear();
 		for(uint32_t i = 0; i < codes.size(); ++i) {
 			if(opt.dedup_by_code) {
-				// Cle = (code, emplacement). Deux exemplaires du meme code dans
-				// la MEME zone restent replies (ils sont interchangeables) ;
-				// deux exemplaires dans des zones differentes ne le sont pas.
+				// Key = (code, location). Two copies of the same code in the SAME
+				// zone stay folded (they are interchangeable); two copies in
+				// different zones do not.
 				const uint64_t key =
 					(uint64_t(codes[i]) << 24) ^ loc_keys[i];
 				if(std::find(seen_keys.begin(), seen_keys.end(), key) !=
@@ -706,8 +689,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t flag = r.Get<uint32_t>();
 		if(!r.Ok() || count == 0)
 			return;
-		// Un bit a 1 = zone interdite (playerop.cpp:590). 30 emplacements au
-		// plus : un tableau de pile suffit.
+		// A bit set means the zone is forbidden (playerop.cpp:590). At most 30
+		// slots: a stack array is enough.
 		struct Slot { uint8_t owner, loc, seq; };
 		Slot free_slots[30];
 		uint32_t n_free = 0;
@@ -720,20 +703,20 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 					free_slots[n_free++] = { owner, LOCATION_SZONE, seq };
 		}
 		if(opt.canonical_zones) {
-			// Une seule zone representative par (proprietaire, type de zone).
+			// One representative zone per (owner, zone type).
 			//
-			// DANGER MESURE, ET IL SUFFIT A CONDAMNER CE DRAPEAU EN L'ETAT
-			// (session 18ter) : les ZONES PENDULE sont des sequences PARTICULIERES
-			// de LOCATION_SZONE, et la canonicalisation les confond avec une pose
-			// de magie ordinaire — elle SUPPRIME donc la possibilite de poser une
-			// echelle. Sur l'etalon A, `Lunalight Wolf` n'invoque par Fusion que
-			// depuis la Zone Pendule (`e2:SetRange(LOCATION_PZONE)`) : ce drapeau
-			// referme silencieusement DEUX des trois portes du combo.
-			// La regle correcte n'est pas « une zone par type » mais « une zone
-			// par CLASSE D'EQUIVALENCE QUE LES REGLES RESPECTENT » — la Zone
-			// Pendule et une zone pointee par un Lien sont leurs propres classes.
-			// C'est pourquoi il reste eteint, et pourquoi le departer sans ce
-			// correctif rendrait un verdict faussement negatif.
+			// MEASURED HAZARD, and it is enough to condemn this flag as it stands:
+			// PENDULUM ZONES are PARTICULAR sequences of LOCATION_SZONE, and
+			// canonicalisation conflates them with an ordinary spell set, so it
+			// REMOVES the possibility of setting a scale. On benchmark A,
+			// `Lunalight Wolf` only Fusion Summons from the Pendulum Zone
+			// (`e2:SetRange(LOCATION_PZONE)`): this flag silently closes TWO of the
+			// combo's three doors.
+			// The correct rule is not "one zone per type" but "one zone per
+			// EQUIVALENCE CLASS THE RULES RESPECT": the Pendulum Zone, and a zone
+			// pointed at by a Link, are classes of their own.
+			// That is why it stays off, and why judging it without that fix would
+			// return a falsely negative verdict.
 			uint32_t kept = 0;
 			for(uint32_t i = 0; i < n_free; ++i) {
 				bool dup = false;
@@ -748,7 +731,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			}
 			n_free = kept;
 		}
-		// On ne pose qu'une carte a la fois dans l'immense majorite des cas.
+		// In the vast majority of cases only one card is placed at a time.
 		if(count == 1) {
 			for(uint32_t i = 0; i < n_free; ++i) {
 				const Slot& s = free_slots[i];
@@ -758,13 +741,13 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 				c.response[1] = s.loc;
 				c.response[2] = s.seq;
 				c.edge = EdgeOf(message, { s.owner, s.loc, s.seq });
-				// L'identite de plan ignore la colonne : deux placements dans
-				// deux colonnes libres realisent la meme intention.
+				// Plan identity ignores the column: two placements in two
+				// free columns carry out the same intent.
 				c.plan_key = EdgeOf(message, { s.owner, s.loc });
 				SetLabel(c, opt, "zone ", s.seq);
 			}
 		} else {
-			// Placement multiple : on prend les premieres zones libres.
+			// Multiple placement: take the first free zones.
 			if(n_free >= count) {
 				Choice& c = out.Emit();
 				c.response.resize(size_t(count) * 3);
@@ -782,11 +765,11 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 
 	case MSG_SELECT_POSITION: {
 		r.Get<uint8_t>();
-		// La CARTE fait partie de l'identite du choix. Sans elle, "ATK" et
-		// "DEF" sont deux coups globaux : la politique NRPA apprend UN poids
-		// pour toutes les positions de toutes les cartes — mesure : six
-		// monstres en DEF la ou la cible en veut cinq en ATK — et le
-		// repertoire perd l'intention par carte de la reference.
+		// The CARD is part of the choice's identity. Without it, "ATK" and "DEF"
+		// are two global moves: the NRPA policy learns ONE weight for every
+		// position of every card (measured: six monsters in DEF where the target
+		// wants five in ATK) and the repertoire loses the reference's per-card
+		// intent.
 		uint32_t code = canon(r.Get<uint32_t>());
 		uint8_t pos = r.Get<uint8_t>() & 0xf;
 		if(!r.Ok())
@@ -824,9 +807,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			out.Clear();
 			return;
 		}
-		// La contrainte de somme n'est verifiable que par le core : on propose
-		// tous les sous-ensembles, les invalides seront rejetes (MSG_RETRY) et
-		// la branche abandonnee.
+		// The sum constraint can only be checked by the core: we offer every
+		// subset, the invalid ones get rejected (MSG_RETRY) and the branch is
+		// abandoned.
 		ForEachSubset(n, 1, n, opt.max_subsets,
 					  [&](const uint8_t* s, uint32_t k) {
 						  uint64_t h = 0;
@@ -839,9 +822,9 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 							  c.label = "somme " + std::to_string(k);
 					  },
 					  opt.subsets_capped, false);
-		// Le prompt de SOMME est celui des tributs et des materiaux Synchro :
-		// c'est la que l'etalon B paie son arite. Pas de deduplication par code
-		// ici (l'enumeration indexe `codes` directement), donc le pool est
+		// The SUM prompt is the one for tributes and Synchro materials: it is
+		// where benchmark B pays its arity. No dedup by code here (the
+		// enumeration indexes `codes` directly), so the pool is the identity.
 		// l'identite.
 		if(opt.assign_useful && !opt.assign_useful->empty()) {
 			static thread_local std::vector<uint8_t> ident;
@@ -859,9 +842,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 	case MSG_ANNOUNCE_ATTRIB:
 	case MSG_ANNOUNCE_CARD:
 	case MSG_ANNOUNCE_NUMBER: {
-		// Espaces de valeurs, pas des listes : une enumeration naive serait
-		// enorme et surtout non pertinente pour l'egalite de board. On se
-		// contente de la reponse par defaut.
+		// Value spaces, not lists: a naive enumeration would be huge and, above
+		// all, irrelevant to board equality. We settle for the default answer.
 		static thread_local std::vector<uint8_t> def;
 		def.clear();
 		if(DefaultResponse(message, data, len, def)) {
@@ -885,8 +867,8 @@ void EnumerateInto(uint8_t message, const uint8_t* data, uint32_t len,
 	prof::Scope ps(prof::kEnumerate);
 	out.Clear();
 	EnumerateRaw(message, data, len, opt, out);
-	// Par defaut l'identite de plan est l'arete elle-meme ; seuls les prompts
-	// qui la distinguent explicitement (choix de zone) la renseignent.
+	// By default the plan identity is the edge itself; only the prompts that
+	// explicitly distinguish it (zone choice) fill it in.
 	for(Choice& c : out)
 		if(!c.plan_key)
 			c.plan_key = c.edge;
@@ -896,7 +878,7 @@ std::vector<Choice> Enumerate(uint8_t message, const uint8_t* data, uint32_t len
 							  const EnumOptions& opt) {
 	static thread_local ChoiceList scratch;
 	EnumOptions o = opt;
-	o.labels = true;   // les appelants froids lisent les labels
+	o.labels = true;   // cold callers read the labels
 	EnumerateInto(message, data, len, o, scratch);
 	return std::vector<Choice>(scratch.begin(), scratch.end());
 }
@@ -906,8 +888,8 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 	Reader r(data, len);
 	switch(message) {
 	case MSG_SORT_CARD: {
-		// Ordre identite : l'ordre du deck n'entre pas dans l'equivalence de
-		// board retenue.
+		// Identity order: deck order plays no part in the board equivalence we
+		// use.
 		r.Get<uint8_t>();
 		uint32_t n = r.Get<uint32_t>();
 		if(!r.Ok())
@@ -924,7 +906,7 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t n = r.Get<uint32_t>();
 		if(!r.Ok())
 			return false;
-		// Retirer les compteurs sur les premieres cartes disponibles.
+		// Remove the counters from the first available cards.
 		out.assign(size_t(n) * 2, 0);
 		std::vector<uint16_t> avail;
 		for(uint32_t i = 0; i < n && r.Ok(); ++i) {
@@ -945,14 +927,14 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 		if(!r.Ok() || n == 0)
 			return false;
 		out.resize(4);
-		int32_t v = 0;   // premier choix propose
+		int32_t v = 0;   // first choice offered
 		std::memcpy(out.data(), &v, 4);
 		return true;
 	}
 	case MSG_ANNOUNCE_RACE:
 	case MSG_ANNOUNCE_ATTRIB: {
-		// Il faut annoncer un bit parmi ceux autorises ; sans decodage fin, on
-		// laisse la branche echouer plutot que de risquer une reponse illegale.
+		// We must announce one bit among those allowed; without fine decoding, we
+		// let the branch fail rather than risk an illegal answer.
 		return false;
 	}
 	default:
@@ -960,28 +942,27 @@ bool DefaultResponse(uint8_t message, const uint8_t* data, uint32_t len,
 	}
 }
 
-// Tri-etat. Tous les chemins d'echec rendaient auparavant `false` = AUTORISE,
-// sur une disposition de message ocgcore codee en dur (`strides[5]`). Si le core
-// epingle decale un champ, le lecteur se desynchronise, `r.Ok()` tombe, et
-// --no-activate / --no-chain cessent purement et simplement de filtrer : la
-// reponse enregistree portant l'activation interdite est readmise a cout zero,
-// en silence. Un filtre qui echoue OUVERT sur derive de format est pire qu'un
-// filtre absent, parce qu'il continue d'etre cru (C10).
+// Three-state. All the failure paths used to return `false` = ALLOWED, on a
+// hard-coded ocgcore message layout (`strides[5]`). If the pinned core moves a
+// field, the reader desynchronises, `r.Ok()` falls, and --no-activate /
+// --no-chain simply stop filtering: the recorded answer carrying the forbidden
+// activation is readmitted at zero cost, silently. A filter that fails OPEN on
+// a format drift is worse than no filter, because it goes on being believed.
 //
-// Desormais : `Undecodable` est distinct d'`Allowed`, et les appelants le
-// traitent en erreur fatale plutot qu'en autorisation.
+// So now `Undecodable` is distinct from `Allowed`, and callers treat it as a
+// fatal error rather than as permission.
 Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
 						const std::vector<uint8_t>& response,
 						const EnumOptions& opt) {
-	// --no-chain : une reponse ENREGISTREE qui chaine une carte interdite est
-	// rattrapee ici (mode reparation, ou la reponse de la reference est
-	// candidate a cout zero sans passer par l'enumerateur).
+	// --no-chain: a RECORDED answer that chains a forbidden card is caught here
+	// (repair mode, where the reference's answer is a zero-cost candidate without
+	// going through the enumerator).
 	if(message == MSG_SELECT_CHAIN && response.size() == 4 && opt.no_chain &&
 	   !opt.no_chain->empty()) {
 		int32_t v = 0;
 		std::memcpy(&v, response.data(), 4);
 		if(v < 0)
-			return Verdict::Allowed;   // "ne pas chainer"
+			return Verdict::Allowed;   // "do not chain"
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		r.Get<uint8_t>();
@@ -991,11 +972,11 @@ Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t n = r.Get<uint32_t>();
 		if(!r.Ok())
 			return Verdict::Undecodable;
-		// Une chaine FORCEE n'est pas un choix : le filtre ne s'y applique pas.
+		// A FORCED chain is not a choice: the filter does not apply to it.
 		if(forced)
 			return Verdict::Allowed;
-		// Un indice hors borne n'est pas une derive de lecture : c'est une
-		// reponse qui ne designe rien dans CE prompt.
+		// An out-of-range index is not a read drift: it is an answer that designates
+		// nothing in THIS prompt.
 		if(static_cast<uint32_t>(v) >= n)
 			return Verdict::Undecodable;
 		for(int32_t i = 0; i < v; ++i)
@@ -1019,8 +1000,8 @@ Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
 	uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
 	uint32_t s = static_cast<uint32_t>(v) >> 16;
 	if(t != 5)
-		return Verdict::Allowed;   // seule la famille "activer" est couverte
-	// Rejouer le decodage du prompt jusqu'a l'entree designee.
+		return Verdict::Allowed;   // only the "activate" family is covered
+	// Replay the prompt decoding up to the designated entry.
 	Reader r(data, len);
 	r.Get<uint8_t>();
 	const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
@@ -1047,10 +1028,10 @@ Verdict ResponseVerdict(uint8_t message, const uint8_t* data, uint32_t len,
 			   : Verdict::Allowed;
 }
 
-// Compatibilite : `Undecodable` compte comme INTERDIT, c'est-a-dire que la
-// branche est retiree au lieu d'etre admise sans controle. Le compteur global
-// dit combien de fois c'est arrive — a non nul, la disposition de message a
-// derive et les filtres ne veulent plus rien dire.
+// Compatibility: `Undecodable` counts as FORBIDDEN, i.e. the branch is removed
+// instead of being admitted unchecked. The global counter says how many times
+// that happened; non-zero, and the message layout has drifted and the filters
+// no longer mean anything.
 std::atomic<uint64_t> g_undecodable{ 0 };
 
 bool ResponseForbidden(uint8_t message, const uint8_t* data, uint32_t len,
@@ -1089,7 +1070,7 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		const uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
 		const uint32_t s = static_cast<uint32_t>(v) >> 16;
 		if(t != 5)
-			return false;   // invoquer / poser / changer de phase : pas une activation
+			return false;   // summon / set / change phase: not an activation
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
@@ -1101,8 +1082,8 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		uint32_t n_act = r.Get<uint32_t>();
 		if(!r.Ok() || s >= n_act)
 			return undecodable();
-		// L'entree activable : code u32 | controleur u8 | zone u8 | sequence u32
-		//                      | description u64 | mode client u8
+		// The activable entry: code u32 | controller u8 | zone u8 | sequence u32
+		//                     | description u64 | client mode u8
 		for(uint32_t i = 0; i < s; ++i)
 			r.Skip(4 + 1 + 1 + 4 + 8 + 1);
 		out.code = canon(r.Get<uint32_t>());
@@ -1123,7 +1104,7 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		const uint32_t t = static_cast<uint32_t>(v) & 0xffffu;
 		const uint32_t s = static_cast<uint32_t>(v) >> 16;
 		if(t != 0)
-			return false;   // attaquer / changer de phase
+			return false;   // attack / change phase
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		uint32_t n_act = r.Get<uint32_t>();
@@ -1147,7 +1128,7 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		int32_t v = 0;
 		std::memcpy(&v, response.data(), 4);
 		if(v < 0)
-			return false;   // « ne pas chainer »
+			return false;   // "do not chain"
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		r.Get<uint8_t>();
@@ -1176,12 +1157,12 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		int32_t v = 0;
 		std::memcpy(&v, response.data(), 4);
 		if(v != 1)
-			return false;   // un « non » n'emploie aucun operateur
+			return false;   // a "no" employs no operator
 		Reader r(data, len);
 		r.Get<uint8_t>();
 		if(message == MSG_SELECT_EFFECTYN) {
 			out.code = canon(r.Get<uint32_t>());
-			r.Get<uint8_t>();          // controleur
+			r.Get<uint8_t>();          // controller
 			out.location = r.Get<uint8_t>();
 			out.sequence = r.Get<uint32_t>();
 			r.Skip(4);                 // position
@@ -1190,7 +1171,7 @@ bool DecodeActivation(uint8_t message, const uint8_t* data, uint32_t len,
 		out.desc = r.Get<uint64_t>();
 		if(!r.Ok())
 			return undecodable();
-		// Le YESNO ne porte AUCUN code : la description le porte pour lui.
+		// The YESNO carries NO code: the description carries it instead.
 		if(!out.code && out.desc)
 			out.code = canon(CodeFromDesc(out.desc, opt.db));
 		return true;

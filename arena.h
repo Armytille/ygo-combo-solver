@@ -1,27 +1,23 @@
-// Arene memoire instantanable pour un duel ocgcore.
+// Snapshottable memory arena for an ocgcore duel.
 //
-// POURQUOI
-// L'API OCG n'offre aucun clonage d'etat, et un serialiseur ecrit a la main est
-// hors de portee : au moment d'un MSG_SELECT_*, des coroutines Lua sont
-// suspendues au milieu d'une resolution d'effet, avec leurs piles et leurs
-// upvalues (interpreter.cpp, call_coroutine). On ne sauvegarde donc pas le jeu,
-// on sauvegarde LA MEMOIRE.
+// WHY
+// The OCG API offers no state cloning, and a hand-written serialiser is out of
+// reach: at a MSG_SELECT_*, Lua coroutines sit suspended in the middle of an
+// effect resolution, with their stacks and their upvalues (interpreter.cpp,
+// call_coroutine). So we do not save the game, we save THE MEMORY.
 //
-// COMMENT
-// Toute la memoire mutable du duel est confinee dans une plage d'adresses que
-// l'on controle :
-//   - le heap Lua, via l'allocateur passe a lua_newstate (patch luaconf) ;
-//   - les objets C++ du core, via la surcharge globale d'operator new/delete.
-// La restauration se fait A LA MEME ADRESSE DE BASE, donc tous les pointeurs
-// absolus restent valides sans relocation : le duel ne sait pas qu'il a ete
-// restaure.
+// HOW
+// All the duel's mutable memory is confined to an address range we control:
+//   - the Lua heap, through the allocator passed to lua_newstate (luaconf patch);
+//   - the core's C++ objects, through the global operator new/delete overload.
+// The restore happens AT THE SAME BASE ADDRESS, so every absolute pointer stays
+// valid with no relocation: the duel never knows it was restored.
 //
-// ETAT DE L'IMPLEMENTATION
-// L'instantane est une copie complete de la zone servie : simple, sur, et deja
-// exploitable au vu du cout mesure d'un pas de moteur (0,18 ms). Le suivi par
-// pages sales est branche en INSTRUMENTATION seulement — il mesure combien de
-// pages une action salit, chiffre dont depend le passage a une restauration
-// incrementale.
+// IMPLEMENTATION STATUS
+// The snapshot is a full copy of the served region: simple, safe, and already
+// usable given the measured cost of one engine step (0.18 ms). Dirty-page
+// tracking is wired as INSTRUMENTATION only; it measures how many pages an
+// action dirties, the figure that decides whether an incremental restore pays.
 #pragma once
 
 #include <atomic>
@@ -33,23 +29,23 @@
 namespace solver {
 
 struct ArenaStats {
-	size_t reserved = 0;       // plage d'adresses reservee
-	size_t committed = 0;      // reellement engagee aupres de l'OS
-	size_t in_use = 0;         // haut de la zone servie (borne du snapshot)
-	size_t live_bytes = 0;     // somme des blocs alloues non liberes
+	size_t reserved = 0;       // reserved address range
+	size_t committed = 0;      // actually committed to the OS
+	size_t in_use = 0;         // top of the served region (snapshot bound)
+	size_t live_bytes = 0;     // sum of allocated blocks not yet freed
 	size_t alloc_count = 0;
 	size_t free_count = 0;
-	size_t host_fallbacks = 0; // allocations sorties de l'arene alors qu'elle
-							   // etait active (doit rester a zero)
-	bool poisoned = false;     // au moins un repli : l'etat n'est plus capture
+	size_t host_fallbacks = 0; // allocations that escaped the arena while it
+							   // was live (must stay at zero)
+	bool poisoned = false;     // at least one escape: state is no longer captured
 };
 
-// Une arene par thread : chaque worker explore son propre sous-arbre, les
-// instantanes ne circulent pas entre threads (bases differentes).
+// One arena per thread: each worker explores its own subtree, and snapshots
+// never travel between threads (different bases).
 class Arena {
 public:
-	// `reserve` est de l'espace d'adressage, pas de la memoire : seul ce qui est
-	// touche est engage. Le jeu de travail doit rester petit pour tenir en L3.
+	// `reserve` is address space, not memory: only what is touched is committed.
+	// The working set must stay small enough to sit in L3.
 	bool Init(size_t reserve, std::uintptr_t preferred_base, std::string& error);
 	void Shutdown();
 	bool Ready() const { return base != nullptr; }
@@ -58,20 +54,18 @@ public:
 	void Free(void* ptr);
 	void* Reallocate(void* ptr, size_t old_size, size_t new_size);
 
-	// --- EMPOISONNEMENT ------------------------------------------------------
+	// --- ESCAPES -------------------------------------------------------------
 	//
-	// Une allocation qui n'a pas tenu dans l'arene part sur le tas de l'hote.
-	// `Restore()` ne peut PAS la restaurer : a partir de cet instant l'etat du
-	// duel diverge de ce que la recherche croit avoir restaure, et tout ce que
-	// ce worker mesure ensuite — noeuds, board keys, solutions — porte sur un
-	// duel corrompu. Ce n'est donc pas une statistique, c'est une condition
-	// d'arret.
+	// An allocation that did not fit in the arena goes to the host heap.
+	// `Restore()` CANNOT restore it: from that moment on the duel's state diverges
+	// from what the search believes it restored, and everything that worker
+	// measures afterwards (nodes, board keys, solutions) describes a corrupt duel.
+	// So this is not a statistic, it is a stop condition.
 	//
-	// Le compteur etait auparavant un `thread_local` lu depuis le thread
-	// PRINCIPAL : les replis des workers etaient structurellement invisibles et
-	// le rapport imprimait « aucune : tout l'etat est capture » par
-	// construction. Il est desormais membre et atomique, et le drapeau est
-	// COLLANT (C7).
+	// The counter used to be a `thread_local` read from the MAIN thread: worker
+	// escapes were structurally invisible and the report printed "none: all state
+	// is captured" by construction. It is now a member, atomic, and the flag is
+	// STICKY.
 	void NoteFallback() {
 		fallbacks.fetch_add(1, std::memory_order_relaxed);
 		poisoned.store(true, std::memory_order_relaxed);
@@ -86,74 +80,73 @@ public:
 		return a >= base_addr && a < base_addr + reserved;
 	}
 
-	// --- instantanes (pile LIFO, ce qui correspond a un parcours en profondeur)
+	// --- snapshots (LIFO stack, which is what a depth-first walk needs)
 	//
-	// Seules les pages effectivement modifiees sont copiees. Un miroir de
-	// l'etat au sommet de pile fournit les images d'avant-modification, que le
-	// suivi de pages ne donne pas.
+	// Only the pages actually modified are copied. A mirror of the state at the
+	// top of the stack supplies the before-images, which page tracking does not.
 	//
-	// Sequence typique d'un DFS :
-	//     Push()                      une fois en arrivant sur le noeud
-	//     pour chaque fils : avancer, explorer, Restore()
-	//     Pop()                       en repartant du noeud
-	// Restore() est l'operation frequente, et la moins chere : elle ne recopie
-	// que ce que le fils a sali.
-	void Push();     // ouvre un niveau : l'etat courant devient le point de reprise
-	void Restore();  // revient au point de reprise SANS depiler (iteration sur les fils)
-	void Pop();      // revient au point de reprise et depile
-	// Equivalent a k x Pop() puis Restore(), en UNE passe : un seul SyncDirty,
-	// les journaux d'annulation appliques au miroir du haut vers le bas, puis
-	// l'arene restauree depuis le miroir sur l'UNION des pages sales — chaque
-	// page chaude est recopiee une fois au lieu d'une fois par niveau, et la
-	// table des spans n'est restauree qu'au niveau cible. Motive par le profil
-	// du finisseur en pile complete (9.19 (c)) : Restore+Pop y pesent 27 %.
+	// Typical DFS sequence:
+	//     Push()                      once on arriving at the node
+	//     for each child: advance, explore, Restore()
+	//     Pop()                       on leaving the node
+	// Restore() is the frequent operation, and the cheapest: it copies back only
+	// what the child dirtied.
+	void Push();     // opens a level: the current state becomes the resume point
+	void Restore();  // returns to the resume point WITHOUT popping (iterating over children)
+	void Pop();      // returns to the resume point and pops
+	// Equivalent to k x Pop() then Restore(), in ONE pass: a single SyncDirty, the
+	// undo logs applied to the mirror from the top down, then the arena restored
+	// from the mirror over the UNION of the dirty pages. Each hot page is copied
+	// once instead of once per level, and the span table is restored only at the
+	// target level. Motivated by the finisher profile on a full stack, where
+	// Restore+Pop account for 27 % of the time.
 	void PopToAndRestore(size_t k);
-	void Discard();  // depile sans restaurer
+	void Discard();  // pops without restoring
 	size_t Depth() const { return checkpoints.size(); }
 
 	struct CheckpointCost {
-		size_t pages = 0;    // pages traitees par la derniere operation
+		size_t pages = 0;    // pages handled by the last operation
 		size_t bytes = 0;
 	};
 	CheckpointCost LastPush() const { return last_push; }
 	CheckpointCost LastRestore() const { return last_restore; }
-	size_t UndoBytes() const;   // memoire retenue par la pile de journaux
+	size_t UndoBytes() const;   // memory retained by the log stack
 
-	// --- instrumentation des pages sales
+	// --- dirty page instrumentation
 	void ResetDirtyTracking();
-	size_t CountDirtyPages();   // pages ecrites depuis le dernier appel/reset
+	size_t CountDirtyPages();   // pages written since the last call/reset
 	bool DirtyTrackingAvailable() const { return write_watch; }
 
 	ArenaStats Stats() const;
 	size_t PageSize() const { return page_size; }
 	std::uintptr_t BaseAddress() const { return base_addr; }
 
-	// Verifie l'invariant vital : aucune structure de l'allocateur ne doit
-	// vivre dans l'arene, sinon une restauration l'ecrase sous ses pieds.
-	// Renvoie une description du probleme, vide si tout va bien.
+	// Checks the vital invariant: no allocator structure may live inside the
+	// arena, otherwise a restore overwrites it from under its own feet. Returns a
+	// description of the problem, empty when all is well.
 	std::string SelfCheck() const;
 
-	// Allocateur au format attendu par lua_newstate.
+	// Allocator in the shape lua_newstate expects.
 	static void* LuaAlloc(void* ud, void* ptr, size_t osize, size_t nsize);
 
 private:
 	struct SpanInfo {
-		uint8_t klass = 0xff;  // 0xff libre, 0xfe tete de bloc large, 0xfd suite
-		uint32_t run = 0;      // nombre de spans, renseigne sur le premier
+		uint8_t klass = 0xff;  // 0xff free, 0xfe head of a large block, 0xfd continuation
+		uint32_t run = 0;      // number of spans, filled in on the first one
 	};
-	// L'etat de l'allocateur fait partie de l'etat a restaurer. Les chainages de
-	// blocs libres vivent dans l'arene, donc dans les pages copiees ; les tetes
-	// de liste et la table des spans sont gardees hors arene, pour qu'une
-	// restauration ne les ecrase pas sous leurs propres pieds.
+	// The allocator's own state is part of the state to restore. The free-block
+	// chains live in the arena, hence in the copied pages; the list heads and the
+	// span table are kept outside the arena so that a restore does not overwrite
+	// them from under their own feet.
 	struct Checkpoint {
 		size_t in_use = 0;
-		// Pages modifiees depuis l'empilement de CE niveau. Accumule en
-		// logiciel : le suivi materiel n'a qu'un seul jeu de bits global, il ne
-		// peut pas servir plusieurs niveaux a la fois.
+		// Pages modified since THIS level was pushed. Accumulated in software: the
+		// hardware tracker has a single global bitset and cannot serve several levels
+		// at once.
 		std::vector<uint64_t> dirty;
-		// Contenu qu'avaient, a l'empilement de ce niveau, les pages modifiees
-		// pendant sa periode. Sert a ramener le miroir en arriere quand un fils
-		// est depile. Reconstruit a chaque Push d'un fils.
+		// The contents the pages modified during this level held when the level was
+		// pushed. Used to wind the mirror back when a child is popped. Rebuilt on
+		// every child Push.
 		std::vector<uint32_t> undo_pages;
 		std::vector<uint8_t> undo_data;
 
@@ -164,24 +157,24 @@ private:
 		size_t live_bytes = 0;
 	};
 
-	// Marque un bloc frais comme sale (voir arena.cpp) : referme le trou des
-	// copies en bloc, que l'instrumentation de clang ne voit pas.
+	// Marks a fresh block dirty (see arena.cpp): closes the hole left by bulk
+	// copies, which clang's instrumentation does not see.
 	static void MarkFresh(const void* p, size_t n);
 	bool CommitTo(size_t offset);
 	void* AllocSpans(size_t span_count);
 	void FreeSpans(size_t span_index, size_t span_count);
 	void EnsureMirror();
-	// Verse les bits du suivi materiel dans le niveau au sommet et remet le
-	// suivi materiel a zero. Renvoie le nombre de pages du dernier echantillon.
-	// TOUTE lecture du suivi materiel doit passer par ici : le lire le remet a
-	// zero, donc une lecture qui ne verserait pas les bits les perdrait.
+	// Pours the hardware tracker's bits into the top level and resets the
+	// hardware tracker. Returns the page count of the last sample. EVERY read of
+	// the hardware tracker must go through here: reading it resets it, so a read
+	// that did not pour the bits would lose them.
 	size_t SyncDirty();
 	void CaptureMetadata(Checkpoint& cp) const;
 	void RestoreMetadata(const Checkpoint& cp);
 #if defined(__EMSCRIPTEN__)
-	// Le suivi materiel des pages sales n'existe pas en wasm ; il est remplace
-	// par une barriere d'ecriture logicielle, qui n'est pas prouvable par
-	// lecture. Ces trois-la l'EXIGENT au lieu de la supposer (R2V_ARENA_VERIFY=1).
+	// Hardware dirty-page tracking does not exist under wasm; it is replaced by a
+	// software write barrier, which cannot be proven by reading. These three
+	// REQUIRE it instead of assuming it (R2V_ARENA_VERIFY=1).
 	void VerifyDirtySet(const Checkpoint& cp);
 public:
 	static bool VerifyBarrier();
@@ -200,13 +193,13 @@ private:
 	size_t next_span = 0;
 
 	std::vector<Checkpoint> checkpoints;
-	// Copie complete de l'etat au sommet de pile. C'est la seule source
-	// possible d'images d'avant-modification : le suivi de pages dit QUELLES
-	// pages ont change, jamais ce qu'elles contenaient.
+	// Full copy of the state at the top of the stack. It is the only possible
+	// source of before-images: page tracking says WHICH pages changed, never what
+	// they contained.
 	std::vector<uint8_t> mirror;
 	size_t live_bytes = 0, alloc_count = 0, free_count = 0;
-	// Atomiques : ecrits par le thread proprietaire, lus par lui ET par le
-	// thread principal au bilan.
+	// Atomic: written by the owning thread, read by it AND by the main thread at
+	// report time.
 	std::atomic<size_t> fallbacks{ 0 };
 	std::atomic<bool> poisoned{ false };
 	std::vector<uint8_t*> dirty_scratch;
@@ -214,18 +207,18 @@ private:
 };
 
 namespace detail {
-// Signale une allocation qui a du sortir de l'arene alors qu'elle etait active.
+// Reports an allocation that had to leave the arena while it was live.
 void NoteHostFallback();
 } // namespace detail
 
-// Arene ou allouer maintenant (nullptr hors duel ou pendant une pause).
+// Arena to allocate from right now (nullptr outside a duel or during a pause).
 Arena* CurrentArena();
-// Arene du thread, independamment des pauses : sert a router les liberations,
-// qui peuvent survenir hors de tout scope.
+// The thread's arena, regardless of pauses: used to route frees, which can
+// happen outside any scope.
 Arena* OwnerArena();
 
-// Rend l'arene active. A poser autour des appels au core et seulement autour
-// d'eux : le code hote doit allouer normalement.
+// Makes the arena live. To be placed around calls into the core and only
+// around those: host code must allocate normally.
 class ArenaScope {
 public:
 	explicit ArenaScope(Arena* a);
@@ -237,10 +230,10 @@ private:
 	Arena* previous;
 };
 
-// Suspend l'arene a l'interieur d'un ArenaScope. Indispensable dans nos
-// callbacks (lecteur de scripts, journal d'erreurs) : ils sont appeles DEPUIS
-// le core, donc arene active, mais ce qu'ils allouent appartient a l'hote et ne
-// doit pas etre efface par une restauration.
+// Suspends the arena inside an ArenaScope. Indispensable in our callbacks
+// (script reader, error log): they are called FROM the core, so the arena is
+// live, but what they allocate belongs to the host and must not be wiped by a
+// restore.
 class ArenaPause {
 public:
 	ArenaPause();
@@ -252,42 +245,42 @@ private:
 	Arena* previous;
 };
 
-// --- PROFIL DU CHEMIN CHAUD (--profile) ------------------------------------
+// --- HOT PATH PROFILE (--profile) ------------------------------------------
 //
-// Ou part le temps d'une decision simulee. Les regles, chacune payee une fois :
-//   - compteurs thread_local, verses dans des atomiques globaux au DECES du
-//     thread (les workers sont crees et joints par phase, le versement est
-//     garanti) et par flush explicite pour le thread principal — un
-//     thread_local lu depuis un autre thread mesure zero, toujours (piege 58) ;
-//   - jamais d'atomique partage sur le chemin par-appel : seize workers qui
-//     tapent la meme ligne de cache mesureraient leur propre contention ;
-//   - __rdtsc, calibre une fois contre l'horloge murale au moment du rapport ;
-//   - eteint par defaut : une sonde inactive coute un load+branch.
+// Where a simulated decision spends its time. The rules, each paid once:
+//   - thread_local counters, poured into global atomics when the thread DIES
+//     (workers are created and joined per phase, so the pour is guaranteed)
+//     and by an explicit flush for the main thread; a thread_local read from
+//     another thread always measures zero;
+//   - never a shared atomic on the per-call path: sixteen workers hammering
+//     the same cache line would measure their own contention;
+//   - __rdtsc, calibrated once against the wall clock at report time;
+//   - off by default: an inactive probe costs a load plus a branch.
 //
-// Le temps mesure par sonde est EXCLUSIF (self) : une sonde imbriquee se
-// soustrait de celle qui l'englobe. La sonde kSearch enveloppe le corps des
-// Run* : son temps propre est donc, PAR CONSTRUCTION, la ligne « reste » —
-// sans elle un profil ment par omission.
+// Time measured per probe is EXCLUSIVE (self): a nested probe subtracts itself
+// from the one enclosing it. The kSearch probe wraps the body of the Run*
+// functions, so its self time is BY CONSTRUCTION the "everything else" line;
+// without it a profile lies by omission.
 //
-// Vit dans arena.h/arena.cpp et non dans un fichier neuf : premake evalue son
-// glob `files { "*.cpp" }` a la GENERATION, un fichier neuf exigerait de
-// regenerer la solution. arena.h est inclus par duel.h, donc visible de tout
-// le chemin chaud.
+// This lives in arena.h/arena.cpp rather than in a new file: premake evaluates
+// its `files { "*.cpp" }` glob at GENERATION time, so a new file would mean
+// regenerating the solution. arena.h is included by duel.h, hence visible from
+// the whole hot path.
 namespace prof {
 
 enum Site : uint32_t {
-	kSearch = 0,     // corps d'un Run* — le self est la ligne « reste »
-	kPrefix,         // rejeu de prefixe (racines du finisseur)
-	kProcess,        // Duel::Process (le core lui-meme)
-	kQuery,          // Duel::Query, surcharge a tampon (la surcharge vecteur delegue)
+	kSearch = 0,     // body of a Run* function; self time is the "everything else" line
+	kPrefix,         // prefix replay (finisher roots)
+	kProcess,        // Duel::Process (the core itself)
+	kQuery,          // Duel::Query, buffer overload (the vector overload delegates)
 	kQueryCodes,     // Duel::QueryCodes
 	kProcState,      // Duel::ProcessorState
 	kCount,          // Duel::Count
 	kEnumerate,      // EnumerateInto
-	kDigest,         // StateDigest, hors requetes internes
-	kBoardKey,       // ComputeBoardKeyInto, hors requetes internes
-	kAtoms,          // CollectAtoms (nouveaute), hors requetes internes
-	kRecipe,         // RecipeDistance, hors requetes internes
+	kDigest,         // StateDigest, excluding internal queries
+	kBoardKey,       // ComputeBoardKeyInto, excluding internal queries
+	kAtoms,          // CollectAtoms (novelty), excluding internal queries
+	kRecipe,         // RecipeDistance, excluding internal queries
 	kArenaPush,
 	kArenaRestore,
 	kArenaPop,
@@ -298,21 +291,21 @@ enum Counter : uint32_t {
 	kAlloc = 0,      // Arena::Allocate
 	kFree,           // Arena::Free
 	kRealloc,        // Arena::Reallocate
-	kPagesPushed,    // pages traitees par Push
-	kPagesRestored,  // pages recopiees par Restore
-	kDecisions,      // decisions/expansions (aligne sur ++stats.nodes)
+	kPagesPushed,    // pages handled by Push
+	kPagesRestored,  // pages copied back by Restore
+	kDecisions,      // decisions/expansions (matches ++stats.nodes)
 	kCounterCount
 };
 
-// Fixe AVANT la creation des threads (la publication passe par le lancement).
+// Set BEFORE the threads are created (publication rides on the launch).
 extern bool enabled;
 
-void Enable();               // allume + calibre l'origine tsc/horloge
-void FlushThread();          // verse les compteurs du thread APPELANT
-// Verse le thread courant, imprime la table de LA PHASE ecoulee (si des sondes
-// ont tire) et remet les compteurs de phase a zero. Le cumul de run continue.
+void Enable();               // turns it on and calibrates the tsc/clock origin
+void FlushThread();          // pours the counters of the CALLING thread
+// Pours the current thread, prints the table for THE PHASE just ended (when
+// probes fired) and zeroes the phase counters. The run total keeps going.
 void PrintPhase(const char* label);
-void PrintTotal();           // le cumul de tout le run, en fin d'execution
+void PrintTotal();           // the whole-run total, at the end of the execution
 
 void CountSlow(uint32_t counter, uint64_t n);
 inline void Count(uint32_t counter, uint64_t n = 1) {

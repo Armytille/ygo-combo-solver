@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Session 21 — verification par sympy de chaque formule du combosolver.
+"""Verification of the solver's formulas with sympy.
 
-Chaque bloc rend VRAI/FAUX + la derivation. Sortie ASCII pour eviter les
-soucis d'encodage console.
+Each block returns TRUE/FALSE plus the derivation. ASCII output, to avoid
+console encoding trouble.
 """
 import math
 import random
@@ -22,14 +22,14 @@ def bloc(titre):
 
 # ---------------------------------------------------------------------------
 bloc("B1. Les 5 cas de SelfTestOperatorLP, resolus en rationnels exacts")
-# forme : min c'x  s.c.  A'x >= b, 0 <= x <= u
+# form: min c'x  s.t.  A'x >= b, 0 <= x <= u
 
 
 def solve_exact(cost, upper, rows):
-    # PIEGE TROUVE EN SEANCE : lpmin IGNORE l'assomption nonnegative=True des
-    # symboles — sans `x >= 0` EXPLICITE il resout le programme a variables
-    # LIBRES (optima negatifs rendus avec des couts >= 0, impossible). La
-    # premiere table de fuzz etait donc fausse par MON appel, pas par sympy.
+    # TRAP FOUND IN SESSION: lpmin IGNORES the nonnegative=True assumption on the
+    # symbols. Without an EXPLICIT `x >= 0` it solves the free-variable program
+    # (negative optima returned with costs >= 0, which is impossible). The first
+    # fuzz table was therefore wrong because of MY call, not because of sympy.
     n = len(cost)
     xs = sp.symbols("x0:%d" % n)
     cons = [x >= 0 for x in xs]
@@ -50,7 +50,7 @@ def solve_exact(cost, upper, rows):
 
 
 CASES = [
-    # (cost, upper, rows[(coefs,rhs)], feas attendu, val attendu)
+    # (cost, upper, rows[(coefs,rhs)], expected feasibility, expected value)
     ([1], [None], [([(0, 1)], 3)], True, 3),
     ([1, 1], [None, None], [([(0, 1)], 2), ([(0, -1), (1, 1)], 0)], True, 4),
     ([1, 5], [1, None], [([(0, 1), (1, 1)], 3)], True, 11),
@@ -66,19 +66,19 @@ for i, (c, u, rows, ef, ev) in enumerate(CASES, 1):
 # ---------------------------------------------------------------------------
 bloc("B2. Identites logarithmiques (Levin, vraisemblance)")
 
-# (a) moyenne geometrique : 10^(sum log10 a_i / n) == (prod a_i)^(1/n)
+# (a) geometric mean: 10^(sum log10 a_i / n) == (prod a_i)^(1/n)
 a1, a2, a3 = sp.symbols("a1 a2 a3", positive=True)
 lhs = 10 ** ((sp.log(a1, 10) + sp.log(a2, 10) + sp.log(a3, 10)) / 3)
 rhs = (a1 * a2 * a3) ** sp.Rational(1, 3)
 d = sp.simplify(sp.log(lhs) - sp.log(rhs))
 print((OK if d == 0 else KO) + "moyenne geometrique = 10^(log10p/n) : diff = %s" % d)
 
-# (b) borne monolithique : log10(d) - ln(pi)/ln(10) == log10(d/pi)
+# (b) monolithic bound: log10(d) - ln(pi)/ln(10) == log10(d/pi)
 dd, pi = sp.symbols("d pi", positive=True)
 d2 = sp.simplify((sp.log(dd, 10) - sp.log(pi) / sp.log(10)) - sp.log(dd / pi, 10))
 print((OK if d2 == 0 else KO) + "log10(d) - ln(pi)/ln10 = log10(d/pi) : diff = %s" % d2)
 
-# (c) log-sum-exp base 10 : w + log10(sum 10^(l_i - w)) == log10(sum 10^l_i)
+# (c) log-sum-exp base 10: w + log10(sum 10^(l_i - w)) == log10(sum 10^l_i)
 l1, l2, l3, w = sp.symbols("l1 l2 l3 w", real=True)
 lse = w + sp.log(10 ** (l1 - w) + 10 ** (l2 - w) + 10 ** (l3 - w), 10)
 ref = sp.log(10 ** l1 + 10 ** l2 + 10 ** l3, 10)
@@ -92,7 +92,7 @@ wsym = sp.symbols("w0:3", real=True)
 t = sp.symbols("tau", positive=True)
 exps = [sp.exp(ws / t) for ws in wsym]
 Z = sp.Add(*exps)
-lnpc = sp.log(exps[1] / Z)   # choisi = indice 1
+lnpc = sp.log(exps[1] / Z)   # chosen = index 1
 grads = [sp.simplify(sp.diff(lnpc, ws)) for ws in wsym]
 pj = [sp.simplify(e / Z) for e in exps]
 expect = [sp.simplify(((1 if j == 1 else 0) - pj[j]) / t) for j in range(3)]
@@ -113,8 +113,8 @@ print((OK if (lim0 == 0 and liminf == 1) else KO)
 
 # ---------------------------------------------------------------------------
 bloc("B5. Recurrence lambda/pi (mode levin_reroot) — exacte ?")
-# lam(n) = lam(parent) + 1/pi(prefixe du segment) ; verifie contre la forme
-# close  lam(n) - 1 = somme_{k=1..d} 1/prod_{j<=k} p_j  sur chaines aleatoires.
+# lam(n) = lam(parent) + 1/pi(segment prefix); checked against the closed form
+# lam(n) - 1 = sum_{k=1..d} 1/prod_{j<=k} p_j over random chains.
 random.seed(41)
 worst = 0
 for trial in range(200):
@@ -125,7 +125,7 @@ for trial in range(200):
     for p in probs:
         prefix *= p
         lam += 1 / prefix
-    # forme close
+    # closed form
     close = Fraction(1)
     run = Fraction(1)
     acc = Fraction(0)
@@ -139,11 +139,11 @@ print((OK if worst == 0 else KO) + "200 chaines : recurrence == forme close (eca
 
 # ---------------------------------------------------------------------------
 bloc("B6. Recurrence hu/hv (mode reroot_h) : greedy vs min EXACT sur les ancetres")
-# Definition : pour un re-enracinement en l'ancetre a,
-#   cout(a, n) = somme_{k=a+1..n} (1/w_a) / pi(a->k)
-# Le code garde 2 candidats (prolonger le meilleur courant, ou re-enraciner au
-# parent). On verifie : greedy >= exact (jamais de sous-estimation) et on mesure
-# l'ecart max sur 300 chaines aleatoires.
+# Definition: for a re-rooting at ancestor a,
+#   cost(a, n) = sum_{k=a+1..n} (1/w_a) / pi(a->k)
+# The code keeps 2 candidates (extend the current best, or re-root at the
+# parent). We check that greedy >= exact (never an underestimate) and measure
+# the maximum gap over 300 random chains.
 random.seed(42)
 sous_estime = 0
 ecart_max = 0.0
@@ -151,7 +151,7 @@ for trial in range(300):
     depth = random.randint(2, 14)
     probs = [Fraction(random.randint(1, 9), 10) for _ in range(depth)]
     invw = [Fraction(random.randint(1, 40), 10) for _ in range(depth + 1)]  # 1/w_a >= ~0
-    # greedy du code : hu/hv ; racine hu=hv=+inf => l'enfant 1 se re-enracine.
+    # the code's greedy: hu/hv; at the root hu=hv=+inf, so child 1 re-roots.
     INF = None
     hu, hv = INF, INF
     for i, p in enumerate(probs):
@@ -166,7 +166,7 @@ for trial in range(300):
                 hu, hv = ext_u, ext_v
             else:
                 hu, hv = new_u, new_u
-    # exact : min sur TOUS les ancetres a (0..depth-1) du cout re-enracine en a
+    # exact: min over ALL ancestors a (0..depth-1) of the cost re-rooted at a
     best = None
     for a in range(depth):
         run = Fraction(1)
@@ -207,7 +207,7 @@ print("     l_max >~ 12 : le profil des ECARTS entre barreaux est la mesure qui 
 
 # ---------------------------------------------------------------------------
 bloc("B8. Admissibilite de l'arrondi h = ceil(c'x*)")
-# c entiers, tout plan a un cout entier >= c'x*, donc >= ceil(c'x*).
+# with integer c, every plan has an integer cost >= c'x*, hence >= ceil(c'x*).
 rnd = random.Random(7)
 viol = 0
 for _ in range(500):
@@ -215,7 +215,7 @@ for _ in range(500):
     hstar_candidates = [i for i in range(0, 80) if i >= lp_opt]
     if not hstar_candidates:
         continue
-    hstar = rnd.choice(hstar_candidates)   # un cout de plan entier >= optimum LP
+    hstar = rnd.choice(hstar_candidates)   # an integer plan cost >= the LP optimum
     if math.ceil(lp_opt) > hstar:
         viol += 1
 print((OK if viol == 0 else KO)
@@ -223,10 +223,10 @@ print((OK if viol == 0 else KO)
 
 # ---------------------------------------------------------------------------
 bloc("B9. Theoreme 2 et capacites STATIQUES : contre-exemple construit")
-# u statique (lu a Build) : h(s') peut re-utiliser une capacite deja consommee.
-# but p >= 2, un seul operateur o (u=1) produit p.
+# static u (read at Build): h(s') can re-use a capacity already consumed.
+# goal p >= 2, a single operator o (u=1) produces p.
 feas_s, val_s = solve_exact([1], [1], [([(0, 1)], 2)])
-# apres avoir tire o une fois : marquage p=1, le LP STATIQUE autorise encore x<=1
+# after firing o once: marking p=1, the STATIC LP still allows x<=1
 feas_sp, val_sp = solve_exact([1], [1], [([(0, 1)], 1)])
 print("  h(s)  [statique] : %s" % ("INFAISABLE (infini)" if not feas_s else val_s))
 print("  h(s') [statique] : %s" % (val_sp if feas_sp else "INFAISABLE"))
@@ -261,27 +261,27 @@ while len(cases) < 60 and tries < 4000:
     try:
         feas, val = solve_exact(cost, upper, rows)
     except UnboundedLPError:
-        continue   # c>=0 : ne devrait jamais arriver ; on ecarte par prudence
+        continue   # c>=0: should never happen; discarded out of caution
     if not feas:
         n_infeas += 1
         if n_infeas > 20:
-            continue   # garder un melange faisable/infaisable
+            continue   # keep a mix of feasible and infeasible
     cases.append((cost, upper, rows, feas, val))
 print("  %d instances retenues (%d infaisables) sur %d essais" %
       (len(cases), sum(1 for c in cases if not c[3]), tries))
 
 out = []
-out.append("// GENERE PAR verify_formulas.py (s21) — instances aleatoires resolues en")
-out.append("// rationnels EXACTS par sympy.lpmin. Ne pas editer a la main.")
+out.append("// GENERATED BY s21_verify_formulas.py - random instances solved in EXACT")
+out.append("// rationals by sympy.lpmin. Do not edit by hand.")
 out.append("struct FuzzCase {")
 out.append("\tsize_t n;")
 out.append("\tdouble cost[4];")
-out.append("\tdouble upper[4];   // -1 = sans borne")
+out.append("\tdouble upper[4];   // -1 = unbounded")
 out.append("\tsize_t nrows;")
-out.append("\tdouble coef[5][4]; // coefficients denses par ligne")
+out.append("\tdouble coef[5][4]; // dense coefficients, one row at a time")
 out.append("\tdouble rhs[5];")
 out.append("\tbool feas;")
-out.append("\tdouble val;        // ceil(optimum exact), la valeur que rend le solveur")
+out.append("\tdouble val;        // ceil(exact optimum), the value the solver returns")
 out.append("};")
 out.append("static const FuzzCase kFuzzCases[] = {")
 for cost, upper, rows, feas, val in cases:

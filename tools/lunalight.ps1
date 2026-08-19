@@ -1,26 +1,24 @@
-# Lunalight : 3x Liger Dancer + Bagooska, main 3x Fire Formation - Tenki,
-# effet d'A Bao A Qu resolu.
+# Lunalight: 3x Liger Dancer + Bagooska, hand 3x Fire Formation - Tenki,
+# A Bao A Qu's effect resolved.
 #
-# Le replay en argument positionnel n'est qu'un GABARIT de duel (en-tete :
-# graine, format, LP, pioche ; et deck adverse) — l'outil n'a pas encore de
-# mode « duel depuis une decklist seule ». Le board cible qu'il apporte est
-# integralement efface par les huit --board-remove avant que les --board-add
-# n'ecrivent l'objectif reel.
+# The replay in positional argument is only a duel TEMPLATE (header: seed,
+# format, life points, draw; and the opponent deck). The target board it brings
+# is wiped entirely by the eight --board-remove entries before the --board-add
+# ones write the real objective.
 #
-# NB : --scriptdir DESACTIVE le scan automatique de repositories/ (assets.cpp,
-# branche else). Les depots doivent donc etre redonnes a la main, sans quoi les
-# cartes qui n'existent QUE la (ici Lunalight Scarlet Tiger, dans
-# delta-bagooska/script/pre-release/) tournent INERTES et la ligne cherchee
-# n'existe tout simplement pas pour le moteur.
+# Note: --scriptdir DISABLES the automatic scan of repositories/ (assets.cpp,
+# else branch). The repositories must therefore be given back by hand, otherwise
+# the cards that exist ONLY there (here Lunalight Scarlet Tiger, in
+# delta-bagooska/script/pre-release/) run INERT and the line being searched for
+# simply does not exist as far as the engine is concerned.
 #
-# Leviers donnes a la recherche, ceux prevus pour les evenements RARES :
-#  --summon-min : les invocations de Liger Dancer entrent dans le GRADIENT du
-#                 but (pas seulement dans le test final) — c'est le mecanisme
-#                 qui avait debloque Junk Meister.
-#  --hint       : prime d'echantillonnage sur les pieces de la ligne
-#                 (Kaleido Chick copie un Leo Dancer envoye a l'Extra->GY,
-#                 Wolf fusionne EN BANNISSANT depuis le cimetiere, Masquerade
-#                 rouvre le GY comme materiau).
+# Levers given to the search, the ones meant for RARE events:
+#  --summon-min: Liger Dancer's summons enter the goal's GRADIENT (not only the
+#                final test); it is the mechanism that unlocked Junk Meister.
+#  --hint      : sampling bonus on the line's pieces (Kaleido Chick copies a Leo
+#                Dancer sent from the Extra to the graveyard, Wolf fuses BY
+#                BANISHING from the graveyard, Masquerade reopens the
+#                graveyard as a material source).
 param([int]$Ms = 900000, [string]$Seed = '888', [string]$Out = 's7_luna_full')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

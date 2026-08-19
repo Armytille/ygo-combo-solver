@@ -1,460 +1,520 @@
-# combosolver — optimiseur de combo EDOPro
+# combosolver
 
-Prend un replay `.yrpX`, rejoue fidèlement sa ligne, en extrait le **board de fin
-de tour**, puis cherche d'autres façons de l'atteindre : soit dans le même duel
-et à moindre coût, soit **depuis un autre deck**. La sortie est un répertoire de
-replays rejouables dans EDOPro.
+A headless combo solver for [EDOPro](https://github.com/edo9300/edopro) replays.
 
-Le solveur lie sa propre copie d'`ocgcore` : aucune dépendance au rendu, aucune
-à `gframe`.
+Give it a `.yrpX`. It replays the recorded line inside a real `ocgcore` duel,
+captures the board the player ends their turn on, and then searches for other
+ways to reach that same board — from the same duel, from another decklist, or
+from a hand you write out by hand. What it writes back are `.yrp` replays you
+can open in EDOPro.
 
-## Ce que fait le binaire
+There is no rules engine of our own here. Every legality question is answered by
+`ocgcore` itself, and every move the solver considers is a move the core offered
+at a `MSG_SELECT_*` prompt. What the project adds is the ability to *back up*: a
+memory arena that snapshots and restores a live duel in a fraction of a
+millisecond, which is what turns "replay one line" into "search a space of
+lines".
+
+---
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Requirements](#requirements)
+- [Build](#build)
+- [Usage](#usage)
+- [The constraint grammar](#the-constraint-grammar)
+- [The flag you cannot forget](#the-flag-you-cannot-forget)
+- [What a run prints](#what-a-run-prints)
+- [How it works](#how-it-works)
+- [The search stack](#the-search-stack)
+- [Repository layout](#repository-layout)
+- [State of the work](#state-of-the-work)
+- [References](#references)
+
+---
+
+## What it does
+
+Four modes, all driven from the same binary.
+
+**1. Instrumented replay (no search).** The default. It replays the line, prints
+what the core offered at every decision, captures the target board, and then
+runs its own self-checks: restore fidelity and a snapshot stress test.
 
 ```bash
-# Rejeu instrumenté + tests d'arène + mesures (aucune recherche)
-combosolver.exe duel.yrpX --scriptdir <scripts>
-
-# Chercher une meilleure ligne vers le MÊME board, dans le même duel
-combosolver.exe duel.yrpX --scriptdir <scripts> --solve --outdir solutions
-
-# Refaire ce board depuis un AUTRE duel (autre deck, autre main, autre graine)
-combosolver.exe ref.yrpX --scriptdir <scripts> --start autre.yrpX --outdir solutions
-
-# Refaire ce board depuis une DECKLIST + une main de depart, sans replay de
-# depart : le duel est construit (parametres et adversaire de la reference,
-# main forcee par pseudo-shuffle et VERIFIEE sur un duel jetable).
-combosolver.exe ref.yrpX --scriptdir <scripts> `
-    --deck "D:\ProjectIgnis\deck\test 3.ydk" `
-    --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom"
-# --hand est optionnel : par defaut, la main de la reference (si la decklist
-# peut la fournir — sinon erreur explicite).
-
-# Donner une vraie main a l'adversaire d'un hand test : sans cartes JOUABLES
-# en face, le core n'ouvre aucune fenetre de reponse adverse — la garde serait
-# satisfaite par vacuite et le handrip ne ripperait rien. Les replays produits
-# ne se rejouent qu'avec le meme --opp-hand.
-... --opp-hand "27204311|27204311|27204311"   # 3 Nibiru en main adverse
-
-# Contraintes de ligne : jouer sous menace Nibiru. Des que la 5e invocation
-# resout (Nibiru devient actif), a chaque fenetre de reponse adverse : soit
-# Crystal Wing est en jeu, soit Zalen est en jeu AVEC Junk Signal encore en
-# main pour chainer par-dessus. La garde s'eteint une fois la main adverse
-# videe (handrip). Et on ne paie jamais les 2000 LP du terrain.
-combosolver.exe duel.yrpX --scriptdir <scripts> --solve `
-    --guard  "5:Crystal Wing|Zalen@terrain+Junk Signal@main" `
-    --guard-off "mainadv<=2" `
-    --no-activate "Duel Evolution - Assault Zone" `
-    --resolve "PSY-Framelord Omega@terrain:2" `
-    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
-
-# --resolve : la ligne doit resoudre ces effets (ici : le handrip de 3 cartes
-# qui eteint la garde). Controle au but, pas en cours de ligne. @zone restreint
-# la zone d'ACTIVATION : l'Omega qui rippe s'active du TERRAIN — sans @terrain,
-# son effet de cimetiere compterait aussi (faux positif mesure).
-
-# --summon "5:carte|carte" existe aussi (le n-ieme summon DOIT etre une de ces
-# cartes) — a ne pas confondre avec la garde : "protege quand la fenetre
-# s'ouvre" n'exige pas que le garde SOIT la 5e invocation, il peut deja etre
-# en jeu (la reference joue Zalen en 4e).
-
-# Mode JUGE : memes drapeaux sans --solve, sur n'importe quel replay, pour
-# savoir s'il respecte la discipline demandee.
-combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> `
-    --guard "5:Crystal Wing|Zalen@terrain+Junk Signal@main"
-
-# TEST ADVERSE (--fire) : la garde ci-dessus est un proxy statique ("un contre
-# est disponible") ; ce mode joue la menace POUR DE VRAI. Nibiru est ajoute a
-# la main adverse et ACTIVE a chaque fenetre ou il est legal (un essai par
-# fenetre) ; la recherche doit refermer le board depuis l'etat post-injection —
-# board complet (Crystal Wing contre gratuitement) ou board sans la carte
-# sacrifiee (--fire-spare : contrer par Zalen consomme Junk Signal). Les
-# replays produits se rejugent avec --opp-hand "27204311".
-combosolver.exe duel.yrpX --scriptdir <scripts> `
-    --fire "27204311" --fire-spare "Junk Signal" --fire-ms 60000 `
-    --no-activate "Duel Evolution - Assault Zone" `
-    --resolve "PSY-Framelord Omega@terrain:2" `
-    --resolve "Trishula, Dragon of the Ice Barrier@terrain"
+combosolver.exe duel.yrpX --scriptdir <scripts> --workdir D:\ProjectIgnis
 ```
 
-# MODE BUT SEUL (session 8) : atteindre un board depuis une decklist, SANS
-# ligne de reference. Le replay positionnel n'est plus qu'un GABARIT de duel
-# (drapeaux, LP, taille de main, deck adverse) — il est imprime en tete du
-# rapport pour que ce soit verifiable et non promis. `--target` POSE le board
-# cible au lieu de l'editer depuis une capture ; `--no-ref` implique
-# `--no-plan`, qui ecarte le REPERTOIRE (les identites semantiques des coups de
-# la reference, servies en biais a la politique NRPA).
-combosolver.exe gabarit.yrpX --scriptdir <scripts> `
-    --deck "D:\ProjectIgnis\deck\Lunalight.ydk" `
-    --hand "57103969|57103969|57103969" `
-    --no-ref --target 54701958 --target 54701958 --target 54701958 `
+**2. A better line to the same board, in the same duel.** Bounded-discrepancy
+search seeded on the recorded line: follow the reference and allow at most *k*
+deviations. At zero deviations it replays the reference, so it always finds at
+least one solution — which makes "no solution" a defect signal rather than a
+possible result.
+
+```bash
+combosolver.exe duel.yrpX --scriptdir <scripts> --solve --outdir solutions
+```
+
+**3. The same board from another duel** — another deck, another hand, another
+seed. The recorded answers designate nothing there, so what travels is the
+line's *intent*: each decision is identified by the cards it engages, not by the
+index it happened to have.
+
+```bash
+# from another replay
+combosolver.exe ref.yrpX --scriptdir <scripts> --start other.yrpX --outdir solutions
+
+# from a decklist plus an opening hand, with no starting replay
+combosolver.exe ref.yrpX --scriptdir <scripts> \
+    --deck "D:\ProjectIgnis\deck\Lunalight.ydk" \
+    --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom" \
+    --outdir solutions
+```
+
+The hand is forced through `DUEL_PSEUDO_SHUFFLE` and then **verified** on a
+throwaway duel before any search starts: which end of the deck the core draws
+from is not guessed, it is checked, and a mismatch is a hard error rather than a
+search on a hand you only believe you have.
+
+**4. Goal-only mode.** No reference line at all: the replay is demoted to a duel
+template (flags, life points, opponent deck) and the target board is written out
+by hand.
+
+```bash
+combosolver.exe template.yrpX --scriptdir <scripts> \
+    --deck Lunalight.ydk --hand "57103969|57103969|57103969" \
+    --no-ref --target 54701958 --target 54701958 --target 54701958 \
     --target "90590304@DEF" --max-decisions 700
-# `--no-plan` SEUL (reference intacte par ailleurs) est l'etalon de mesure : un
-# seul facteur change, et il chiffre ce que le repertoire valait.
-# Attention : sans plan, la passe « a ecarts bornes autour du plan » etait
-# structurellement VIDE (26 etats a tous les niveaux, mesure session 8) — mais
-# c'etait le defaut C1 (un seul jeton de partition pour seize workers), corrige
-# session 9. La mesure est A REFAIRE ; lire la colonne "partition".
+```
 
-# MINAGE EN LIGNE DES OPTIONS (session 14) : le bootstrap EN UNE SEULE TRAITE.
-# Jusqu'ici le catalogue de macros etait mine UNE fois, au demarrage, sur un
-# corpus EXTERNE (`--adapt`) — un run parti de rien restait nu, et l'auto-amorce
-# demandait plusieurs runs enchaines a la main (gen1 nue -> macros -> gen2
-# armee). `--options-online <s>` fait rentrer la boucle DANS le run : les
-# workers versent leurs meilleures lignes a un corpus vivant, le catalogue est
-# re-mine toutes les s secondes (meme selection par perte de Levin) et echange a
-# une frontiere sure. Aucun corpus, aucun `--approach`, aucune relance.
-combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
-    --no-ref --target ... --options-online 60 --options-ctx 1
-# `--options-pool` / `--options-per-worker` reglent le corpus vivant : c'est la
-# POMPE A DIVERSITE (les seize workers repartent tous de la meilleure sequence
-# partagee — sans quota par worker, le corpus serait seize fois la meme ligne).
+**As a judge.** With the same constraint flags and no `--solve`, the tool checks
+whether *any* replay — one it produced, or one played by hand — respects the
+discipline you asked for.
 
-# BANDIT DE TETE A STATISTIQUE DE PERMUTATION (session 15) : le mecanisme de
-# MCPS (arXiv:2510.06381), pour de vrai. Sur les `k` premieres decisions du
-# tirage, le coup n'est plus echantillonne sous la politique : il est choisi par
-# argmax de `val = (n·Q + n̂·Q̂) / (n + n̂)` — `Q`, moyenne des recompenses des
-# tirages passes par ce noeud puis par ce coup ; `Q̂`, moyenne sur TOUS les
-# tirages contenant ce coup ET tous ceux du chemin, dans n'importe quel ordre et
-# n'importe ou. Poids proportionnels aux effectifs : aucun hyperparametre de
-# biais (c'est le point du papier). Au-dela de k, NRPA echantillonne comme avant.
-# Machinerie : un bitset par code de coup sur une fenetre glissante des W
-# derniers tirages, `Q̂` par popcount sur l'intersection.
-combosolver.exe gabarit.yrpX --scriptdir <scripts> --deck ... --hand ... `
-    --no-ref --target ... --options-online 60 --qhat 6
-# La SONDE (imprimee d'office) donne `n̂` et `Q̂` par coup a la premiere
-# decision. C'est le seul instrument qui reponde a « le solveur trouve-t-il la
-# bonne ouverture tout seul ? » — la courbe d'accord du corpus en est AVEUGLE,
-# puisqu'elle mesure la reproduction d'un corpus qui ne contient que des bonnes
-# lignes alors que `Q̂` tire son signal des ECHECS. Mesure session 15 : au bout
-# de ~800 000 tirages, Lunalight Gold Leo (la bonne cible de Tenki, et une carte
-# qui ne recoit AUCUN `--hint`) sort premiere a Q̂ = 0,066 contre 0,012 pour
-# Lunalight Tiger et 0,002 pour Kaleido Chick — tous deux indices.
-# `--qhat-window` (defaut 4096), `--qhat-rho` (32), `--qhat-nodes` (65536).
+```bash
+combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> \
+    --guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
+```
 
-# SONDE DE REPETITION (session 16) : l'instrument qui separe deux pannes que le
-# score de board CONFOND. Le mur du solveur est « atteindre un sous-but consomme
-# ce dont le suivant a besoin » — mais encore faut-il savoir si le deuxieme
-# exemplaire n'est JAMAIS TENTE (le materiau etait la : panne d'echantillonnage)
-# ou TOUJOURS PERDU (la chaine etait consommee : panne de h). Deux correctifs
-# opposes. `--probe-repeat` imprime, par carte surveillee (--summon-min /
-# --resolve) et POUR CHAQUE PHASE (tirages, puis tirages enracines du
-# finisseur), l'histogramme des invocations PAR TIRAGE en compte brut.
-combosolver.exe ... --summon-min "54701958:3" --probe-repeat
-# Mesure session 16, etalon Lunalight : l'echantillonnage fabrique TROIS
-# Lunalight Masquerade dans 290 463 tirages et pas UN SEUL Liger Dancer sur
-# 930 676 — alors que le but en demande trois. Le controle est dans la meme
-# table : ce n'est pas « il ne sait pas repeter ».
-# NB : l'axe « distance de recettes » de la sonde ne rend AUCUN verdict tant que
-# les recettes lues sont amorcees par le texte (zone joker : le materiau qu'on
-# vient de consommer compte encore depuis le cimetiere). Le run le dit.
+---
 
-# GRAPHE DE LANDMARKS APPRIS (session 16, arXiv:2508.21564) : apprend, depuis
-# des plans RESOLUS, les faits (carte, zone, COMPTE) que tout plan atteint, dans
-# quel ordre, et combien de fois — les BOUCLES DE REPETITION du papier. Sert
-# ensuite de `h` : un h qui DECROIT pendant qu'on construit, la ou le h plat ne
-# bouge pas tant qu'aucune carte cible n'est posee.
-combosolver.exe ... --landmarks corpus/ --landmark-w 60
-# Le graphe est IMPRIME avant de peser. Sur l'etalon handrip, appris depuis deux
-# lignes resolues, il sort « Fake Trap @ADV banni x3 » a l'ordre 0,54 — le
-# handrip lui-meme, en landmark COMPTE, sans qu'aucune carte soit nommee dans le
-# code (les zones de l'ADVERSAIRE sont relevees : sans elles le graphe serait
-# reste muet sur la moitie du but tout en ayant l'air de fonctionner).
-# `--landmark-w` pese dans le score des TIRAGES, `--landmark-h` dans le h du
-# FINISSEUR ; a 0, le graphe est appris et MESURE sans entrer dans aucun cout.
-# STATUT : ECRIT, INSTRUMENTE, NON DEMONTRE. L'A/B de la session 16 rend un
-# evenement rare (>=3 resolutions) non nul dans deux bras differents a deux
-# budgets differents, sur une seule graine — cela ne demontre rien (§9.23 (d)).
-# RESERVE : le mecanisme exige un plan resolu, donc il ne sert a rien A FROID.
+## Requirements
 
-# CORRECTIF DE CREDIT (session 18) : le score d'un tirage est un MAX sur ses
-# prefixes, mais le gradient renforcait TOUS ses pas — y compris ceux d'apres le
-# pic, c'est-a-dire ceux qui ont DEFAIT le board. `--adapt-to-peak` tronque le
-# gradient au pic. Mesure etalon A nu, deux paires, un seul facteur :
-# l'arite 3 (Sabre Dancer) fait x2,6 dans les deux (1 442 -> 3 740 et
-# 659 -> 1 690), a -24 a -37 % de debit. La vie du mecanisme est imprimee
-# (« gradient tronque au pic : N pas retires ») : a zero il est INERTE.
-combosolver.exe ... --adapt-to-peak
+Windows x64, Visual Studio 2022 build tools, PowerShell, Python 3 for the
+verification scripts in `tools/`.
 
-# LES OPERATEURS DECLARES (session 19) : lire les cartes au lieu de les
-# observer. `--operators` extrait des SCRIPTS LUA du deck la table des
-# operateurs — preconditions (SetRange, SetCountLimit), produit
-# (SetOperationInfo : categorie ET zone), ETAT ACCORDE (EFFECT_ADD_CODE,
-# EFFECT_EXTRA_FUSION_MATERIAL...), recettes en CODES (Fusion.AddProcMix*),
-# et jusqu'aux operateurs declares par une PROCEDURE (proc_*.lua) —, l'imprime,
-# puis la CONFRONTE au plan rejoue. C'est un HARNAIS, pas un mecanisme : il ne
-# change aucune recherche.
-combosolver.exe plan_resolu.yrpX --scriptdir <scripts> --operators
-# Il faut DEUX vocabulaires, et le dossier n'en lisait aucun :
-#   CATEGORY_* : ce que l'effet fait aux CARTES  (envoyer, chercher)
-#   EFFECT_*   : quel ETAT il accorde            (renommer, autoriser un
-#                                                 materiau du cimetiere)
-# Le combo repose entierement sur le second. Un balayage de constantes rend
-#   Lunalight Kaleido Chick -> EFFECT_ADD_CODE
-#   Lunalight Masquerade    -> EFFECT_EXTRA_FUSION_MATERIAL
-# c'est-a-dire EXACTEMENT les deux goulots mesures (0,14 % et 0 %), sans qu'une
-# seule carte soit nommee dans le code. Le recensement des CATEGORY_* ne les
-# aurait pas trouves.
-# VERDICT sur le plan resolu (283 decisions, 0 MSG_RETRY) : 37 activations,
-# 0 non appariee, 18/18 preconditions de zone, 10/10 de ressource.
-# La table est DECLARATIVE et OPTIMISTE : conditions et couts sont des
-# fermetures, non evaluees. Elle dit ce qu'une carte declare pouvoir faire,
-# jamais ce qu'elle peut faire A CET INSTANT.
+A working EDOPro installation, pointed at by `--workdir`. It must contain
+`cards.cdb`, `expansions/`, `repositories/` and the card scripts — the solver
+reads them the way the client does, and never writes into that tree.
 
-# `--op-recipes` amorce le graphe de recettes depuis cette table, et y pose le
-# TYPE DE NŒUD QUI MANQUAIT : « ce CODE peut etre ACQUIS ». Le graphe rangeait
-# `Lunalight Leo Dancer` comme un PRODUIT A FABRIQUER, alors que son materiau
-# nomme est absent du deck — d'ou l'echec de `--backward` (« mecanisme correct,
-# MATIERE absente »). La decomposition a rebours est desormais IMPRIMEE, et
-# elle contient enfin l'operateur de Kaleido Chick.
-combosolver.exe ... --recipes 0 --backward --op-recipes
+External dependencies, all outside this repository:
 
-`--help` liste le reste (`--player`, `--threads`, `--solve-ms`, `--arena-mb`,
-`--growth`, `--width`, `--novelty`, `--no-novelty`, `--no-nrpa`, `--seed`,
-`--nrpa-keep`, `--tt-mb`, `--finisher`, `--archive-k`, `--max-rollouts`,
-`--max-nodes`, `--adapt-to-peak`, `--elide-forced`, `--hindsight`,
-`--approach`, `--prior`, `--prior-weight`, `--adapt`, `--adapt-passes`,
-`--no-burn-share`, `--max-decisions`, `--reroot`, `--reroot-h`,
-`--nrpa-level`, `--nrpa-alpha`, `--nrpa-iters`, `--max-subsets`,
-`--recipes`, `--no-seed-recipes`, `--no-seed-quant`, `--derive-summon-min`,
-`--options`, `--options-ctx`, `--options-online`, `--finisher-options`,
-`--qhat`, `--canonical-zones`, `--assign`,
-`--assign-bias`, `--backward`, `--watch`, `--operators`, `--op-recipes`,
-`--probe-repeat`, `--landmarks`, `--landmark-w`,
-`--landmark-h`, `--profile`, `--verbose`).
-Dix mécanismes réfutés ont été **retirés du code** en session 18 — `--mcps`,
-`--nrpa-lr`, `--recipe-w`, `--goal-bias`, `--canonical-digest`,
-`--no-phase-change`, `--novelty-rollout-cut`, `--archive-spread`,
-`--phs-canonical`, `--subsets-ascending`. `docs/drapeaux.md` tient l'inventaire
-et le verdict de chacun.
-`--profile` imprime le profil du chemin chaud par phase (sondes rdtsc, temps
-exclusif, ligne « reste ») — c'est l'instrument qui a tranché que 82-86 % du
-temps part dans le core (§9.18) ; son coût mesuré est sous le bruit (< 2 %).
-La graine des tirages est dérivée du temps et imprimée — la redonner via
-`--seed` rejoue les mêmes tirages. NB session 6 : à graine fixée, deux runs
-divergent quand même (l'ordre des échanges entre workers dépend du timing) —
-les compteurs de tirages ne sont pas des métriques d'A/B, seuls les faits
-structurels le sont (coûts écrits, conversions, coupures).
-
-# OPTIMISATION DE COUT : chercher une ligne MOINS CHERE que la reference
-# (cout lexicographique : brulees, puis actions, puis decisions). La recherche
-# ne s'arrete plus a la premiere solution (chaque solution resserre la borne),
-# le score de but NRPA devient lexicographique, les lignes continuent APRES le
-# but (une recuperation d'apres-but reduit les brulees sans toucher au board),
-# et le finisseur s'enracine sur les prefixes des solutions les moins cheres.
-# --burn-slack regle la marge de la borne brulees (defaut 6 ; la reference
-# pique a 23 pour finir a 19 — marge de recuperation mesuree 4) ;
-# --burn-limit ensemence la borne avec un cout deja connu. Mesure session 6 :
-# sur le cas etalon la borne ne coupe JAMAIS en phase tirages (l'espace des
-# lignes gagnantes vit sous le pic de la reference) — la regler n'apporte
-# rien ; les compteurs burn_cuts/goal_hits des rapports en font foi.
-# --prior <f|dossier> (repetable) : prior par rejeu de solutions — les
-# plan_key du corpus deviennent des poids initiaux de politique NRPA
-# (releves sur le duel de LEUR en-tete). Mesure NEUTRE sur les deux etalons
-# (session 6) : disponible, hors commande recommandee.
-# --adapt <f|dossier> (repetable) + --adapt-passes <n> : rejeu d'ADAPTATION
-# du meme corpus — au lieu d'une prime par coup, le gradient NRPA sur les
-# carrefours des solutions (choix legaux + choisi). Le releve imprime la
-# COURBE D'ACCORD (probabilite moyenne du coup joue) : 44 % a politique
-# vierge, 65 % des la premiere passe, palier a 66 % — le mecanisme mord,
-# mais un poids par plan_key est aveugle a l'etat et ne peut pas monter plus
-# haut. Mesure session 7 : ensembles de conversion --fire IDENTIQUES,
-# meilleur cout inchange sur l'etalon meme-deck. Opt-in, hors commande
-# recommandee.
-combosolver.exe duel.yrpX --scriptdir <scripts> --solve --optimize
-combosolver.exe ref.yrpX --scriptdir <scripts> --start ref.yrpX --optimize `
-    --approach "solutions/solution_00_b19_a56.yrp" --finisher-min 420000
-
-# Le finisseur : quand les tirages montent a 7-8/8 sans convertir, la
-# transplantation fouille les K meilleurs etats DISTINCTS (archive Go-Explore)
-# et leurs prefixes de recul en Levin Tree Search sur la politique NRPA du run.
-# --approach ressert les best_approach_*.yrp des sessions passees comme racines
-# supplementaires ; --finisher mono|ab rejoue l'ancien finisseur (A/B).
-
-## Comment la recherche évite de tout explorer
-
-Trois mécanismes, tous mesurés (docs/combo-solver-design.md §9) :
-
-- **Élagage par nouveauté (Iterated Width).** Un état n'est retenu que s'il rend
-  vrai un fait `(zone, carte, occurrence)` inédit ; une branche muette depuis
-  `patience` décisions est coupée. La patience est calibrée par `--width` : le
-  long de la ligne de référence, 82 % des états sont muets et la plus longue
-  série muette fait 17 décisions. Le préfixe répertoire est exempt, et un
-  contrôle A/B automatique sur le cas même-deck imprime états gagnés et
-  solutions perdues — un élagage qui perd des solutions le dit lui-même.
-- **Tirages NRPA (politique apprise).** Un poids par code de coup (`plan_key`),
-  échantillonnage softmax, adaptation vers la meilleure séquence, le répertoire
-  de la référence en biais — sans évaluation des fils, chaque décision coûte
-  plusieurs fois moins cher qu'un tirage glouton. La politique est persistante
-  entre redémarrages (`--nrpa-keep`) et la meilleure séquence est partagée
-  entre les workers : c'est cette mémoire, pas la vitesse brute, qui a rendu la
-  transplantation reproductible (§9.9). C'est la passe qui porte la
-  transplantation.
-- **Coupure de tour.** Le board cible est celui de la fin du tour 1 : tout état
-  au-delà du changement de tour est du temps perdu.
-
-Preuve sur pièce : le board de `synchron handrip 2` a été refait **depuis le
-deck de `test 4`** par la passe NRPA — 208 décisions, 45 actions, 13 cartes
-brûlées, moins cher que la référence sur son propre deck — et le `.yrp` produit
-se rejoue depuis zéro sans un seul `MSG_RETRY`. Depuis que la politique NRPA
-est persistante entre redémarrages et que la meilleure séquence est partagée
-entre les workers, ce résultat tombe en 90 s de budget sur les deux graines
-testées (il demandait 530 s et une graine chanceuse sur quatre).
-
-## Le drapeau qu'on ne peut pas oublier
-
-`--scriptdir` **est obligatoire en pratique.** Un `.yrpX` ne se rejoue
-fidèlement qu'avec le core *et* les scripts Lua contemporains de son
-enregistrement. Sans le bon jeu de scripts, le rejeu diverge **en silence** : le
-core pose une question différente, la réponse enregistrée devient invalide, et
-l'outil continue d'afficher des mesures d'apparence normale.
-
-Le seul détecteur est le compteur `MSG_RETRY` du rapport. Sur le replay de
-référence : 218 retries avec les scripts vivants, **0** avec l'export épinglé.
-
-## Construire
-
-Dépendances externes, toutes hors du dépôt :
-
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| `../edopro/ocgcore` | dépôt d'où `ocgcore` est extrait au commit voulu |
-| `../edopro/gframe/lzma` | sources LZMA (lecture des replays compressés) |
-| `../deps/ocgcore` | copie extraite et patchée, produite par le script ci-dessous |
-| `../deps/scripts_<date>` | export figé des scripts de cartes |
-| `../vcpkg` | sqlite3 en `x64-windows-static` |
+| `../edopro/ocgcore` | the git repository ocgcore is extracted from, at a chosen commit |
+| `../edopro/gframe/lzma` | LZMA sources (compressed replays) |
+| `../deps/ocgcore` | the extracted, patched copy, produced by the script below |
+| `../deps/scripts_<date>` | a frozen export of the card scripts |
+| `../vcpkg` | sqlite3, `x64-windows-static` |
+
+---
+
+## Build
 
 ```powershell
-.\tools\fetch_solver_deps.ps1          # extrait + patche ocgcore, lua et les scripts
+.\tools\fetch_solver_deps.ps1        # extract and patch ocgcore, lua and the scripts
 ..\premake5\premake5.exe vs2022 --vcpkg-root=..\..\vcpkg
 MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-Le script d'extraction n'écrit jamais dans l'installation EDOPro de la machine.
+The binary lands in `bin\Release\combosolver.exe`.
 
-## Les patchs d'ocgcore
+`fetch_solver_deps.ps1` never writes into the machine's EDOPro installation. It
+extracts one ocgcore commit plus the matching `lua/src` commit into
+`../deps/ocgcore`, applies the patches below, and freezes a card script export
+next to it.
 
-`fetch_solver_deps.ps1` applique cinq modifications, toutes nécessaires :
+### The ocgcore patches
 
-| Cible | Pourquoi |
+Three files are modified in the extracted copy, and each one is load-bearing.
+
+| Target | Why |
 |---|---|
-| `lua/luaconf-customize.h` | graine de hachage déterministe, et point d'accroche de l'allocateur d'arène |
-| `lua/src/lauxlib.c` | branche le heap Lua sur l'arène — sans quoi l'état du duel n'est pas capturable |
-| `ocgapi.cpp/.h` | ajoute `OCG_DuelQueryProcessorState` : phase, pile de résolution, chaîne courante, compteurs « une fois par tour » |
+| `lua/luaconf-customize.h` | deterministic string hash seed, and the declaration of the arena allocator hook |
+| `lua/src/lauxlib.c` | routes the Lua heap into the arena — without it the duel's state cannot be captured at all |
+| `ocgapi.cpp` / `ocgapi.h` | adds `OCG_DuelQueryProcessorState`: phase, resolution stack, current chain, once-per-turn counters |
 
-L'état du processeur est indispensable au digest de transposition : sans lui,
-deux instants distincts d'une même résolution de chaîne se confondent et la
-branche du combo est élaguée dès le début.
+The C++ side of the core is **not** patched: its allocations are captured by a
+global `operator new` overload on the solver's side.
 
-## Comment ça tient debout
+The processor state matters more than it looks. The public API only exposes the
+zones, so two instants in the middle of the same chain resolution — same field,
+same hand, same prompt — hash to the same value without it. They then get merged
+by the transposition table and the combo branch is pruned at the start, silently.
 
-- **Arène à base fixe.** Tout le heap du duel (C++ *et* Lua) vit dans une plage
-  réservée à adresse fixe. Un instantané se prend par pages sales et se restaure
-  en 0,05 ms, contre 78 ms pour re-simuler depuis la racine. C'est ce rapport qui
-  rend la recherche possible.
-- **Recherche sur le graphe d'états, pas sur l'arbre d'actions.** Activer A puis
-  B et B puis A convergent ; la table de transposition les fusionne. L'arbre brut
-  vaut 10^97 le long de la seule ligne de référence.
-- **Le sous-hachage du digest est le mode de défaillance à surveiller** : il fait
-  disparaître des solutions sans rien signaler. Le rapport compte les fusions le
-  long de la ligne de référence, qui sont deux à deux distinctes par
-  construction.
+---
 
-## La règle de mesure (session 18)
+## Usage
 
-**Aucun mécanisme n'est retenu sans avoir passé les DEUX étalons.** Un mécanisme
-validé sur un seul étalon est une hypothèse, pas un résultat.
+`combosolver.exe --help` prints all 133 flags with their defaults. The ones you
+actually need to know:
 
-**Et un mécanisme doit prouver qu'il est ALLUMÉ avant qu'on mesure son effet.**
-La session 18 a trouvé `--assign-bias` totalement inerte — l'instantané du
-graphe de recettes n'était pris que sous `--assign` — alors que le run imprimait
-« les choix engageant un MATERIAU du graphe de recettes sont favorises ». Tout
-mécanisme doit imprimer sa **vie** (un compteur non nul quand il agit) ; sans
-elle, un A/B mesure deux fois le témoin.
+| Flag | Meaning |
+|---|---|
+| `--workdir <dir>` | EDOPro installation |
+| `--scriptdir <dir>` | card script set, highest priority first (see below) |
+| `--player <0\|1>` | whose turn is being optimised |
+| `--outdir <dir>` | where the replays are written |
+| `--solve` | search instead of only replaying |
+| `--solve-ms <ms>` | search time budget |
+| `--threads <n>` | search workers (default: every core) |
+| `--start <replay>` / `--deck <f.ydk>` | rebuild the board from another duel or decklist |
+| `--target <card[@ATK\|DEF]>` | build the target board from scratch |
+| `--optimize` | keep searching for cheaper lines instead of stopping at the first |
+| `--profile` | hot path profile, per phase |
 
-## Un drapeau n'est jamais un correctif
-
-**Le solveur doit bien marcher SANS drapeau.** Un utilisateur ne peut pas savoir
-qu'il faut passer `--elide-forced --hindsight 0.5 --adapt-to-peak` pour que le
-solveur fonctionne — et si c'est le cas, le défaut est dans les défauts.
-
-C'est la maladie historique de ce dépôt : chaque amélioration mesurée a été
-garée derrière un interrupteur que personne n'allume. Le solveur nu ne bénéficie
-d'aucune d'elles. **122 drapeaux et un solveur qui ne trouve rien, ce n'est pas
-une coïncidence.**
-
-La règle, en trois lignes :
-
-1. **Un correctif de défaut n'est JAMAIS un drapeau.** Si aucun utilisateur ne
-   voudrait le comportement d'avant, il n'y a rien à choisir. Exemples appliqués
-   en session 18ter : l'identité de carte sur les prompts de sélection et
-   l'identité des prompts oui/non sont devenues **inconditionnelles**, et leurs
-   drapeaux ont disparu. Ce qui était discutable n'était pas l'identité — c'était
-   le *biais d'indices* qui s'y appliquait, et c'est **lui** qui est gardé.
-2. **Un mécanisme est un drapeau seulement le temps de le mesurer.** Une fois
-   passé sur les deux étalons, il devient le **défaut**, et le drapeau devient
-   négatif (`--no-…`) s'il faut encore pouvoir l'éteindre pour un A/B.
-3. **Un drapeau qui n'a jamais été jugé est une dette, pas une option.** Il y en
-   a 27 (`docs/drapeaux.md`) ; chacun doit être jugé ou retiré.
-
-*Fait en session 22* : la dérivation des hôtes à quota et des habilitants par
-les **duaux du LP** (certifiés à chaque exécution) est **le défaut** ; la
-dérivation s21 par classes d'effets se rejoue par `--quota-legacy` (témoin,
-A/B : ≥1 Liger 1/3 = 1/3 sur les mêmes graines — l'acquis tenu sans un choix
-à la main). L'extraction cardinale Synchro/Xyz/Lien, la spécialisation des
-produits d'invocation et le couplage d'ignition sont **inconditionnels** (des
-correctifs de modèle, pas des mécanismes) ; `--refine-after <n>` (l'échelle
-auto-raffinante) est un mécanisme **à mesurer**, éteint par défaut.
-
-*Fait en session 19* : `--adapt-to-peak` et `--hindsight 0.5` sont **le défaut**.
-L'étalon B, **dix runs par bras** lus en proportion, porte `>=2` de **3/10 à
-9/10**. Ils s'éteignent par `--no-adapt-to-peak` et `--no-hindsight`, pour
-rejouer l'A/B.
-
-*Ce qui NE l'est pas, et la raison est un défaut* : `--elide-forced` n'était
-câblé **que** dans `--growth`. Ni `RunSolve` ni `RunTransplantSolve` ne
-l'assignaient, donc il était **inerte dans toute recherche** — preuve
-déterministe : `3000 tirages, 149334 états, 3002 adaptations` à l'octet près avec
-et sans. Le câblage est corrigé (c'est un correctif : le drapeau prétendait
-agir) ; le mécanisme redevient **non jugé** sur ce chemin, et son défaut reste
-éteint.
-
-**La règle qui manque, et c'est la troisième fois qu'on la paie** : tout champ de
-`SearchConfig` doit être assigné depuis `Options` en **un seul point de
-câblage**. Trois `SearchConfig` sont construits dans `main.cpp`, et aucun
-contrôle ne dit lequel oublie quoi.
-
-**Et aucune mesure de l'étalon B ne vaut à UN RUN PAR BRAS.** L'audit de la
-session 18 (§9.25 (b)) a recensé cinq exécutions de la *même* commande à la
-*même* graine : le juge « résolutions atteintes par tirage » y rend
-**0, 0, 0, 89, 2 239**. Médiane zéro, maximum deux mille. Ce n'est pas une mesure
-bruyante, c'est un **événement rare** — un A/B à un tirage par bras ne mesure que
-le tirage.
-
-La cause n'était pas le nombre de workers : deux runs `--threads 1` à la même
-graine faisaient 41 232 et 42 179 tirages, parce que **le budget était du temps
-de mur**. C'est **corrigé** (§9.26 (a)) :
+For reproducible measurements, `--max-rollouts` replaces the wall-clock budget
+with a rollout count. At `--threads 1` two executions then do exactly the same
+work; the wall-clock budget is what made runs at an identical seed diverge.
 
 ```powershell
-# Mode DETERMINISTE : deux executions rendent des relevés identiques.
 combosolver.exe ... --threads 1 --max-rollouts 20000 --max-nodes 500000 `
-    --solve-ms 900000    # le temps ne doit JAMAIS mordre
+    --solve-ms 900000   # time must never be the binding bound here
 ```
 
-Contrôle mesuré : **2 lignes de diff sur 397**, et ce sont les deux noms
-d'outdir. Avant : 38 sur 392. Ce mode n'est **pas** le mode de production — le
-mono-worker coûte ÷5,1 à ÷5,9 — c'est un **instrument d'attribution**.
+This is an attribution instrument, not the production mode: a single worker
+costs roughly five to six times the throughput.
 
-Conséquence pratique, à appliquer sans exception :
+---
 
-- sur l'étalon B, **N runs par bras**, et la lecture porte sur la **proportion**
-  d'exécutions qui aboutissent, jamais sur la valeur d'un compteur ;
-- les faits **sans graine** (couverture, boards distincts en exhaustif, facteurs
-  de fusion de table, santé) restent les juges les plus sûrs du dossier ;
-- la sortie **structurelle** (l'approche écrite `k/8` et son nombre de décisions)
-  sépare les régimes sans passer par un compteur — la préférer.
+## The constraint grammar
 
-`docs/drapeaux.md` tient l'inventaire des 122 drapeaux : jugé, réfuté, jamais
-jugé, et la proposition de suppression.
+Constraints are not filters applied after the fact — most of them remove the
+branch from the enumeration.
 
-`docs/combo-solver-design.md` détaille les arbitrages, les mesures et les
-impasses — y compris celles qui ont été abandonnées, et pourquoi.
+**Zones**: `hand`, `field`, `grave` (or `graveyard`), `banished`, `extra`.
+Default `field`. The French spellings the earlier command lines used
+(`main`, `terrain`, `cimetiere`, `banni`) are still accepted.
+
+**Attributes** (`--material`): `light`, `dark`, `earth`, `water`, `fire`,
+`wind`, `divine`.
+
+```bash
+# the n-th summon must be one of these cards
+--summon "5:Zalen|Crystal Wing"
+
+# from the 5th summon on, at every OPPONENT response window at least one
+# clause must hold. A clause is a conjunction of card@zone atoms.
+--guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
+
+# the guard stops being required once the opponent's hand is down to 2 cards
+--guard-off "opphand<=2"
+
+# a state predicate instead of a card: N opponent cards banished
+--guard "5:Dis Pater@field+oppbanished>=1"
+
+# the line must resolve this effect twice, activated FROM THE FIELD
+--resolve "PSY-Framelord Omega@field:2"
+
+# the line must summon this card at least once
+--summon-min "Junk Meister"
+
+# summoning this card must consume a LIGHT material
+--material "Chaos Angel:light"
+
+# never activate this card from the field
+--no-activate "Duel Evolution - Assault Zone"
+
+# never chain this card at a response window
+--no-chain "Crystal Wing"
+```
+
+Two distinctions that are easy to get wrong:
+
+- `--guard` says "when the window opens, a counter is available". It does not
+  say the guard *is* the n-th summon; it may already be in play.
+- `--resolve` is checked **at the goal**, not along the line: a conforming board
+  without the resolutions is not a solution, and the search keeps going.
+- `@zone` on `--resolve` restricts the **activation** zone. Without `@field`,
+  an Omega that rips from the field and an Omega effect resolving from the
+  graveyard both count, which is a measured false positive.
+
+### Opponent test
+
+`--guard` is a static proxy: it asserts that an answer is available. `--fire`
+plays the threat for real. The card is added to the opponent's hand and
+activated at every window where it is legal — one attempt per window — and the
+search must close the board back up from the post-injection state.
+
+```bash
+combosolver.exe duel.yrpX --scriptdir <scripts> \
+    --fire "27204311" --fire-spare "Junk Signal" --fire-ms 60000 \
+    --resolve "PSY-Framelord Omega@field:2"
+```
+
+`--fire-spare` names cards that may be spent answering: the target board without
+them is also accepted at the goal. `--fire-open` restricts injection to windows
+where the chain is empty, so the threat *starts* a chain instead of being
+chained onto our own effects.
+
+Note that a hand test start gives the opponent no hand at all. With no playable
+card across the table the core never opens a response window, the guard is
+satisfied vacuously and a handrip rips nothing — `--opp-hand` is what gives it
+something to work with, and the replays produced only replay with the same
+`--opp-hand`.
+
+---
+
+## The flag you cannot forget
+
+**`--scriptdir` is mandatory in practice.**
+
+A `.yrpX` only replays faithfully with the core *and* the Lua card scripts
+contemporary with its recording. With the wrong script set the replay diverges
+**silently**: the core asks a different question, the recorded answer becomes
+invalid, and the tool goes on printing normal-looking measurements.
+
+The one detector is the `MSG_RETRY` counter in the report. On the reference
+replay: 218 retries against the live scripts, **0** against the pinned export
+that `fetch_solver_deps.ps1` produces.
+
+The same applies to the core itself, which is why the fetch script pins a
+commit rather than following `HEAD`. A replay recorded by an older client needs
+an older core, even though its scripts update themselves.
+
+---
+
+## What a run prints
+
+Every run, search or not, ends with self-checks. Their point is that a wrong
+number is worse than no number: if the replay does not reproduce, or if the
+snapshot does not restore the state exactly, nothing measured afterwards means
+anything.
+
+```
+=== resultats ===
+  reponses consommees : 56 / 56
+  MSG_RETRY           : 0   (rejeu fidele)
+
+--- potentiel d'elision (une seule reponse legale) ---
+  SELECT_CHAIN               29 / 31   forcees  (94%)
+  TOTAL                      29 / 57   forcees  (51%)
+
+--- couts d'execution ---
+  deroulement de la ligne    :      2.3 ms pour 56 decisions  (0.041 ms/decision)
+  => re-simulation complete depuis la racine : 16.9 ms
+
+=== test de fidelite de la restauration ===
+  restauration              : 0.12 ms  (0.84 Mo recopies)
+  empreinte etat final      : 067573434fddcd1d vs 067573434fddcd1d
+  => IDENTIQUE : l'instantane capture bien tout l'etat du duel
+
+=== test de stress des instantanes ===
+  freres successifs (Push/Restore/Pop)        18/18  ok
+  imbrication profonde (20 niveaux)            9/9   ok
+  ligne complete rejouee apres stress          1/1   ok
+```
+
+(Reproduce it with `combosolver.exe gabarits\etalon_a_lunalight.yrp --workdir
+<your EDOPro>`. The report text is still French; see
+[State of the work](#state-of-the-work).)
+
+That last block is the one that pays for everything else. Restoring costs
+0.12 ms where re-simulating from the root costs 16.9 ms, and the ratio is what
+makes searching viable at all.
+
+Beyond the self-checks, a run reports what it *cut* and whether each mechanism
+was actually **alive**. A counter that is not printed is not an instrument, and
+several mechanisms in this repository spent whole sessions switched off while
+announcing themselves as active. `!! INERT` in a report means the arm is
+disposable before it is launched, not after.
+
+---
+
+## How it works
+
+### The arena
+
+The OCG API offers no state cloning, and a hand-written serialiser is out of
+reach: at a `MSG_SELECT_*`, Lua coroutines sit suspended in the middle of an
+effect resolution, with their stacks and their upvalues. So the project does not
+save the game — it saves **the memory**.
+
+All the duel's mutable memory is confined to an address range under our control:
+the Lua heap through the allocator passed to `lua_newstate`, and the core's C++
+objects through the global `operator new` overload. A restore happens **at the
+same base address**, so every absolute pointer stays valid with no relocation
+and the duel never knows it was restored.
+
+Restores are the frequent operation, and the cheap one: only the pages the child
+dirtied are copied back. Under Windows that uses `GetWriteWatch`; the WebAssembly
+port replaces it with a software write barrier (`arena.cpp`) whose completeness
+is checked by a verifier rather than assumed.
+
+An allocation that does not fit in the arena goes to the host heap and cannot be
+restored. That is not a statistic but a **stop condition**: the arena is marked
+poisoned and the worker aborts, because everything it measured afterwards would
+describe a duel the restore can no longer reconstitute.
+
+### Searching the state graph, not the action tree
+
+The action tree is not enumerable at any speed — 10^97 along the reference line
+alone. What makes exploration possible is searching the **state graph**:
+activating A then B and B then A converge on the same node, and the
+transposition table merges them.
+
+The transposition key covers the visible zones, the prompt payload (which is
+where the once-per-turn counters hide) and the processor state. **Under-hashing
+is the failure mode to watch**: it makes solutions disappear without saying so.
+The report therefore counts merges along the reference line, whose states are
+pairwise distinct by construction.
+
+Equivalence is chosen, not incidental, and each choice is written down:
+
+- Two boards that differ only by a battle position are the **same board** for
+  the goal test; the state digest keeps the full position.
+- Two artworks of one card are the same card (`QUERY_ALIAS`), so a line recorded
+  on one deck recognises itself in another.
+- Deck order **is** a game state (draws, excavations and flips read it), so it is
+  hashed as is; hand and graveyard order is not, so those are sorted.
+
+### Novelty and serialisation
+
+The transposition table only merges *identical* states, yet two lines differing
+by one card in the graveyard are distinct and not distinctly interesting.
+Novelty pruning (Iterated Width) keeps a state only when it makes at least one
+atom true that has never been true before. The patience is not guessed: the
+`--width` mode measures the longest mute run along the reference line first,
+because chain resolutions go through states that change nothing on the board.
+
+The harder problem is that reaching a subgoal consumes what the next one needs.
+The plain heuristic — how many target cards are on the field — is flat over
+roughly 90 % of a line, so there is nothing to descend. Two mechanisms attack
+that:
+
+- a **recipe graph**, learned from the summons actually observed (and seeded
+  from card text and from the declared operators), which counts the summons
+  still to be made rather than the cards still missing;
+- a **material balance** solved as a small linear program, whose firing vector
+  `x*` yields intermediate subgoals that exist from the first brick placed. The
+  simplex is two-phase with Bland's rule and self-tests on instances with known
+  solutions before it is allowed to serve.
+
+Neither ever prunes. A product with no known recipe is worth 1, never infinity,
+so at worst the landscape falls back to the flat heuristic and nothing is lost.
+
+---
+
+## The search stack
+
+Rollouts, then a finisher. Rollouts know how to climb; the last step is a needle
+sampling does not find.
+
+- **NRPA** (Nested Rollout Policy Adaptation): one weight per move *identity*,
+  softmax sampling, adaptation towards the best sequence at each level. The move
+  identity is semantic — the cards a choice engages — so a policy learned on one
+  deck means something on another.
+- **Levin Tree Search** as the finisher: a complete best-first search ordered by
+  `d(n)/pi(n)`, where `pi` is the product of the policy's probabilities along
+  the path. The number of expansions before finding a solution is bounded by the
+  policy's quality, which is what sampling can never promise.
+- **Go-Explore archive**: the K best *distinct* states are kept with the path
+  that reaches them, and the finisher takes its roots there. Returning to a
+  state is cheap here (replay the prefix, restore the arena), which is exactly
+  the part Go-Explore normally has to pay for.
+- **Options**: macros mined from a corpus of solved lines and offered as a
+  single sampling unit. They attack the exponent rather than the base — a
+  160-decision line becomes a ~20-decision one when eight decisions collapse
+  into one action. Selection is by Levin loss, so the catalogue's size is a
+  result rather than a parameter, and mining can run online, inside the run.
+
+Every candidate is **verified before it is written**: replayed from scratch in a
+fresh duel, board compared, constraints re-checked. A search that deduplicates
+and canonicalises gives no a priori guarantee that its answer sequence rebuilds
+the board, so only what holds is written out.
+
+---
+
+## Repository layout
+
+| File | Role |
+|---|---|
+| `main.cpp` | CLI, the three search drivers, every report, and the instrumented replay |
+| `search.h` / `search.cpp` | the search itself: transposition, novelty, NRPA, LTS, archive, recipe graph, landmarks |
+| `arena.h` / `arena.cpp` | the snapshottable memory arena, its allocator, the hot path profiler |
+| `duel.h` / `duel.cpp` | wrapper around one statically linked `ocgcore` duel |
+| `enumerate.h` / `.cpp` | decoding a `MSG_SELECT_*` into legal answers, and the equivalence classes |
+| `prompt.h` / `prompt.cpp` | branching-factor accounting per prompt type |
+| `replay.h` / `replay.cpp` | reading and writing `.yrpX` / `.yrp1` |
+| `assets.h` / `assets.cpp` | serving `cards.cdb` rows and Lua scripts to the core |
+| `operators.h` / `.cpp` | static analysis of the deck's Lua scripts, and the LP over the operator table |
+| `premake5.lua` | build definition (solver, ocgcore, Lua, LZMA) |
+| `gabarits/` | a small replay used by the smoke run above |
+| `tools/` | dependency fetch, replay inspection, and the per-session measurement harnesses |
+| `docs/` | design notes, flag inventory, session reports |
+
+`docs/combo-solver-design.md` is the long form: the trade-offs, the
+measurements, and the dead ends, including the abandoned ones and why.
+`docs/drapeaux.md` is the flag inventory — judged, refuted, never judged.
+
+---
+
+## State of the work
+
+This is a research tool, and its README should say what it does not do.
+
+**It converts, but not reliably.** On the harder of the two benchmarks the
+solver writes solutions in some runs and none in others at an identical seed;
+the design notes record a judge returning `0, 0, 0, 89, 2239` over five
+executions of the same command. That is a rare event, not measurement noise. Any
+comparison on that benchmark needs N runs per arm and must be read as a
+*proportion* of runs that succeed, never as one counter's value.
+
+**Most flags have never been judged.** There are 133 of them.
+`docs/drapeaux.md` classifies each one, and the honest total of "written,
+instrumented, no verdict" is large. A flag that has never been judged is a debt,
+not an option.
+
+**The default must be good.** A user cannot be expected to know which four flags
+make the solver work; if that is what it takes, the defect is in the defaults.
+The rule the project now follows: a defect fix is never a flag; a mechanism is a
+flag only for as long as it takes to measure it, after which it becomes the
+default and the flag goes negative (`--no-…`) so the A/B stays replayable.
+
+**A mechanism must prove it is switched on before its effect is measured.**
+`--assign-bias` was completely inert for two sessions while the run printed that
+it was acting. Every mechanism now prints its own liveness, and a report
+carrying `!! INERT` invalidates the arm before the budget is spent.
+
+**Known gaps in this repository as published.** The diagnostic report is still
+printed in French — the code comments, the `--help` text and the constraint
+grammar are English; the report text is not yet. The scripts under `tools/` are
+per-session measurement harnesses with machine-specific paths hard-coded in
+them, and their header comments are still part French; they are kept as an
+archive of how the figures quoted here were obtained, not as a supported
+interface. There is no license file yet.
+
+---
+
+## References
+
+Papers that are actually implemented here, not a reading list.
+
+| Idea | Paper |
+|---|---|
+| NRPA / GNRPA | Cazenave, *Nested Rollout Policy Adaptation*; [arXiv:2003.10024](https://arxiv.org/abs/2003.10024) |
+| Limited repetitions | [arXiv:2401.10420](https://arxiv.org/abs/2401.10420) |
+| Levin Tree Search, PHS* | [arXiv:2103.11505](https://arxiv.org/abs/2103.11505) |
+| sqrt-LTS re-rooting | [arXiv:2412.05196](https://arxiv.org/abs/2412.05196) |
+| Iterated Width, Rollout-IW | Lipovetzky & Geffner; [arXiv:1801.03354](https://arxiv.org/abs/1801.03354) |
+| Go-Explore | [arXiv:2004.12919](https://arxiv.org/abs/2004.12919) |
+| Hindsight relabelling (HER) | Andrychowicz et al., NeurIPS 2017 |
+| Policy learning from solved games | [arXiv:2401.10431](https://arxiv.org/abs/2401.10431) |
+| Macro-operators, option selection by Levin loss | [arXiv:1109.2154](https://arxiv.org/abs/1109.2154), [arXiv:1810.09145](https://arxiv.org/abs/1810.09145), [arXiv:2410.11262](https://arxiv.org/abs/2410.11262) |
+| Learning macros during search (Marvin) | [arXiv:1110.2736](https://arxiv.org/abs/1110.2736) |
+| Permutation statistic / MCPS | [arXiv:2510.06381](https://arxiv.org/abs/2510.06381) |
+| Generalised landmarks | [arXiv:2508.21564](https://arxiv.org/abs/2508.21564) |
+| Retrosynthesis as search (Retro*, DESP) | [arXiv:2006.15820](https://arxiv.org/abs/2006.15820), [arXiv:2407.06334](https://arxiv.org/abs/2407.06334) |
+| Action selection as optimisation | [arXiv:2010.12001](https://arxiv.org/abs/2010.12001) |
+| Red-black relaxation | Katz, Hoffmann & Domshlak |

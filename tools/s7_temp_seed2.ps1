@@ -1,6 +1,6 @@
-# Session 7bis — confirmation de la temperature sur une SECONDE graine.
-# Deux bras sequentiels (temoin tau=1.0 et tau=0.5) a graine 999 : un fait
-# structurel se compare a une dispersion, pas a un run (piege 39).
+# Confirmation of the temperature on a SECOND seed. Two sequential arms
+# (control tau=1.0 and tau=0.5) at seed 999: a structural fact is compared
+# against a dispersion, not against one run.
 param([string]$Seed = '999', [int]$FireMs = 300000)
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

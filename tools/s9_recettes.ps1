@@ -1,43 +1,42 @@
-# GRAPHE DE RECETTES — la mesure qui decide (session 9, chantier 16).
+# RECIPE GRAPH: the deciding measurement.
 #
-# LA QUESTION, et elle est anterieure a « est-ce que ca gagne ».
+# THE QUESTION, and it comes before "does it win".
 #
-# Le diagnostic de la session 8 dit : le verrou n'est plus l'algorithme de
-# recherche, il est dans `h`. Notre `h` — le nombre de cartes cibles manquantes
-# — vaut zero sur ~90 % de la ligne, et un mecanisme de decomposition ne peut
-# rien decomposer sur un paysage plat. Le graphe de recettes est cense rendre
-# `h` informatif : il compte les INVOCATIONS restantes, materiaux
-# intermediaires compris, donc il DECROIT quand on assemble une piece
-# intermediaire — alors que le `h` plat ne bouge pas.
+# The diagnosis says the lock is no longer the search algorithm, it is in `h`.
+# Our `h` (the number of missing target cards) is zero over ~90 % of the line,
+# and a decomposition mechanism can decompose nothing on a flat landscape. The
+# recipe graph is meant to make `h` informative: it counts the SUMMONS left,
+# intermediate materials included, so it DECREASES when an intermediate piece is
+# assembled, where the flat `h` does not move.
 #
-# Avant de demander si ce `h` fait gagner la recherche, il faut savoir S'IL
-# DIFFERE DU `h` PLAT. C'est le piege 40 (instrumenter avant de calibrer) et le
-# piege 42 (un mecanisme peut etre vivant et sans effet). D'ou les trois bras :
+# Before asking whether that `h` makes the search win, one has to know WHETHER
+# IT DIFFERS FROM THE FLAT `h` (instrument before calibrating; a mechanism can
+# be live and have no effect). Hence the three arms:
 #
 #   T    temoin, aucun graphe                       -> h plat
-#   M    --recipes 0 : le graphe est ALIMENTE et MESURE, mais n'entre PAS dans
-#        le cout. Le run est donc IDENTIQUE au temoin par construction, et la
-#        colonne `hR` dit ce que le graphe AURAIT dit. C'est la mesure qui
-#        decide s'il vaut la peine d'etre branche.
-#   P1   --recipes 1 : la distance de recettes pese dans h.
+#   M    --recipes 0: the graph is FED and MEASURED but does NOT enter the
+#        cost. The run is therefore IDENTICAL to the control by construction,
+#        and the `hR` column says what the graph WOULD have said. That is the
+#        measurement that decides whether it is worth wiring in.
+#   P1   --recipes 1: the recipe distance weighs in h.
 #   P2   --recipes 2
 #
-# CE QU'IL FAUT LIRE, dans cet ordre :
+# WHAT TO READ, in this order:
 #
-# 1. `rec=` (invocations observees). A ZERO, le graphe est vide et la distance
-#    vaut exactement le `h` plat : le mecanisme est INERTE et les bras P
-#    n'auront rien mesure. C'est la premiere chose a verifier — piege 52.
-# 2. `hR` (distance de recettes moyenne) contre |cible manquante| du temoin.
-#    Si hR ~ le nombre de cartes manquantes, le graphe n'a rien appris de plus
-#    que le compte : le paysage est reste plat, et le chantier a echoue a son
-#    but declare, quel que soit le resultat en cartes.
-#    Si hR > ce compte, le graphe voit des INVOCATIONS INTERMEDIAIRES que le
-#    `h` plat ignorait — c'est le signal recherche.
-# 3. Seulement ensuite : les cartes cumulees des bras P contre le temoin.
+# 1. `rec=` (summons observed). At ZERO the graph is empty and the distance is
+#    exactly the flat `h`: the mechanism is INERT and the P arms measured
+#    nothing. That is the first thing to check.
+# 2. `hR` (mean recipe distance) against the control's |missing target|. If
+#    hR ~ the number of missing cards, the graph learned nothing beyond the
+#    count: the landscape stayed flat and the work failed at its declared goal,
+#    whatever the result in cards.
+#    If hR > that count, the graph sees INTERMEDIATE SUMMONS the flat `h`
+#    ignored, and that is the signal being looked for.
+# 3. Only then: the cumulated cards of the P arms against the control.
 #
-# Montage : etalon 0, A/B DETERMINISTE (racines imposees par --approach,
-# politique vide par --no-nrpa, regime but seul par --no-plan). Controle gratuit
-# dans chaque bras : « appr0 recul 0 » doit rendre 42 exp., b=0, EPUISE.
+# Setup: benchmark 0, DETERMINISTIC A/B (roots imposed by --approach, empty
+# policy by --no-nrpa, goal-only by --no-plan). Free check in every arm: "appr0
+# backtrack 0" must return 42 expansions, b=0, EXHAUSTED.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
       [string]$Seed = '888',

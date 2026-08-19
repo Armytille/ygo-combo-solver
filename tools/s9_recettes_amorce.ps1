@@ -1,45 +1,45 @@
-# GRAPHE DE RECETTES AMORCE PAR LE TEXTE (session 9, chantier 16 — second temps).
+# RECIPE GRAPH SEEDED FROM CARD TEXT (second step).
 #
-# CE QUE LE PREMIER A/B A ETABLI, et qui commande celui-ci
+# WHAT THE FIRST A/B ESTABLISHED, and what it commands here
 #
-# Bras `--recipes 0` (graphe alimente, mesure, sans peser dans le cout) :
-#   appr0 recul 0    rec=121    hR=1.0    (h plat au meme endroit : 1)
+# Arm `--recipes 0` (graph fed and measured, not weighing in the cost):
+#   appr0 backtrack 0    rec=121    hR=1.0    (flat h at the same place: 1)
 #   appr0 recul 10   rec=22240  hR=4.1    (h plat : 4)
 #   appr0 recul 20   rec=24518  hR=5.0    (h plat : 5)
 #   appr0 recul 30   rec=44324  hR=5.1    (h plat : 6)
 #   appr0 recul 45   rec=14885  hR=5.0    (h plat : 5)
 #
-# Le graphe OBSERVE beaucoup (des dizaines de milliers d'invocations) et
-# n'apporte que ~0,1 de gradient. La raison n'est pas un manque de donnees, elle
-# est STRUCTURELLE : un graphe observationnel n'apprend que des invocations
-# REUSSIES, et la carte qu'on cherche est celle qu'aucune ligne n'a jamais
-# posee. Sa recette est donc inconnue, `Distance` rend son plancher, et `h`
-# reste plat exactement la ou il faudrait qu'il renseigne.
+# The graph OBSERVES a great deal (tens of thousands of summons) and brings only
+# ~0.1 of gradient. The reason is not a lack of data, it is STRUCTURAL: an
+# observational graph only learns from SUCCESSFUL summons, and the card being
+# sought is the one no line has ever placed. Its recipe is therefore unknown,
+# `Distance` returns its floor, and `h` stays flat exactly where it should be
+# informative.
 #
-# CE QUE CE SECOND A/B TESTE
+# WHAT THIS SECOND A/B TESTS
 #
-# La regle 3 du chantier dit « le texte n'est qu'une AMORCE ; la verite vient de
-# l'observation ». Le premier temps n'implementait que l'observation. L'amorce
-# lit la ligne de materiaux du texte de carte —
+# Rule 3 says "the text is only a SEED; the truth comes from observation". The
+# first step implemented observation alone. The seeding reads the materials line
+# of the card text
 #     "Lunalight Leo Dancer" + 3 "Lunalight" monsters
-# — et n'en retient que les materiaux NOMMES entre guillemets. Liger Dancer
-# obtient ainsi une recette exigeant NOMMEMENT Leo Dancer, qui est lui-meme une
-# Fusion : la distance a Liger cesse d'etre le plancher.
+# and keeps only the materials NAMED in quotes. Liger Dancer thereby gets a
+# recipe requiring Leo Dancer BY NAME, which is itself a Fusion: the distance to
+# Liger stops being the floor.
 #
-# CE QU'IL FAUT LIRE, dans cet ordre :
+# WHAT TO READ, in this order:
 #
-# 1. `amorce par le texte : N recette(s) posee(s)` a l'en-tete. A zero, rien
-#    n'est amorce et les bras ne mesurent rien (piege 52).
-# 2. `hR` du bras SA contre `hR` du bras M ci-dessus. C'EST LA MESURE : si hR ne
-#    monte pas, l'amorce n'a rien apporte et le chantier 16 est refute dans
-#    cette forme. Si hR monte, le paysage s'est creuse — et seulement alors la
-#    question « est-ce que ca fait gagner » a un sens.
-# 3. Cartes cumulees des bras ponderes contre le temoin (20).
+# 1. `seeded from text: N recipe(s) posted` in the header. At zero, nothing is
+#    seeded and the arms measure nothing.
+# 2. `hR` of arm SA against `hR` of arm M above. THAT IS THE MEASUREMENT: if hR
+#    does not rise, the seeding brought nothing and this form of the work is
+#    refuted. If hR rises, the landscape got deeper, and only then does "does it
+#    win" mean anything.
+# 3. Cumulated cards of the weighted arms against the control (20).
 #
 # Bras :
-#   SA   --recipes 0            : amorce + observation, MESURE sans peser
+#   SA   --recipes 0            : seeding + observation, MEASURED without weight
 #   SN   --recipes 0 --no-seed-recipes : temoin d'amorce (= bras M precedent)
-#   SP1  --recipes 1            : l'amorce pese dans h
+#   SP1  --recipes 1            : the seeding weighs in h
 #   SP2  --recipes 2
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
@@ -49,11 +49,10 @@ param([int]$Ms = 300000,
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 $ref = "D:\ProjectIgnis\replay\synchron handrip 2.yrpX"
 
-# SN est le TEMOIN D'AMORCE, et il n'est pas optionnel : le bras M de la session
-# 9 a ete mesure sur un binaire ANTERIEUR a l'amorce. Comparer SA a ce M-la
-# ferait varier deux choses (l'amorce et le binaire) — exactement ce que le
-# cadran alpha a du refaire pour cette raison (§9.16 (d)). SN rejoue donc le
-# temoin sur LE binaire courant.
+# SN is the SEEDING CONTROL, and it is not optional: arm M above was measured on
+# a binary from BEFORE the seeding. Comparing SA against that M would vary two
+# things (the seeding and the binary), exactly what the alpha dial had to be
+# redone for. SN therefore replays the control on THE current binary.
 $bras = @(
     @{ nom = 'SN';  arg = @('--recipes', '0', '--no-seed-recipes') },
     @{ nom = 'SA';  arg = @('--recipes', '0') },

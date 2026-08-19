@@ -1,27 +1,27 @@
 # -*- coding: utf-8 -*-
-"""s22 — verification sympy de la convention des duaux exposee par SolveOperatorLP.
+"""sympy check of the dual convention SolveOperatorLP exposes.
 
-La convention C++ (operators.cpp, s22) :
-    row_dual[i]   = cout reduit du surplus/ecart de la ligne i au tableau final
-    bound_dual[j] = cout reduit de l'ecart de la borne x_j <= u_j
-et le CERTIFICAT verifie a chaque execution du binaire (auto-test 65/65) :
-    (a) y >= 0, w >= 0 ;
-    (b) faisabilite duale : c_j - Sigma_i y_i a_ij + w_j >= 0 ;
-    (c) dualite forte    : b'y - u'w = c'x*.
+The C++ convention (operators.cpp):
+    row_dual[i]   = reduced cost of row i's surplus/slack in the final tableau
+    bound_dual[j] = reduced cost of the slack of the bound x_j <= u_j
+and the CERTIFICATE checked on every execution of the binary (self-test 65/65):
+    (a) y >= 0, w >= 0;
+    (b) dual feasibility: c_j - Sigma_i y_i a_ij + w_j >= 0;
+    (c) strong duality:   b'y - u'w = c'x*.
 
-Ce script etablit le THEOREME qui rend ce certificat suffisant : pour
-    min c'x   s.c.  A x >= b,  0 <= x <= u
-tout couple (y, w) satisfaisant (a)+(b)+(c) est une solution OPTIMALE du dual
-    max b'y - u'w   s.c.  A' y - w <= c,  y >= 0, w >= 0
-— donc les « prix » exposes sont des prix d'ombre valides, et w_j > 0 designe
-une borne u_j qui LIE le plan (l'usage qu'en fait la derivation des hotes a
-quota). On le verifie numeriquement : primal exact par lpmin (x >= 0 EXPLICITE
-— lpmin IGNORE nonnegative=True, piege s21), dual exact par lpmax, et l'egalite
-des deux optima (dualite forte) sur des instances aleatoires de la forme du
-modele. Si un (y, w) verifiait (a)+(b)+(c) sans etre optimal, la dualite
-faible serait violee — c'est l'argument, et l'egalite mesuree ici le fonde.
+This script establishes the THEOREM that makes the certificate sufficient: for
+    min c'x   s.t.  A x >= b,  0 <= x <= u
+any pair (y, w) satisfying (a)+(b)+(c) is an OPTIMAL solution of the dual
+    max b'y - u'w   s.t.  A' y - w <= c,  y >= 0, w >= 0
+so the "prices" exposed are valid shadow prices, and w_j > 0 designates a bound
+u_j that BINDS the plan (which is what the quota host derivation uses). We
+check it numerically: exact primal through lpmin (with an EXPLICIT x >= 0,
+since lpmin IGNORES nonnegative=True), exact dual through lpmax, and the
+equality of the two optima (strong duality) on random instances shaped like the
+model. If some (y, w) satisfied (a)+(b)+(c) without being optimal, weak duality
+would be violated; that is the argument, and the measured equality grounds it.
 
-Usage : py -3.11 tools/s22_verify_duals.py
+Usage: py -3.11 tools/s22_verify_duals.py
 """
 import random
 from fractions import Fraction
@@ -39,7 +39,7 @@ def run_case(rng, n, m):
     A = [[rng.choice([-1, 0, 0, 1, 1]) for _ in range(n)] for _ in range(m)]
     b = [rng.randint(-2, 3) for _ in range(m)]
 
-    # --- primal : min c'x, A x >= b, 0 <= x <= u (x >= 0 EXPLICITE) ---------
+    # --- primal: min c'x, A x >= b, 0 <= x <= u (x >= 0 EXPLICIT) -----------
     cons = []
     for i in range(m):
         cons.append(sum(A[i][j] * xs[j] for j in range(n)) >= b[i])
@@ -50,10 +50,10 @@ def run_case(rng, n, m):
     try:
         popt, _ = lpmin(sum(c[j] * xs[j] for j in range(n)), cons)
     except Exception:
-        return None  # infaisable : hors du perimetre (le certificat ne rend
-                     # des duaux que sur les cas faisables)
+        return None  # infeasible: out of scope (the certificate only returns
+                     # duals on the feasible cases)
 
-    # --- dual : max b'y - u'w, A'y - w <= c, y >= 0, w >= 0 -----------------
+    # --- dual: max b'y - u'w, A'y - w <= c, y >= 0, w >= 0 ------------------
     dcons = []
     for j in range(n):
         lhs = sum(A[i][j] * ys[i] for i in range(m))
@@ -70,11 +70,11 @@ def run_case(rng, n, m):
     try:
         dopt, _ = lpmax(obj, dcons)
     except Exception:
-        return None  # dual non borne <=> primal infaisable : deja ecarte
+        return None  # unbounded dual <=> infeasible primal: already discarded
 
     assert sympy.simplify(popt - dopt) == 0, (
         f"DUALITE FORTE VIOLEE : primal {popt} != dual {dopt}")
-    # garde du piege s21 : optimum negatif sous couts >= 0 = appel faux
+    # guard against the lpmin trap: a negative optimum under costs >= 0 is a bad call
     assert popt >= 0, f"optimum negatif {popt} avec c >= 0 : contrainte x>=0 perdue"
     return popt
 

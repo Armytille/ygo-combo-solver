@@ -1,35 +1,35 @@
-# CADRAN ALPHA COMPLET, SUR UN SEUL BINAIRE (session 9, C3 — final).
+# COMPLETE ALPHA DIAL, ON A SINGLE BINARY.
 #
-# POURQUOI TOUT REJOUER PLUTOT QUE PROLONGER
+# WHY REPLAY EVERYTHING RATHER THAN EXTEND
 #
-# Le cadran bas (1/2/3/5/8) a tourne sur le binaire d'avant le lot d'audit. Le
-# gating de la nouveaute dans PolicyRollout (audit 3.7 — `--novelty 0`
-# n'eteignait pas la nouveaute cote NRPA) a change le DEBIT : +20 % d'expansions
-# a budget egal sur le temoin. Prolonger le cadran sur le nouveau binaire
-# comparerait donc des bras qui n'ont pas explore a la meme vitesse. Un cadran
-# se lit d'un bloc ou pas du tout.
+# The low dial (1/2/3/5/8) ran on the binary from before the audit batch. Gating
+# the novelty in PolicyRollout (`--novelty 0` did not turn novelty off on the
+# NRPA side) changed the THROUGHPUT: +20 % expansions at equal budget on the
+# control. Extending the dial on the new binary would therefore compare arms
+# that did not explore at the same speed. A dial is read as a block or not at
+# all.
 #
-# Le temoin sur CE binaire existe deja : s9_ctrl.log (42 exp. b=0 EPUISE au
-# controle, 6/5/4/5 = 20 cartes cumulees). Ce script sert les neuf bras alpha.
+# The control on THIS binary already exists: s9_ctrl.log (42 expansions, b=0,
+# EXHAUSTED on the control; 6/5/4/5 = 20 cumulated cards). This script serves
+# the nine alpha arms.
+# THE TWO QUESTIONS
 #
-# LES DEUX QUESTIONS
-#
-# 1. Ou est l'optimum sur l'echelle CORRIGEE ? L'equivalence avec le cadran de
-#    la session 8 est alpha_s9 = alpha_s8 * h0/8, soit x0,5 a x0,75 (h0 vaut 4 a
+# 1. Where is the optimum on the CORRECTED scale? The equivalence with the
+#    earlier dial is alpha_new = alpha_old * h0/8, i.e. x0.5 to x0.75 (h0 is 4
 #    6 aux racines comparees, et non 8). L'optimum de la session 8 (alpha_s8=25)
-#    tombe donc vers alpha_s9 ~ 12-19.
+#    to 6 on the roots that weigh), so the optimum should fall near 12-19.
 #
-# 2. LE MECANISME S'ETEINT-IL PAR LE HAUT ? Au controle, `rr` s'effondre quand
+# 2. DOES THE MECHANISM SWITCH ITSELF OFF FROM ABOVE? On the control, `rr`
 #    alpha monte : 123, 118, 118, 83, 3 pour alpha = 1, 2, 3, 5, 8. Si `rr`
-#    tombe a zero au-dela, les bras hauts ne mesurent pas un rerooter qui gagne
-#    mais un rerooter INERTE — ce qui EXPLIQUERAIT le « gain » marginal de la
-#    session 8 (retour au temoin) au lieu de le confirmer. Lire `rr` en meme
-#    temps que le cumul, jamais le cumul seul (pieges 42 et 52).
+#    collapses when alpha grows; if it reaches zero beyond a point, the high
+#    arms measure an INERT rerooter rather than a winning one, which would
+#    EXPLAIN the earlier marginal "gain" (a return to the control) instead of
+#    confirming it. Read `rr` together with the cumulative, never alone.
 #
-# CONTROLE DE CORRECTION, dans chaque bras : « appr0 recul 0 » doit rendre
-# 42 exp., b=0, EPUISE. Une fonction de cout change l'ORDRE des expansions, pas
-# l'ensemble atteignable ; et b=0 dit qu'aucun plafond n'a mordu, sans quoi
-# « EPUISE » ne serait pas une preuve d'absence.
+# CORRECTNESS CHECK, in every arm: "appr0 backtrack 0" must return 42
+# expansions, b=0, EXHAUSTED. A cost function changes the ORDER of the
+# expansions, not the reachable set; and b=0 says no ceiling bit, without which
+# "EXHAUSTED" would not be a proof of absence.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
       [string]$Seed = '888',

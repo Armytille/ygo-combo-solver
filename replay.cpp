@@ -14,7 +14,7 @@ constexpr uint8_t OLD_REPLAY_MODE = 231;
 constexpr uint8_t MSG_AI_NAME = 163;
 constexpr uint8_t MSG_NEW_TURN = 40;
 
-// Curseur de lecture qui refuse de deborder plutot que de lire n'importe quoi.
+// Read cursor that refuses to overrun rather than returning garbage.
 class Cursor {
 public:
 	Cursor(const std::vector<uint8_t>& d) : data(d) {}
@@ -34,8 +34,8 @@ public:
 		Read(&v, sizeof(T));
 		return v;
 	}
-	// Les noms sont stockes sur 20 UTF-16 fixes ; on ne garde que l'ASCII,
-	// le solveur n'affiche ces noms qu'a titre indicatif.
+	// Names are stored as 20 fixed UTF-16 units; only the ASCII is kept, and the
+	// solver shows these names for information only.
 	std::string Name() {
 		uint16_t buf[20]{};
 		if(!Read(buf, sizeof(buf)))
@@ -128,7 +128,7 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 
 	Cursor cur(body);
 
-	// -- noms des joueurs
+	// -- player names
 	if(flag & FLAG_SINGLE_MODE) {
 		players.push_back(cur.Name());
 		players.push_back(cur.Name());
@@ -147,7 +147,7 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 		}
 	}
 
-	// -- parametres de duel
+	// -- duel parameters
 	if(id == REPLAY_YRP1) {
 		start_lp = cur.Get<uint32_t>();
 		start_hand = cur.Get<uint32_t>();
@@ -163,8 +163,8 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 	}
 
 	if(id == REPLAY_YRP1) {
-		// -- decks (le mode hand test conserve les decks, contrairement aux
-		//    autres modes solo : replay.cpp:239)
+		// -- decks (hand test keeps its decks, unlike the other solo modes:
+		//    replay.cpp:239)
 		const bool has_decks = !((flag & FLAG_SINGLE_MODE) && !(flag & FLAG_HAND_TEST));
 		if(has_decks) {
 			for(uint32_t i = 0; i < home_count + opposing_count && cur.Ok(); ++i) {
@@ -175,11 +175,10 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 				const uint32_t nx = cur.Get<uint32_t>();
 				for(uint32_t j = 0; j < nx && cur.Ok(); ++j)
 					d.extra.push_back(cur.Get<uint32_t>());
-				// Le compte annonce doit etre servi EN ENTIER. Un corps tronque
-				// rendait un deck court sans un mot, et la liste de reponses
-				// courte qui suit devient `ref_decisions`, c'est-a-dire le
-				// plafond de decisions de toute la recherche : un probleme
-				// d'octets se propageait en budget silencieusement reduit (4.5).
+				// The announced count must be served IN FULL. A truncated body used to yield a
+				// short deck without a word, and the short answer list that follows becomes
+				// `ref_decisions`, i.e. the decision ceiling of the whole search: a byte-level
+				// problem propagated into a silently reduced budget.
 				if(d.main.size() != nm || d.extra.size() != nx) {
 					error = "replay tronque : deck " + std::to_string(i) +
 							" annonce " + std::to_string(nm) + "+" +
@@ -202,11 +201,10 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 					rule_cards.push_back(cur.Get<uint32_t>());
 			}
 		}
-		// -- reponses du joueur
+		// -- player answers
 		while(!cur.Eof()) {
 			uint8_t len = cur.Get<uint8_t>();
-			// `len == 0` est le terminateur normal ; une lecture qui echoue ne
-			// l'est pas.
+			// `len == 0` is the normal terminator; a failed read is not.
 			if(!cur.Ok()) {
 				error = "replay tronque : en-tete de reponse illisible apres " +
 						std::to_string(responses.size()) + " reponse(s)";
@@ -224,7 +222,7 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 			responses.push_back(std::move(r));
 		}
 	} else {
-		// -- flux diffuse
+		// -- broadcast stream
 		while(!cur.Eof()) {
 			uint8_t msg = cur.Get<uint8_t>();
 			if(!cur.Ok())
@@ -274,7 +272,7 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 		body.insert(body.end(), b, b + n);
 	};
 	auto put32 = [&put](uint32_t v) { put(&v, 4); };
-	// Noms sur 20 UTF-16 fixes, comme les lit ParseNames (replay.cpp:194).
+	// Names as 20 fixed UTF-16 units, the way ParseNames reads them (replay.cpp:194).
 	auto put_name = [&put](const std::string& s) {
 		uint16_t buf[20]{};
 		for(size_t i = 0; i < 20 && i < s.size(); ++i)
@@ -333,11 +331,11 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 		body.push_back(static_cast<uint8_t>(r.size()));
 		put(r.data(), r.size());
 	}
-	body.push_back(0);   // terminateur lu par ParseResponses
+	body.push_back(0);   // terminator read by ParseResponses
 
-	// En-tete. On ecrit NON COMPRESSE : OpenReplayFromBuffer accepte les deux
-	// (replay.cpp:104) et le champ `hash` n'est verifie nulle part, ce qui evite
-	// de dependre d'un encodeur LZMA aux memes reglages qu'EDOPro.
+	// Header. We write UNCOMPRESSED: OpenReplayFromBuffer accepts both
+	// (replay.cpp:104) and the `hash` field is never verified, which avoids
+	// depending on an LZMA encoder tuned exactly like EDOPro's.
 	std::vector<uint8_t> out;
 	auto head = [&out](const void* p, size_t n) {
 		const auto* b = static_cast<const uint8_t*>(p);
@@ -351,7 +349,7 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 	head(&flag, 4);
 	head(&base.timestamp, 4);
 	head(&datasize, 4);
-	head(&zero, 4);            // hash : ignore a la lecture
+	head(&zero, 4);            // hash: ignored on read
 	uint8_t props[8]{};
 	head(props, 8);
 	if(flag & FLAG_EXTENDED_HEADER) {

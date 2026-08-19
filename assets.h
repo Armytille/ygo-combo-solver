@@ -1,8 +1,7 @@
-// Fourniture des donnees de cartes et des scripts Lua au core.
+// Card data and Lua scripts, served to the core.
 //
-// Reproduit ce que fait EDOPro (data_manager.cpp:100 pour les cartes,
-// game.cpp:4120 pour l'ordre de recherche des scripts) sans embarquer le reste
-// du client.
+// Mirrors what EDOPro does (data_manager.cpp:100 for cards, game.cpp:4120 for
+// the script search order) without pulling in the rest of the client.
 #pragma once
 
 #include <cstdint>
@@ -17,56 +16,55 @@
 
 namespace solver {
 
-// Une entree de cards.cdb, mise en forme pour OCG_CardData. Les setcodes sont
-// stockes ici car le core conserve le pointeur le temps de la lecture.
+// One cards.cdb row, laid out for OCG_CardData. Setcodes are stored here
+// because the core keeps the pointer for the duration of the read.
 struct CardRow {
 	uint32_t code{}, alias{}, type{}, level{}, attribute{}, lscale{}, rscale{};
 	uint64_t race{};
 	int32_t attack{}, defense{};
 	uint32_t link_marker{};
-	std::vector<uint16_t> setcodes; // termine par 0 si non vide
+	std::vector<uint16_t> setcodes; // zero-terminated when non-empty
 };
 
 class CardDB {
 public:
-	// Charge expansions/*.cdb et repositories/**/*.cdb. Un cards.cdb vide a la
-	// racine est ignore plutot que de faire echouer le chargement.
+	// Loads expansions/*.cdb and repositories/**/*.cdb. An empty cards.cdb at the
+	// root is ignored rather than failing the load.
 	bool Load(const std::string& workdir, std::string& error);
 
 	const CardRow* Find(uint32_t code) const;
-	// PREMIERE LIGNE du texte de carte. Pour les monstres d'extra deck c'est la
-	// ligne de MATERIAUX, et son format est regulier :
+	// FIRST LINE of the card text. For extra deck monsters that is the MATERIALS
+	// line, and its format is regular:
 	//     "Lunalight Leo Dancer" + 3 "Lunalight" monsters
 	//     2 Level 4 monsters
-	// C'est l'AMORCE du graphe de recettes (chantier 16, regle 3 : « le texte
-	// n'est qu'une amorce, la verite vient de l'observation »). Vide si absent.
+	// It is the SEED of the recipe graph: the text only seeds it, the truth comes
+	// from observation. Empty when absent.
 	const std::string& MaterialLine(uint32_t code) const;
-	// Code canonique d'une carte par son nom EXACT (0 si inconnu). Les
-	// materiaux nommes dans le texte le sont entre guillemets, exactement.
+	// Canonical code of a card from its EXACT name (0 when unknown). Materials
+	// named in card text are quoted, exactly.
 	uint32_t CodeByExactName(const std::string& name) const;
-	// Nom lisible, pour les rapports uniquement. "?" si inconnu.
+	// Readable name, for reports only. "?" when unknown.
 	const std::string& Name(uint32_t code) const;
-	// Cartes dont le nom contient `needle` (insensible a la casse). Codes
-	// CANONIQUES, dedupliques : deux illustrations de la meme carte portent le
-	// meme nom et ne doivent compter qu'une fois. Sert a la CLI des
-	// contraintes ; un fragment ambigu doit etre signale, pas devine.
+	// Cards whose name contains `needle` (case-insensitive). CANONICAL codes,
+	// deduplicated: two artworks of the same card share a name and must count
+	// once. Used by the constraint CLI; an ambiguous fragment must be reported,
+	// not guessed.
 	std::vector<std::pair<uint32_t, std::string>>
 	FindByName(const std::string& needle) const;
-	// Code canonique d'une variante d'illustration. QUERY_OVERLAY_CARD rend le
-	// code physique des materiaux (card.cpp:180), sans passer par get_code() :
-	// sans cette resolution, deux Xyz aux materiaux d'illustration differente
-	// paraissent porter des cartes differentes.
+	// Canonical code of an artwork variant. QUERY_OVERLAY_CARD returns the
+	// physical code of the materials (card.cpp:180) without going through
+	// get_code(): without this resolution, two Xyz carrying different artworks
+	// look like they carry different cards.
 	uint32_t Canonical(uint32_t code) const;
 	size_t Size() const { return cards.size(); }
 	const std::vector<std::string>& Sources() const { return sources; }
 
-	// Codes que le core a demandes et que la base ne connait pas. C'est le
-	// JUMEAU BASE DE DONNEES du decalage de jeux de scripts, et il est plus
-	// silencieux que lui : le core donne a la carte inconnue un corps vanille
-	// sans effet (duel.cpp), le deck se charge, le duel demarre, la ligne
-	// diverge — et il n'existait aucun equivalent de ScriptProvider::Misses()
-	// pour le signaler (4.6). Le mutex protege les appels concurrents du
-	// lecteur de cartes depuis les workers.
+	// Codes the core asked for that the database does not know. This is the
+	// DATABASE TWIN of a script-set mismatch, and it is quieter still: the core
+	// gives the unknown card a vanilla body with no effect (duel.cpp), the deck
+	// loads, the duel starts, the line diverges, and there is no equivalent of
+	// ScriptProvider::Misses() to report it. The mutex guards concurrent calls
+	// from the card reader in the workers.
 	void NoteUnknown(uint32_t code) const;
 	std::vector<uint32_t> UnknownCodes() const;
 
@@ -74,9 +72,9 @@ private:
 	bool LoadFile(const std::string& path);
 	std::unordered_map<uint32_t, CardRow> cards;
 	std::unordered_map<uint32_t, std::string> names;
-	// Premiere ligne du texte, par code. Chargee en meme temps que les noms.
+	// First line of the card text, by code. Loaded along with the names.
 	std::unordered_map<uint32_t, std::string> material_lines;
-	// Nom exact -> code canonique, construit apres chargement.
+	// Exact name -> canonical code, built after loading.
 	std::unordered_map<std::string, uint32_t> by_name;
 	std::vector<std::string> sources;
 	mutable std::mutex unknown_mx;
@@ -85,23 +83,23 @@ private:
 
 class ScriptProvider {
 public:
-	// `override_roots` remplace les depots vivants de l'installation. A utiliser
-	// avec un export du depot date de l'epoque du replay : un jeu de scripts
-	// decale fait diverger le rejeu en silence (docs/combo-solver-design.md 6bis).
+	// `override_roots` replaces the installation's live repositories. Use an
+	// export of the repository contemporary with the replay: a mismatched script
+	// set makes the replay diverge silently.
 	void Init(const std::string& workdir,
 			  const std::vector<std::string>& override_roots);
 
-	// Renvoie le contenu du script, BOM retire. Vide si introuvable.
-	// Appelable depuis plusieurs threads : le provider est partage entre les
-	// workers, seul le journal des manquants est mutable.
+	// Returns the script contents with the BOM stripped. Empty when not found.
+	// Callable from several threads: the provider is shared between workers, and
+	// only the miss log is mutable.
 	//
-	// CACHE MEMOIRE (s24, chantier perf). Un script charge APRES le Push
-	// racine d'une arene est ANNULE par chaque Restore : le core le redemande
-	// au tirage suivant, et chaque redemande etait une passe de repertoires +
-	// fopen/fread. Le contenu d'un script est IMMUABLE pendant un run (les
-	// depots ne bougent pas sous nos pieds) : premiere lecture au disque,
-	// toutes les suivantes en memoire. La recompilation Lua, elle, reste —
-	// seule l'E/S disparait. `CacheHits()` est la vie du mecanisme.
+	// IN-MEMORY CACHE. A script loaded AFTER an arena's root Push is undone by
+	// every Restore: the core asks for it again on the next rollout, and each
+	// request used to cost a directory sweep plus fopen/fread. Script contents
+	// are IMMUTABLE for the duration of a run (repositories do not move under our
+	// feet), so the first read comes from disk and every later one from memory.
+	// Lua recompilation still happens; only the I/O disappears. `CacheHits()` is
+	// the liveness counter of the mechanism.
 	std::vector<char> Read(const std::string& name);
 	uint64_t CacheHits() const {
 		std::lock_guard<std::mutex> lock(misses_mutex);
@@ -117,11 +115,11 @@ public:
 		std::lock_guard<std::mutex> lock(misses_mutex);
 		return misses;
 	}
-	// Fichiers PRESENTS que la lecture n'a pas rendus (E/S courte, taille nulle).
-	// Distincts des manquants : une lecture courte se deguisait en « absent » et
-	// faisait charger le MEME script depuis un depot de rang inferieur, donc une
-	// autre version — le decalage de jeux de scripts fabrique a partir d'une
-	// erreur d'E/S, et invisible parce qu'il n'atteignait jamais `misses` (4.7).
+	// Files that are PRESENT but that the read did not return (short I/O, zero
+	// size). Distinct from misses: a short read used to pass for "absent" and
+	// made the loader take the SAME script from a lower-ranked repository, hence
+	// another version. That is a script-set mismatch manufactured out of an I/O
+	// error, and invisible because it never reached `misses`.
 	std::unordered_set<std::string> Unreadable() const {
 		std::lock_guard<std::mutex> lock(misses_mutex);
 		return unreadable;
@@ -133,9 +131,9 @@ private:
 	mutable std::mutex misses_mutex;
 	std::unordered_set<std::string> misses;
 	std::unordered_set<std::string> unreadable;
-	// Cache memoire des scripts lus (s24) — cle : nom normalise. Les echecs
-	// ne sont PAS caches : ils sont rares, deja journalises (misses), et un
-	// cache negatif masquerait une erreur d'E/S transitoire.
+	// In-memory cache of scripts already read; key: normalised name. Failures are
+	// NOT cached: they are rare, already logged (misses), and a negative cache
+	// would hide a transient I/O error.
 	std::unordered_map<std::string, std::vector<char>> cache;
 	uint64_t cache_hits = 0;
 };

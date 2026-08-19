@@ -1,39 +1,39 @@
-# Lunalight v2 — temoin = _LastReplay.yrpX (le hand test joue par le joueur),
-# Silver Hound musele.
+# Lunalight v2: template = _LastReplay.yrpX (the hand test the player played),
+# Silver Hound muzzled.
 #
-# La ligne enregistree pose UN Liger Dancer (+ Black Sheep, Kaleido Chick et
-# trois Sorts) : les six --board-remove vident cette capture, les --board-add
-# ecrivent l'objectif vise. Ce qu'on garde du temoin, c'est son PLAN — le
-# repertoire de coups Lunalight que la politique NRPA prend en biais, et qui
-# manquait a tous les runs precedents.
+# The recorded line places ONE Liger Dancer (+ Black Sheep, Kaleido Chick and
+# three spells): the six --board-remove entries empty that capture and the
+# --board-add ones write the objective. What is kept from the template is its
+# PLAN, i.e. the repertoire of Lunalight moves the NRPA policy takes as a bias,
+# and which every earlier run lacked.
 #
-# Pourquoi _LastReplay comme temoin : il ne sert que de GABARIT de duel
-# (en-tete + deck adverse). Contrairement au replay synchron, il vient du meme
-# contexte que la question posee. Et comme sa ligne ne franchit pas le
-# changement de tour, AUCUN board cible n'y est capture (empreinte 0000...) :
-# les --board-add construisent donc la cible a partir de RIEN, sans avoir a
-# effacer huit cartes etrangeres au prealable.
+# Why _LastReplay as the template: it only serves as a duel TEMPLATE (header +
+# opponent deck). Unlike the synchron replay it comes from the same context as
+# the question asked. And since its line does not cross the turn change, NO
+# target board is captured there (fingerprint 0000...): the --board-add entries
+# therefore build the target from NOTHING, with no need to erase eight foreign
+# cards first.
 #
-# --no-chain plutot que --guard : --guard verifie qu'un contre est DISPONIBLE a
-# chaque fenetre adverse, ce n'est pas la demande. Ce qu'il faut ici, c'est
-# interdire au joueur de CHAINER Silver Hound — dont l'effet negate
-# l'activation d'un Sort/Piege sur le terrain, y compris les notres.
+# --no-chain rather than --guard: --guard checks that a counter is AVAILABLE at
+# every opponent window, which is not the request. What is needed here is to
+# forbid the player from CHAINING Silver Hound, whose effect negates the
+# activation of a spell/trap on the field, ours included.
 #
-# NB scripts : --scriptdir desactive le scan automatique de repositories/, il
-# faut donc les redonner. Meme ainsi, Lunalight Scarlet Tiger reste inutilisable
-# — son script pre-release appelle Effect:IsCardSetcode(), API absente de
-# l'ocgcore epingle (462 erreurs de core mesurees). Ses 3 exemplaires sont
-# inertes tant que le core n'est pas remonte.
+# Script note: --scriptdir disables the automatic scan of repositories/, so they
+# must be given back. Even then, Lunalight Scarlet Tiger stays unusable: its
+# pre-release script calls Effect:IsCardSetcode(), an API absent from the pinned
+# ocgcore (462 core errors measured). Its 3 copies are inert until the core is
+# moved up.
 param([int]$Ms = 900000, [string]$Seed = '888', [string]$Out = 's7_luna_v3')
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 $repo = "D:\ProjectIgnis\repositories"
-# Scarlet Tiger : rendue FONCTIONNELLE par deps/compat_2026-08/utility.lua, qui
-# definit la seule methode manquante (Effect.IsCardSetcode). Sans elle la carte
-# errait 462 fois par rejeu, donc restait inerte, donc toute ligne de combo qui
-# l'emploie etait invisible a la recherche. Apres correctif : 0 MSG_RETRY ET
-# 0 erreur de core -- les deux a la fois, ce qu'aucune autre configuration ne
-# donnait. Doit rester EN TETE : c'est un remplacement de utility.lua.
+# Scarlet Tiger: made FUNCTIONAL by deps/compat_2026-08/utility.lua, which
+# defines the one missing method (Effect.IsCardSetcode). Without it the card
+# errored 462 times per replay, hence stayed inert, hence any combo line using
+# it was invisible to the search. After the fix: 0 MSG_RETRY AND 0 core errors,
+# both at once, which no other configuration gave. Must stay FIRST: it is a
+# replacement of utility.lua.
 & .\bin\Release\combosolver.exe "D:\ProjectIgnis\replay\_LastReplay.yrpX" `
     --scriptdir "D:\ProjectIgnis\replay2video\deps\compat_2026-08" `
     --scriptdir ..\deps\scripts_2026-04-13\script `

@@ -1,37 +1,34 @@
-// LA TABLE D'OPERATEURS DECLARES — lire les cartes au lieu de les observer.
+// THE DECLARED OPERATOR TABLE: reading the cards instead of observing them.
 //
-// LE FAIT QUI JUSTIFIE CE MODULE (session 19, chantier 0). Sur les 24 cartes du
-// deck de l'etalon A, exactement DEUX accordent un etat qui debloque quoi que ce
-// soit : `EFFECT_ADD_CODE` (Kaleido Chick) et `EFFECT_EXTRA_FUSION_MATERIAL`
-// (Masquerade). Ce sont EXACTEMENT les deux goulots mesures (0,14 % et 0 %,
-// 9.27 (c)). Ils se trouvent par un `grep` sur deux constantes du jeu, sans
-// nommer une seule carte.
+// THE FACT THAT JUSTIFIES THIS MODULE. Of the 24 cards in benchmark A's deck,
+// exactly TWO grant a state that unlocks anything at all: `EFFECT_ADD_CODE`
+// (Kaleido Chick) and `EFFECT_EXTRA_FUSION_MATERIAL` (Masquerade). Those are
+// EXACTLY the two measured bottlenecks (0.14 % and 0 %). They are found by a
+// `grep` over two of the game's constants, without naming a single card.
 //
-// Et le recensement des `CATEGORY_*` NE LES AURAIT PAS TROUVES : il rend
-// `CATEGORY_FUSION_SUMMON` une fois (Wolf) et pas un mot des deux pivots. Il
-// faut DEUX VOCABULAIRES, et le dossier n'en lisait aucun :
+// And a census of the `CATEGORY_*` values WOULD NOT HAVE FOUND THEM: it returns
+// `CATEGORY_FUSION_SUMMON` once (Wolf) and not a word about the two pivots. TWO
+// VOCABULARIES are needed:
 //
-//   CATEGORY_*  decrit ce que l'effet fait aux CARTES  (envoyer, chercher)
-//   EFFECT_*    decrit quel ETAT il accorde            (renommer, autoriser un
-//                                                       materiau du cimetiere)
+//   CATEGORY_*  describes what the effect does to CARDS  (send, search)
+//   EFFECT_*    describes which STATE it grants          (rename, allow a
+//                                                        material from the grave)
 //
-// Le combo repose entierement sur le second. C'EST L'ERREUR DU GRAPHE DE
-// RECETTES : il modelise des PRODUITS, jamais des ETATS ACCORDES. `--backward`
-// etait le bon algorithme sur un graphe ampute de ses aretes (9.24 (e)) ; les
-// aretes manquantes sont les effets, et elles sont DECLAREES.
+// The combo rests entirely on the second one. THAT IS THE RECIPE GRAPH'S
+// MISTAKE: it models PRODUCTS, never GRANTED STATES. `--backward` was the right
+// algorithm on a graph with its edges amputated; the missing edges are the
+// effects, and they are DECLARED.
 //
-// CE QUE CE MODULE EST, ET CE QU'IL N'EST PAS. C'est une ANALYSE STATIQUE du
-// Lua : elle lit la DECLARATION, pas la semantique. Conditions et couts sont des
-// fermetures ; leur `chk == 0` n'est pas evalue ici. La table est donc
-// OPTIMISTE — elle dit ce qu'une carte declare pouvoir faire, jamais ce qu'elle
-// peut faire A CET INSTANT. C'est assez pour un harnais de validation et pour
-// alimenter un graphe ; ce n'est pas assez pour decider de la legalite, et le
-// core reste seul juge de cela.
+// WHAT THIS MODULE IS, AND WHAT IT IS NOT. It is a STATIC ANALYSIS of the Lua:
+// it reads the DECLARATION, not the semantics. Conditions and costs are
+// closures; their `chk == 0` is not evaluated here. So the table is OPTIMISTIC:
+// it says what a card declares it can do, never what it can do AT THIS INSTANT.
+// That is enough for a validation harness and to feed a graph; it is not enough
+// to decide legality, and the core remains the sole judge of that.
 //
-// AUCUNE CARTE N'EST NOMMEE ICI. Les constantes viennent du `constant.lua` du
-// jeu lui-meme, servi par le MEME ScriptProvider que le core : un decalage de
-// jeu de scripts decale donc AUSSI la table, au lieu de la faire mentir en
-// silence.
+// NO CARD IS NAMED HERE. The constants come from the game's own `constant.lua`,
+// served by the SAME ScriptProvider as the core: a script-set mismatch
+// therefore shifts the table TOO, instead of making it lie silently.
 #pragma once
 
 #include <cstdint>
@@ -44,45 +41,44 @@
 
 namespace solver {
 
-// --- LES CONSTANTES DU JEU, LUES DANS LE JEU ---------------------------------
+// --- THE GAME'S CONSTANTS, READ FROM THE GAME --------------------------------
 //
-// `constant.lua` et `archetype_setcode_constants.lua` sont des fichiers du jeu,
-// resolus par --scriptdir comme n'importe quel script de carte. Les y lire
-// plutot que de les recopier ici a une consequence qui n'est pas cosmetique :
-// une constante qui change de valeur entre deux versions de scripts change de
-// valeur dans la table, et une constante ABSENTE fait echouer l'evaluation au
-// lieu de rendre zero.
+// `constant.lua` and `archetype_setcode_constants.lua` are game files, resolved
+// by --scriptdir like any card script. Reading them there rather than copying
+// them here has a consequence that is not cosmetic: a constant whose value
+// changes between two script versions changes value in the table, and a MISSING
+// constant makes evaluation fail instead of returning zero.
 class ConstantTable {
 public:
-	// Rend le nombre de constantes chargees. Les fichiers absents ne sont pas
-	// une erreur (un scriptdir minimal peut ne pas les porter) : c'est
-	// `Size() == 0` qui doit alerter l'appelant.
+	// Returns the number of constants loaded. Missing files are not an error (a
+	// minimal scriptdir may not carry them): it is `Size() == 0` that must alert
+	// the caller.
 	size_t Load(ScriptProvider& sp);
 
 	bool Lookup(const std::string& name, uint64_t& out) const;
 
-	// Evalue une expression de constantes telle qu'elle apparait dans les
-	// scripts : `A`, `A+B`, `A|B`, `0x40`, `113`. Rend FAUX si un jeton est
-	// inconnu — on ne devine JAMAIS la valeur d'une constante absente, sous
-	// peine de fabriquer un operateur qui n'existe pas.
+	// Evaluates a constant expression as it appears in the scripts: `A`, `A+B`,
+	// `A|B`, `0x40`, `113`. Returns FALSE when a token is unknown; we NEVER guess
+	// the value of a missing constant, on pain of manufacturing an operator that
+	// does not exist.
 	bool Eval(const std::string& expr, uint64_t& out) const;
 
-	// Nom de la constante de cette famille qui porte exactement cette valeur
-	// (chaine vide si aucune). Pour l'IMPRESSION seulement : un masque compose
-	// se decompose par ci-dessous.
+	// Name of the constant in this family that carries exactly this value (empty
+	// string when there is none). For PRINTING only: a composite mask is
+	// decomposed by the function below.
 	std::string NameOf(const std::string& prefix, uint64_t value) const;
-	// Decompose un masque en noms de bits de la famille. « LOCATION_MZONE|
-	// LOCATION_SZONE » plutot que « 0xc ».
+	// Decomposes a mask into the bit names of the family: "LOCATION_MZONE|
+	// LOCATION_SZONE" rather than "0xc".
 	std::string MaskNames(const std::string& prefix, uint64_t value) const;
 
-	// VALEUR D'UNE CHAINE DE CARTE, telle que `Auxiliary.Stringid` la fabrique.
+	// VALUE OF A CARD STRING, as `Auxiliary.Stringid` builds it.
 	//
-	// LE DECALAGE EST LU DANS `utility.lua`, PAS SUPPOSE. Le dossier portait
-	// « aux.Stringid(id, n) = id * 16 + n » (9.27 (b), et c'est sur cette
-	// convention que repose la recuperation du code d'un `MSG_SELECT_YESNO`),
-	// alors que les scripts contemporains font `(n & 0xfffff) | code << 20`.
-	// Un harnais qui suppose la convention rend « 0 appariee sur 37 » et se lit
-	// comme un echec d'EXTRACTION alors que c'est un echec d'HYPOTHESE.
+	// THE SHIFT IS READ FROM `utility.lua`, NOT ASSUMED. The convention is not
+	// "aux.Stringid(id, n) = id * 16 + n" (which is what the recovery of the code
+	// of a `MSG_SELECT_YESNO` used to rest on); contemporary scripts do
+	// `(n & 0xfffff) | code << 20`. A harness that assumes the old convention
+	// returns "0 matched out of 37" and reads like an EXTRACTION failure when it is
+	// a failure of the HYPOTHESIS.
 	uint64_t StringId(uint32_t code, uint32_t index) const;
 	uint32_t StringShift() const { return string_shift; }
 	bool StringShiftRead() const { return string_shift_read; }
@@ -101,233 +97,231 @@ private:
 	bool string_shift_read = false;
 };
 
-// --- UN EFFET DECLARE --------------------------------------------------------
+// --- ONE DECLARED EFFECT -----------------------------------------------------
 //
-// La forme est reguliere sur l'ensemble des scripts (9.27 (a)) : un
-// `Effect.CreateEffect`, une suite de `SetXxx`, un `RegisterEffect`. C'est cette
-// regularite — et non une table par carte — qui rend l'extraction generique.
+// The shape is regular across all the scripts: an `Effect.CreateEffect`, a run
+// of `SetXxx`, a `RegisterEffect`. It is that regularity, and not a per-card
+// table, that makes the extraction generic.
 struct DeclaredEffect {
-	std::string var;          // e1, e2... (identifiant local, pour le rapport)
-	std::string in_function;  // la fonction qui le cree ("initial_effect", ...)
+	std::string var;          // e1, e2... (local identifier, for the report)
+	std::string in_function;  // the function that creates it ("initial_effect", ...)
 	int line = 0;
 	bool registered = false;  // c:RegisterEffect / Duel.RegisterEffect
-	// Declare dans `initial_effect` : c'est un OPERATEUR, quelque chose que le
-	// joueur peut employer. Declare ailleurs (dans une operation, un cout) :
-	// c'est un ETAT ACCORDE, le resultat d'un operateur.
+	// Declared in `initial_effect`: this is an OPERATOR, something the player can
+	// employ. Declared elsewhere (in an operation, in a cost): this is a GRANTED
+	// STATE, the result of an operator.
 	bool at_init = false;
 
-	uint64_t etype = 0;       // EFFECT_TYPE_* (masque)
-	uint64_t range = 0;       // LOCATION_* ou l'effet est UTILISABLE (SetRange)
+	uint64_t etype = 0;       // EFFECT_TYPE_* (mask)
+	uint64_t range = 0;       // LOCATION_* where the effect is USABLE (SetRange)
 	uint64_t property = 0;    // EFFECT_FLAG_*
 	uint64_t target_range_self = 0, target_range_opp = 0;
 
-	// `SetCode` porte DEUX choses selon le type de l'effet, et c'est exactement
-	// la distinction des deux vocabulaires : un declencheur y met un `EVENT_*`
-	// (quand), un effet continu y met un `EFFECT_*` (quel etat il accorde). On
-	// ne les separe pas par semantique mais par le PREFIXE du jeton — c'est
-	// exact, et cela ne suppose rien.
+	// `SetCode` carries TWO things depending on the effect's type, and that is
+	// exactly the distinction between the two vocabularies: a trigger puts an
+	// `EVENT_*` there (when), a continuous effect puts an `EFFECT_*` there (which
+	// state it grants). We separate them not by semantics but by the token's
+	// PREFIX, which is exact and assumes nothing.
 	std::string code_name;
 	uint64_t code_value = 0;
 	bool code_is_event = false;
 	bool code_is_effect = false;
 
-	uint64_t category = 0;    // CATEGORY_* (masque)
+	uint64_t category = 0;    // CATEGORY_* (mask)
 
-	// Description : `aux.Stringid(id, n)` = id * 16 + n, convention universelle
-	// des scripts. C'EST L'IDENTITE DU PROMPT — la meme paire (code, desc) que
-	// les messages du core transportent, donc la cle d'appariement du harnais.
+	// Description: `aux.Stringid(id, n)`, the universal convention of the scripts.
+	// THIS IS THE PROMPT'S IDENTITY: the same (code, desc) pair the core's messages
+	// carry, hence the harness's matching key.
 	bool has_desc = false;
-	uint32_t desc_card = 0;   // `id` (0 si la description n'est pas un Stringid)
+	uint32_t desc_card = 0;   // `id` (0 when the description is not a Stringid)
 	uint32_t desc_index = 0;  // `n`
-	uint64_t desc_value = 0;  // la valeur complete, telle que le message la porte
-	bool desc_is_system = false;   // description numerique (chaine du systeme)
+	uint64_t desc_value = 0;  // the full value, as the message carries it
+	bool desc_is_system = false;   // numeric description (system string)
 
-	// Ressource declaree. `SetCountLimit(1)` = une fois par tour et PAR COPIE ;
-	// `SetCountLimit(1, id)` = une fois par tour et par NOM. La presence du
-	// second argument fait toute la difference, et elle est declaree.
+	// Declared resource. `SetCountLimit(1)` = once per turn and PER COPY;
+	// `SetCountLimit(1, id)` = once per turn and per NAME. The presence of the
+	// second argument makes all the difference, and it is declared.
 	bool has_count_limit = false;
 	uint32_t count_limit = 0;
 	bool count_by_name = false;
 	std::string count_tag;
 
-	// Fonctions branchees. Leur seule PRESENCE est deja une precondition : un
-	// effet avec `SetCost` a un cout a payer, un effet avec `SetCondition` a une
-	// garde. Ce que ces fermetures testent n'est pas lisible statiquement.
+	// Wired functions. Their mere PRESENCE is already a precondition: an effect
+	// with `SetCost` has a cost to pay, an effect with `SetCondition` has a guard.
+	// What those closures test is not statically readable.
 	std::string fn_cost, fn_condition, fn_target, fn_operation, fn_value;
-	// Non vide quand l'operateur n'est PAS declare dans le script de la carte
-	// mais par une PROCEDURE du jeu (`Pendulum.AddProcedure`,
-	// `Fusion.AddProcSpell`...). Sans cette lecture, la pose d'une echelle
-	// Pendule et l'activation d'une Polymerisation n'ont AUCUN operateur
-	// declare, et le harnais les compte en echec pour une raison qui n'a rien
-	// a voir avec l'extraction.
+	// Non-empty when the operator is NOT declared in the card's script but by a
+	// game PROCEDURE (`Pendulum.AddProcedure`, `Fusion.AddProcSpell`...). Without
+	// reading those, setting a Pendulum scale and activating a Polymerization have
+	// NO declared operator, and the harness counts them as failures for a reason
+	// that has nothing to do with extraction.
 	std::string from_proc;
 };
 
-// Ce qu'un operateur PRODUIT, tel que le script le declare au core par
+// What an operator PRODUCES, as the script declares it to the core through
 // `Duel.SetOperationInfo(chain, CATEGORY_x, targets, count, player, LOCATION_y)`.
-// C'est la seule declaration de PRODUIT que les scripts portent, et elle donne
-// la paire (categorie, zone) que le graphe de recettes n'a jamais eue.
+// It is the only PRODUCT declaration the scripts carry, and it gives the
+// (category, zone) pair the recipe graph never had.
 struct DeclaredProduct {
 	uint64_t category = 0;
 	std::string category_name;
 	uint64_t location = 0;
 	std::string location_name;
-	std::string in_function;   // la fonction qui la declare
-	bool possible = false;     // SetPossibleOperationInfo : produit EVENTUEL
+	std::string in_function;   // the function that declares it
+	bool possible = false;     // SetPossibleOperationInfo: POSSIBLE product
 };
 
-// Une procedure d'invocation declaree (`Fusion.AddProcMixN`, `Xyz.AddProcedure`,
-// ...). C'EST LA RECETTE, en forme machine, et elle est superieure a l'amorce
-// par le TEXTE de la carte a deux titres : elle porte les codes et non des noms
-// a re-resoudre, et elle ne se trompe jamais de langue.
+// A declared summon procedure (`Fusion.AddProcMixN`, `Xyz.AddProcedure`, ...).
+// THIS IS THE RECIPE, in machine form, and it beats seeding from the card TEXT
+// on two counts: it carries codes rather than names to re-resolve, and it never
+// gets the language wrong.
 struct DeclaredRecipe {
 	std::string proc;                                    // "Fusion.AddProcMixN"
-	std::vector<std::pair<uint32_t, uint32_t>> named;     // (code, compte)
-	std::vector<std::pair<uint64_t, uint32_t>> setcode;   // (setcode, compte)
-	std::vector<uint32_t> unresolved_counts;             // cardinal non nomme
+	std::vector<std::pair<uint32_t, uint32_t>> named;     // (code, count)
+	std::vector<std::pair<uint64_t, uint32_t>> setcode;   // (setcode, count)
+	std::vector<uint32_t> unresolved_counts;             // unnamed cardinal
 	bool must_be_fusion_summoned = false;
 	int line = 0;
 };
 
-// UNE CHAINE DECLAREE, et c'est elle qui porte l'identite des prompts.
+// A DECLARED STRING, and it is what carries the identity of the prompts.
 //
-// LE POINT QUI A FAILLI MANQUER AU HARNAIS. La decision qui ouvre l'acces au
-// cimetiere (9.27 (b)) est un `Duel.SelectYesNo(tp, aux.Stringid(id, 2))` : sa
-// description n'est PAS un `SetDescription` d'effet, c'est un Stringid pose en
-// ligne dans le corps d'une operation. Un harnais qui n'indexerait que les
-// `SetDescription` declarerait le PIVOT DU COMBO « non apparie » — c'est-a-dire
-// qu'il rendrait un faux negatif sur la seule decision qui compte.
+// THE POINT THE HARNESS ALMOST MISSED. The decision that opens access to the
+// graveyard is a `Duel.SelectYesNo(tp, aux.Stringid(id, 2))`: its description is
+// NOT an effect's `SetDescription`, it is a Stringid written inline in the body
+// of an operation. A harness indexing only `SetDescription` would declare the
+// COMBO'S PIVOT "unmatched", i.e. it would return a false negative on the only
+// decision that matters.
 //
-// On indexe donc TOUT `aux.Stringid(id, n)` du script, avec l'endroit ou il
-// apparait. `site` dit lequel : un prompt d'activation (SetDescription) n'a pas
-// les memes preconditions verifiables qu'un prompt pose en cours de resolution.
+// So we index EVERY `aux.Stringid(id, n)` of the script, along with where it
+// appears. `site` says which: an activation prompt (SetDescription) does not
+// have the same checkable preconditions as a prompt raised mid-resolution.
 struct DeclaredString {
-	uint64_t value = 0;        // id * 16 + n, tel que le message le transporte
+	uint64_t value = 0;        // id * 16 + n, as the message carries it
 	uint32_t card = 0;
 	uint32_t index = 0;
 	std::string in_function;
 	std::string site;          // "SetDescription", "Duel.SelectYesNo", ...
-	std::string effect_var;    // non vide si site == "SetDescription"
+	std::string effect_var;    // non-empty when site == "SetDescription"
 	int line = 0;
 };
 
 struct CardOperators {
 	uint32_t code = 0;
-	std::string script;          // nom du fichier resolu (c<code>.lua)
+	std::string script;          // resolved file name (c<code>.lua)
 	bool script_found = false;
-	std::vector<DeclaredEffect> operators;   // declares dans initial_effect
-	std::vector<DeclaredEffect> grants;      // crees en resolution : les ETATS
+	std::vector<DeclaredEffect> operators;   // declared in initial_effect
+	std::vector<DeclaredEffect> grants;      // created during resolution: the STATES
 	std::vector<DeclaredString> strings;
 	std::vector<DeclaredRecipe> recipes;
-	// Procedures du jeu appelees par `initial_effect` (`Pendulum.AddProcedure`,
-	// `Fusion.RegisterSummonEff`, ...). C'est la que vivent les operateurs que
-	// le script de la carte ne declare pas lui-meme.
+	// Game procedures called by `initial_effect` (`Pendulum.AddProcedure`,
+	// `Fusion.RegisterSummonEff`, ...). This is where the operators the card's own
+	// script does not declare live.
 	std::vector<std::string> proc_calls;
 	std::vector<DeclaredProduct> products;
 	std::vector<uint32_t> listed_names;      // s.listed_names
 	std::vector<uint64_t> listed_series;     // s.listed_series
-	// Zones que les fonctions de cet effet mentionnent, par fonction. C'est ce
-	// qui permet de dire « le cout de cet operateur touche DECK|EXTRA » sans
+	// Zones the functions of this effect mention, by function. It is what lets us
+	// say "this operator's cost touches DECK|EXTRA" without evaluating the closure.
 	// evaluer la fermeture.
 	std::unordered_map<std::string, uint64_t> fn_locations;
-	// Verbes `Duel.<Verb>` appeles par fonction — la CONSOMMATION declaree.
+	// `Duel.<Verb>` verbs called, by function: the declared CONSUMPTION.
 	std::unordered_map<std::string, std::vector<std::string>> fn_verbs;
-	// Archetypes et codes NOMMES par la fonction (`IsSetCard`, `IsCode`). Avec
-	// `fn_locations`, c'est ce qui donne une PLACE a une arete negative :
-	// « une Lunalight de l'EXTRA » au lieu de « quelque chose dans l'extra ».
-	// Sans eux la colonne negative du bilan (9.30) devrait etre inventee.
+	// Archetypes and codes NAMED by the function (`IsSetCard`, `IsCode`). Together
+	// with `fn_locations`, this is what gives a negative edge a PLACE: "a Lunalight
+	// from the EXTRA" instead of "something in the extra". Without them the
+	// negative column of the balance sheet would have to be invented.
 	std::unordered_map<std::string, std::vector<uint64_t>> fn_setcodes;
 	std::unordered_map<std::string, std::vector<uint32_t>> fn_codes;
-	// TYPES et RACES mentionnes par la fonction (`IsType(TYPE_SYNCHRO)`,
-	// `IsRace(RACE_DRAGON)`) — le vocabulaire des filtres qui ne nomment ni
-	// code ni archetype (s22). Sans lui, « invoque 1 Synchro Dragon » n'a
-	// aucun candidat lisible et la carte precise remise en jeu par un
-	// ranimeur est une place sans producteur (mesure : 22 etats h = INFINI
-	// au milieu de la ligne reelle de l'etalon B).
+	// TYPES and RACES mentioned by the function (`IsType(TYPE_SYNCHRO)`,
+	// `IsRace(RACE_DRAGON)`): the vocabulary of filters that name neither a code
+	// nor an archetype. Without it, "summon 1 Synchro Dragon" has no readable
+	// candidate and the precise card a reviver puts back in play is a place with no
+	// producer (measured: 22 states with h = INFINITE in the middle of benchmark
+	// B's real line).
 	std::unordered_map<std::string, uint64_t> fn_types;
 	std::unordered_map<std::string, uint64_t> fn_races;
-	// Fonctions locales appelees par une fonction. La contrainte ne vit presque
-	// jamais dans la fonction qui detruit : elle vit dans le FILTRE qu'elle
-	// passe a `SelectMatchingCard`. Un seul niveau suffit sur ce deck.
+	// Local functions called by a function. The constraint almost never lives in
+	// the function that destroys: it lives in the FILTER that function passes to
+	// `SelectMatchingCard`. One level is enough on this deck.
 	std::unordered_map<std::string, std::vector<std::string>> fn_refs;
 };
 
-// LOCATIONS SYMBOLIQUES. `SetRange(LOCATION_PZONE)` vaut 0x200, mais le message
-// du core porte la zone PHYSIQUE : une Zone Pendule est une sequence
-// particuliere de `LOCATION_SZONE` (0x8). Comparer les deux sans normaliser
-// rendrait « precondition VIOLEE » sur toutes les activations de Wolf — un faux
-// negatif du harnais, et exactement la meme confusion que celle qui rend
-// `--canonical-zones` dangereux (9.27 (e)).
+// SYMBOLIC LOCATIONS. `SetRange(LOCATION_PZONE)` is 0x200, but the core's
+// message carries the PHYSICAL zone: a Pendulum Zone is a particular sequence
+// of `LOCATION_SZONE` (0x8). Comparing the two without normalising would return
+// "precondition VIOLATED" on every Wolf activation, a false negative of the
+// harness, and exactly the same confusion that makes `--canonical-zones`
+// dangerous.
 //
-// La correspondance est celle du jeu, pas une heuristique : FZONE, PZONE et
-// STZONE sont des zones magie ; MMZONE et EMZONE sont des zones monstre.
+// The mapping is the game's, not a heuristic: FZONE, PZONE and STZONE are spell
+// zones; MMZONE and EMZONE are monster zones.
 uint64_t NormalizeRange(uint64_t range);
 
 class OperatorTable {
 public:
-	// `codes` : les cartes a lire (main + extra + tout code surveille). Rend le
-	// nombre de scripts effectivement lus.
+	// `codes`: the cards to read (hand + extra + every watched code). Returns the
+	// number of scripts actually read.
 	size_t Build(const CardDB& db, ScriptProvider& sp, const ConstantTable& kt,
 				 const std::vector<uint32_t>& codes);
 
 	const CardOperators* Find(uint32_t code) const;
 
-	// LA CHAINE QUI PORTE CETTE DESCRIPTION. C'est l'appariement du harnais : le
-	// message transporte (code, desc), et `desc = id * 16 + n` designe un et un
-	// seul `aux.Stringid(id, n)` du deck. Rend nul si aucun ne correspond.
+	// THE STRING THAT CARRIES THIS DESCRIPTION. This is the harness's matching: the
+	// message carries (code, desc), and `desc = id * 16 + n` designates one and only
+	// one `aux.Stringid(id, n)` of the deck. Returns null when none matches.
 	const DeclaredString* ByDesc(uint64_t desc) const;
-	// L'effet nomme par une chaine de site `SetDescription` (nul sinon).
+	// The effect named by a string whose site is `SetDescription` (null otherwise).
 	const DeclaredEffect* EffectOf(const DeclaredString& s) const;
-	// Repli quand la description n'est pas un Stringid (chaine systeme) : le
-	// seul operateur ACTIVABLE de cette carte qui n'a pas de description propre.
-	// Rend nul des qu'il y a ambiguite — on ne devine pas.
+	// Fallback when the description is not a Stringid (a system string): the only
+	// ACTIVABLE operator of this card that has no description of its own. Returns
+	// null as soon as there is ambiguity; we do not guess.
 	const DeclaredEffect* SoleUndescribed(uint32_t code, uint64_t act_mask) const;
-	// Masque EFFECT_TYPE_* des effets qu'un joueur peut EMPLOYER (les operateurs
-	// au sens strict). Compose depuis `constant.lua` : aucune valeur en dur.
+	// EFFECT_TYPE_* mask of the effects a player can EMPLOY (operators in the
+	// strict sense). Composed from `constant.lua`: no hard-coded value.
 	static uint64_t ActivatableMask(const ConstantTable& kt);
 
 	void Print(const CardDB& db, const ConstantTable& kt) const;
-	// Le recensement qui a designe le chantier : quelles cartes accordent un
-	// ETAT, et lequel. C'est la ligne qui rend les deux pivots.
+	// The census that picked out the work: which cards grant a STATE, and which
+	// one. This is the line that returns the two pivots.
 	void PrintGrants(const CardDB& db, const ConstantTable& kt) const;
 
-	// LA COLONNE NEGATIVE — ce qu'un operateur DETRUIT (session 20, chantier B).
+	// THE NEGATIVE COLUMN: what an operator DESTROYS.
 	//
-	// Le graphe savait dire ce qu'un operateur EXIGE ; il ne savait pas dire ce
-	// qu'il DETRUIT. La matiere etait extraite depuis la s19 (`fn_verbs`,
-	// `fn_locations`, `count_limit`) et lue par PERSONNE. Ce rapport la lit.
+	// The graph could say what an operator REQUIRES; it could not say what it
+	// DESTROYS. The material was already extracted (`fn_verbs`, `fn_locations`,
+	// `count_limit`) and read by NOBODY. This report reads it.
 	//
-	// CE N'EST PAS UNE AMELIORATION, C'EST UNE CONDITION DE CORRECTION :
-	// 9.28 (h) a mesure que DOUZE aretes d'acquisition sur treize decrivaient
-	// des routes qui DETRUISENT le but, et le critere qui les a retirees etait
-	// un pis-aller. Le vrai critere est la consommation, et il se calcule.
+	// IT IS NOT AN IMPROVEMENT, IT IS A CORRECTNESS CONDITION: TWELVE acquisition
+	// edges out of thirteen described routes that DESTROY the goal, and the
+	// criterion that removed them was a stopgap. The real criterion is consumption,
+	// and it can be computed.
 	//
-	// `goal_zone` est la zone dont on veut le bilan (LOCATION_EXTRA pour un but
-	// en monstres d'extra deck) : la synthese finale n'y garde que les aretes
-	// qui consomment DANS cette zone — c'est la ligne `A_p` de l'equation de
-	// bilan, celle dont la faisabilite decide qu'un tirage est mort.
+	// `goal_zone` is the zone whose balance we want (LOCATION_EXTRA for a goal in
+	// extra deck monsters): the final synthesis only keeps the edges that consume
+	// IN that zone. That is the `A_p` line of the balance equation, the one whose
+	// feasibility decides that a rollout is dead.
 	void PrintConsumption(const CardDB& db, const ConstantTable& kt,
 						  uint64_t goal_zone) const;
 
-	// MARCHE 1 — LES COMPTES DE TIR, CONFRONTES AUX CAPACITES.
+	// STEP 1: FIRING COUNTS, CONFRONTED WITH CAPACITIES.
 	//
-	// L'equation de bilan rend trois choses ; la troisieme seulement est une
-	// heuristique. Les deux premieres sont ici : le vecteur `x` (quel operateur,
-	// et COMBIEN DE FOIS) et la FAISABILITE (`x_o <= cap_o` ?). Un but a trois
-	// exemplaires identiques ne demande pas « la recette de Liger » : il demande
-	// que l'invocation tire TROIS FOIS, et que chaque exigence soit servie trois
-	// fois. C'est la multiplicite que `RecipeDistance` n'a jamais portee
-	// (« 2 "Nom" » y est pose comme deux exigences d'une copie) et que le biais
-	// d'operateur ne sait pas designer — il ne nomme qu'UNE carte.
+	// The balance equation returns three things; only the third is a heuristic. The
+	// first two are here: the vector `x` (which operator, and HOW MANY TIMES) and
+	// FEASIBILITY (`x_o <= cap_o`?). A goal with three identical copies does not ask
+	// for "Liger's recipe": it asks that the summon fire THREE TIMES, and that each
+	// requirement be served three times. That is the multiplicity `RecipeDistance`
+	// never carried (2 "Name" is posed there as two requirements of one copy) and
+	// that the operator bias cannot designate, since it only names ONE card.
 	//
-	// PORTEE, DITE D'AVANCE. C'est une expansion ET, par la recette DECLAREE :
-	// exacte quand la recette est unique (le cas de Liger), et seulement
-	// NECESSAIRE quand plusieurs voies existent — on ne choisit pas a la place
-	// du jeu, on developpe la voie declaree et on dit qu'on l'a fait. Ni l'ordre
-	// ni la legalite n'y entrent : les conditions sont des fermetures.
+	// SCOPE, STATED UP FRONT. This is an AND expansion, through the DECLARED
+	// recipe: exact when the recipe is unique (Liger's case), and only NECESSARY
+	// when several routes exist. We do not choose in the game's stead: we expand
+	// the declared route and say so. Neither ordering nor legality enters into it,
+	// since conditions are closures.
 	//
-	// `deck` porte les codes AVEC leurs doublons (c'est le nombre de copies qui
-	// decide d'une capacite « par COPIE ») ; `goal` est (code, exemplaires).
+	// `deck` carries the codes WITH their duplicates (the number of copies is what
+	// decides a "per COPY" capacity); `goal` is (code, copies).
 	void PrintFiringCounts(
 		const CardDB& db, const ConstantTable& kt,
 		const std::vector<uint32_t>& deck,
@@ -343,27 +337,27 @@ public:
 
 private:
 	std::unordered_map<uint32_t, CardOperators> cards;
-	// desc complete -> (code de carte, index dans `strings`)
+	// full desc -> (card code, index into `strings`)
 	std::unordered_map<uint64_t, std::pair<uint32_t, size_t>> by_desc;
 	size_t missing = 0;
 };
 
-// --- LE PROGRAMME D'OPERATEURS (9.30) ---------------------------------------
+// --- THE OPERATOR PROGRAM ----------------------------------------------------
 //
-//     h(s) = min c'x   s.c.  A'x >= M_G - M_s ,  0 <= x <= u
+//     h(s) = min c'x   s.t.  A'x >= M_G - M_s ,  0 <= x <= u
 //
-// Quatre proprietes DEMONTREES en 9.30 : admissibilite (th. 1), consistance —
-// donc gradient — (th. 2), impasses prouvees par infaisabilite (th. 3), et
-// resserrement libre par toute contrainte que tout plan satisfait (th. 4).
+// Four properties are proved in the design notes: admissibility (th. 1),
+// consistency and hence a gradient (th. 2), dead ends proved by infeasibility
+// (th. 3), and free tightening by any constraint every plan satisfies (th. 4).
 //
-// Aucune des quatre ne vaut si le SOLVEUR ment. C'est le seul point non
-// demontrable du chantier, et il est traite comme tel : `LPResult` porte ses
-// propres gardes, verifiees a chaque appel, et le module s'auto-teste sur des
-// instances a solution connue avant de servir.
+// None of the four holds if the SOLVER lies. That is the only non-provable
+// point, and it is treated as such: `LPResult` carries its own guards, checked
+// on every call, and the module self-tests on instances with known solutions
+// before it serves.
 struct OperatorLP {
 	size_t n_ops = 0;
 	std::vector<double> cost;    // c
-	std::vector<double> upper;   // u ; kNoBound = sans borne
+	std::vector<double> upper;   // u; kNoBound = unbounded
 	struct Row {                 // sum coef.x >= rhs
 		std::vector<std::pair<size_t, double>> coef;
 		double rhs = 0.0;
@@ -377,38 +371,37 @@ struct LPResult {
 	bool feasible = false;
 	double value = 0.0;
 	std::vector<double> x;
-	// GARDES. `primal_ok` verifie A'x >= b et 0 <= x <= u sur la solution
-	// rendue ; `optimal_ok` verifie que plus aucun cout reduit n'est negatif.
-	// Un `false` ici invalide la mesure AVANT qu'elle serve, au lieu de la
-	// laisser passer pour une heuristique « un peu optimiste ».
+	// GUARDS. `primal_ok` checks A'x >= b and 0 <= x <= u on the returned
+	// solution; `optimal_ok` checks that no reduced cost is negative any more. A
+	// `false` here invalidates the measurement BEFORE it is used, instead of
+	// letting it pass for a "slightly optimistic" heuristic.
 	bool primal_ok = false;
 	bool optimal_ok = false;
 	double worst_violation = 0.0;
-	// LES DUAUX (s22, chantier 2). Ils sont deja dans le tableau final — les
-	// exposer ne coute rien, et ils remplacent des CHOIX faits a la main :
-	//   row_dual[i]  : valeur marginale de la contrainte i (>= 0 a l'optimum) ;
-	//   bound_dual[j]: valeur d'une unite de capacite EN PLUS sur l'operateur j
-	//                  (> 0 <=> la borne u_j LIE le plan — son hote est un hote
-	//                  a quota CALCULE, pas selectionne).
-	// Convention de signe derivee en s22 (tools/s22_verify_duals.py) : dans le
-	// tableau normalise, dual de ligne = cout reduit de son surplus/ecart,
-	// dual de borne = cout reduit de l'ecart de borne.
+	// THE DUALS. They are already in the final tableau, so exposing them costs
+	// nothing, and they replace CHOICES made by hand:
+	//   row_dual[i]  : marginal value of constraint i (>= 0 at the optimum);
+	//   bound_dual[j]: value of one extra unit of capacity on operator j
+	//                  (> 0 <=> bound u_j BINDS the plan, i.e. its host is a host
+	//                  with a COMPUTED quota, not a selected one).
+	// Sign convention derived in tools/s22_verify_duals.py: in the normalised
+	// tableau, a row dual is the reduced cost of its surplus/slack, and a bound
+	// dual is the reduced cost of the bound slack.
 	std::vector<double> row_dual;
 	std::vector<double> bound_dual;
-	// PHASE 1 EN ECHEC : les contraintes dont l'artificielle reste positive —
-	// le diagnostic exact de « quelle ligne est insatisfaisable ICI ». Sans ce
-	// champ, « h = INFINI » au milieu d'une ligne reelle est muet (s22 : 22
-	// etats infaisables sur l'etalon B, cause invisible).
+	// PHASE 1 FAILED: the constraints whose artificial stays positive, i.e. the
+	// exact diagnosis of "which row is unsatisfiable HERE". Without this field,
+	// "h = INFINITE" in the middle of a real line is mute (22 infeasible states on
+	// benchmark B, with no visible cause).
 	std::vector<std::string> infeasible_rows;
-	// LA VIE DES QUOTAS DU CHEMIN (s24, chantier 4 — red-black). Combien de
-	// lignes de quota ont ete POSEES dans cette instance, et quels hotes la
-	// garde d'asymetrie a IGNORES — avec la RAISON, parce que les deux cas
-	// appellent des correctifs opposes : `unbounded` (l'hote porte un effet
-	// sans borne declaree : l'activation observee peut etre lui, l'agregat
-	// serait un mensonge) se corrige par l'EXTRACTION des bornes ; `overrun`
-	// (observations > budget declare : le modele ne decrit pas cet hote) se
-	// corrige par la couverture. Un mecanisme qui ne dit pas sa vie a deja
-	// coute deux sessions de mesures sur du vide (--assign-bias).
+	// LIVENESS OF THE PATH QUOTAS (red-black relaxation). How many quota rows were
+	// POSTED in this instance, and which hosts the asymmetry guard IGNORED, WITH
+	// THE REASON, because the two cases call for opposite fixes: `unbounded` (the
+	// host carries an effect with no declared bound, so the observed activation may
+	// be that one and the aggregate would be a lie) is fixed by EXTRACTING the
+	// bounds; `overrun` (observations > declared budget, i.e. the model does not
+	// describe this host) is fixed by coverage. A mechanism that does not report
+	// its own liveness has already cost two sessions of measurements on nothing.
 	uint32_t quota_applied = 0;
 	std::vector<uint32_t> quota_unbounded_hosts;
 	std::vector<uint32_t> quota_overrun_hosts;
@@ -416,117 +409,113 @@ struct LPResult {
 
 LPResult SolveOperatorLP(const OperatorLP& lp);
 
-// Assemble `A`, `b` et `u` depuis la table, le deck et le but, puis imprime
-// `h` et le vecteur de tirs `x`. Rend `h` (ou -1 si infaisable, th. 3).
+// Assembles `A`, `b` and `u` from the table, the deck and the goal, then prints
+// `h` and the firing vector `x`. Returns `h` (or -1 when infeasible, th. 3).
 //
-// TROIS ZONES ABSTRAITES, ET PAS UNE DE PLUS. `RESERVE` (deck + extra),
-// `DISPO` (main, terrain, cimetiere, bannie — tout ce qui peut servir de
-// materiau) et `TERRAIN` (le but s'y lit). Une zone de plus serait une
-// hypothese de plus a justifier.
+// THREE ABSTRACT ZONES, AND NOT ONE MORE. `RESERVE` (deck + extra), `AVAILABLE`
+// (hand, field, graveyard, banished: everything that can serve as material) and
+// `FIELD` (where the goal is read). One more zone would be one more hypothesis
+// to justify.
 //
-// LA REGLE QUI GOUVERNE CHAQUE CHOIX DE MODELISATION : au moindre doute, on
-// SOUS-CONTRAINT. Sous-contraindre garde `h <= h*` (theoreme 1 tient, donc
-// `h = infini` reste une PREUVE d'impasse) ; sur-contraindre rendrait `h` plus
-// grand que le vrai cout et transformerait la preuve en mensonge. C'est
-// l'asymetrie de 9.29 (f), appliquee au modele entier.
+// THE RULE THAT GOVERNS EVERY MODELLING CHOICE: when in doubt, UNDER-CONSTRAIN.
+// Under-constraining keeps `h <= h*` (theorem 1 holds, so `h = infinite` stays
+// a PROOF of a dead end); over-constraining would make `h` larger than the true
+// cost and turn the proof into a lie.
 class BalanceModel {
 public:
-	// `goal` : demandes d'etat FINAL, par code, lues @TERRAIN.
-	// `transient` (s23) : demandes de PASSAGE, par code, lues @DISPO — « cette
-	// carte doit EXISTER hors reserve a un moment de la ligne ». C'est la
-	// compilation des exigences de resolution (--resolve) dans le bilan : le
-	// but se COMPILE, il ne se recompense pas. Une demande transitoire vaut 1
-	// par code (N resolutions n'exigent PAS N corps — le retour d'un meme corps
-	// est legal —, donc exiger 1 est plus faible que la verite : h reste
-	// admissible, regle de sous-contrainte). Garde d'asymetrie : un code sans
-	// producteur lisible n'est PAS pose (une lacune d'extraction ne doit jamais
-	// devenir une fausse preuve d'impossibilite) — et il est nomme.
+	// `goal`: FINAL state demands, by code, read @FIELD.
+	// `transient`: PASSAGE demands, by code, read @AVAILABLE, i.e. "this card must
+	// EXIST outside the reserve at some point in the line". This is how resolution
+	// requirements (--resolve) are compiled into the balance sheet: the goal is
+	// COMPILED, not rewarded. A transient demand is worth 1 per code (N resolutions
+	// do NOT require N bodies, since the same body coming back is legal, so
+	// requiring 1 is weaker than the truth: h stays admissible, per the
+	// under-constraint rule). Asymmetry guard: a code with no readable producer is
+	// NOT posted (an extraction gap must never become a false proof of
+	// impossibility), and it is named.
 	bool Build(const OperatorTable& tbl, const CardDB& db,
 			   const ConstantTable& kt, const std::vector<uint32_t>& deck,
 			   const std::vector<std::pair<uint32_t, uint32_t>>& goal,
 			   const std::vector<std::pair<uint32_t, uint32_t>>& transient = {});
-	// `res` (deck+extra), `ava` (main, terrain, cimetiere, bannie) et `fld`
-	// (zone monstre) sont les codes PHYSIQUES presents dans chaque zone a
-	// l'etat courant. Rend h, ou -1 si infaisable (theoreme 3).
+	// `res` (deck+extra), `ava` (hand, field, graveyard, banished) and `fld`
+	// (monster zone) are the PHYSICAL codes present in each zone in the current
+	// state. Returns h, or -1 when infeasible (theorem 3).
 	//
-	// `spent` (s24, chantier 4) : usages OBSERVES des hotes a quota le long du
-	// chemin qui mene a cet etat (code canonique -> activations MSG_CHAINING).
-	// C'est la relaxation partielle RED-BLACK (Katz-Hoffmann-Domshlak) du
-	// bilan : les capacites deviennent celles du CHEMIN, pas du depart. Un
-	// bit d'activation ne dit pas QUEL effet de l'hote a tire — la ligne
-	// posee est donc l'AGREGAT Sigma x_t <= (Sigma u_t) - s sur toutes les
-	// transitions de l'hote, sur en toute attribution (Sigma s_t >= s).
-	// Gardes d'asymetrie, nommees dans LPResult : hote dont UNE transition
-	// est sans borne declaree -> ignore (l'activation observee peut etre
-	// l'effet non borne) ; observation au-dela du budget declare -> ignore
-	// (le modele ne decrit pas cet hote ; appliquer prouverait des morts
-	// fausses).
+	// `spent`: OBSERVED uses of quota hosts along the path leading to this state
+	// (canonical code -> MSG_CHAINING activations). This is the RED-BLACK partial
+	// relaxation (Katz-Hoffmann-Domshlak) of the balance sheet: capacities become
+	// the PATH's, not the start's. An activation bit does not say WHICH of the
+	// host's effects fired, so the row posted is the AGGREGATE
+	// Sigma x_t <= (Sigma u_t) - s over all the host's transitions, which is safe
+	// under any attribution (Sigma s_t >= s). Asymmetry guards, named in LPResult:
+	// a host one of whose transitions has no declared bound -> ignored (the
+	// observed activation may be the unbounded effect); an observation beyond the
+	// declared budget -> ignored (the model does not describe this host, and
+	// applying it would prove false deaths).
 	double Solve(const std::vector<uint32_t>& res,
 				 const std::vector<uint32_t>& ava,
 				 const std::vector<uint32_t>& fld,
 				 LPResult* out = nullptr,
 				 const std::vector<std::pair<uint32_t, uint32_t>>& spent =
 					 {}) const;
-	// LES SOUS-BUTS, DERIVES DE x*. Chaque transition qui tire produit des
-	// places : ce sont les etapes que tout plan optimal du programme doit
-	// franchir. C'est la SERIALISATION, calculee et non devinee — et elle porte
-	// les places INTERMEDIAIRES (un corps disponible, un code acquis), la ou
-	// `CommonCodes` ne compte que les cartes cibles POSEES et reste donc plat
-	// sur toute la montee (9.29 (k) : 85 % d'etats muets).
+	// THE SUBGOALS, DERIVED FROM x*. Every firing transition produces places: those
+	// are the steps every optimal plan of the program has to cross. This is the
+	// SERIALISATION, computed rather than guessed, and it carries the INTERMEDIATE
+	// places (a body available, a code acquired), where `CommonCodes` only counts
+	// the target cards already PLACED and therefore stays flat over the whole climb
+	// (85 % of states are mute).
 	struct Need {
-		uint32_t code = 0;    // 0 si l'exigence est un archetype
+		uint32_t code = 0;    // 0 when the requirement is an archetype
 		uint64_t arch = 0;
-		uint8_t zone = 0;     // 0 RESERVE, 1 DISPO, 2 TERRAIN, 3 CIMETIERE
+		uint8_t zone = 0;     // 0 RESERVE, 1 AVAILABLE, 2 FIELD, 3 GRAVEYARD
 		uint32_t count = 1;
 	};
 	std::vector<Need> NeedsFrom(const LPResult& r) const;
-	// LES BARREAUX DE CONSOMMATION (s21). Le profil des ecarts a montre trois
-	// deserts de 46 a 73 reponses sur la ligne reelle : tout le travail
-	// d'ASSEMBLAGE (renommages, fusions) y est invisible parce que ses produits
-	// retombent dans des places agregees deja saturees — la forme close
-	// (cout ~ Sigma b^(l_i), domine par b^(l_max)) dit que ces deserts seuls
-	// interdisent le run nu. Or chaque tir consommateur ENVOIE un corps au
-	// cimetiere, et cette arrivee-la monte REGULIEREMENT pendant les deserts.
-	// On rend donc la colonne NEGATIVE de x* en sous-buts @CIMETIERE :
-	// « combien de tirs exiges ont eu lieu », lu dans l'etat — le critere de
-	// progres que 9.31 nommait sans l'avoir construit. Sur-compter est ANODIN
-	// (une unite jamais atteinte ne cree pas de cellule) ; sous-compter
-	// laisserait les deserts entiers.
+	// THE CONSUMPTION RUNGS. The profile of the gaps showed three deserts of 46 to
+	// 73 answers along the real line: all the ASSEMBLY work (renames, fusions) is
+	// invisible there because its products fall back into aggregate places that are
+	// already saturated, and the closed form (cost ~ Sigma b^(l_i), dominated by
+	// b^(l_max)) says those deserts alone rule out a bare run. But every consuming
+	// firing SENDS a body to the graveyard, and that arrival climbs STEADILY during
+	// the deserts. So we return the NEGATIVE column of x* as @GRAVEYARD subgoals:
+	// "how many of the required firings have happened", read from the state. It is
+	// the progress criterion the design notes named without having built it.
+	// Over-counting is HARMLESS (a unit never reached creates no cell);
+	// under-counting would leave the deserts whole.
 	std::vector<Need> ConsumedFrom(const LPResult& r) const;
-	// LES HOTES A QUOTA, DERIVES DES DUAUX (s22, chantier 2). Remplace la
-	// derivation a la main de s21 (classes d'effets + series croisees, trois
-	// versions iterees « jusqu'a ce que Wolf apparaisse » — le piege 2 du
-	// dossier). Un hote entre ici par CALCUL :
-	//   - sa transition a une borne FINIE declaree, et
-	//   - elle est tiree par x* (x_t > 0), saturee (x_t = u_t), de dual
-	//     positif (la capacite LIE le plan), ou produit une place que x*
-	//     consomme (robustesse a la degenerescence : trois igniteurs a cout
-	//     nul sont interchangeables pour le simplexe, pas pour le chemin).
-	// `presence` recoit les hotes des transitions TIREES par x* : les
-	// habilitants — c'est d'eux que les barreaux @EN JEU se derivent.
+	// THE QUOTA HOSTS, DERIVED FROM THE DUALS. Replaces a by-hand derivation
+	// (effect classes + crossed series, three iterated versions, until Wolf
+	// appeared). A host enters here by COMPUTATION:
+	//   - its transition has a declared FINITE bound, and
+	//   - it is fired by x* (x_t > 0), saturated (x_t = u_t), with a positive dual
+	//     (the capacity BINDS the plan), or produces a place x* consumes
+	//     (robustness to degeneracy: three zero-cost igniters are interchangeable
+	//     for the simplex, not for the path).
+	// `presence` receives the hosts of the transitions FIRED by x*: the enablers,
+	// from which the IN-PLAY rungs are derived.
 	std::vector<uint32_t> QuotaHostsFrom(const LPResult& r,
 										 std::vector<uint32_t>* presence) const;
 
 	size_t Places() const { return pname.size(); }
 	size_t Transitions() const { return lp.n_ops; }
 	size_t Renames() const { return n_rename; }
-	// Igniteurs de Fusion lus (s22). A zero avec des recettes Fusion au deck,
-	// le couplage d'ignition est DESARME (garde d'asymetrie) — le dire est la
-	// vie du mecanisme.
+	// Fusion igniters read. At zero while the deck has Fusion recipes, ignition
+	// coupling is DISARMED (asymmetry guard); saying so is the mechanism's
+	// liveness.
 	size_t FusionIgniters() const { return n_igniter; }
 	const std::vector<std::string>& TrNames() const { return tname; }
 	const std::vector<std::string>& PlaceNames() const { return pname; }
-	// L'HOTE de chaque transition (s22) : la carte qui porte l'effet. C'est la
-	// cle qui traduit un dual de borne en HOTE A QUOTA — la derivation
-	// calculee qui remplace les regles a la main du chantier 2.
+	// The HOST of each transition: the card carrying the effect. It is the key that
+	// turns a bound dual into a QUOTA HOST, the computed derivation that replaces
+	// hand-written rules.
 	uint32_t HostOf(size_t t) const {
 		return t < thost.size() ? thost[t] : 0;
 	}
-	// La borne superieure declaree de chaque transition (kNoBound = sans).
+	// The declared upper bound of each transition (kNoBound = none).
 	double UpperOf(size_t t) const {
 		return t < lp.upper.size() ? lp.upper[t] : OperatorLP::kNoBound;
 	}
-	// Nom de la premiere place PRODUITE par cette transition (lisibilite).
+	// Name of the first place PRODUCED by this transition (readability).
 	std::string Produces(size_t t) const;
 
 private:
@@ -536,19 +525,19 @@ private:
 	std::unordered_map<uint64_t, size_t> pid;
 	std::vector<std::string> pname;
 	std::vector<std::string> tname;
-	std::vector<uint32_t> thost;   // hote (carte) de chaque transition, 0 si n/a
-	std::vector<double> need;                       // but par place
-	std::vector<std::unordered_map<size_t, double>> col;   // effets par transition
-	OperatorLP lp;                                  // couts et bornes ; rows rebati
-	// Codes canoniques du BUT : les barreaux de consommation ne doivent jamais
-	// porter sur eux (s21 — l'echelle recompensait l'envoi des LIGERS au
-	// cimetiere, un artefact du descost dans x*, et le run nu archivait des
-	// cellules « en progres » qui avaient detruit leurs pieces de but).
+	std::vector<uint32_t> thost;   // host (card) of each transition, 0 when n/a
+	std::vector<double> need;                       // goal per place
+	std::vector<std::unordered_map<size_t, double>> col;   // effects per transition
+	OperatorLP lp;                                  // costs and bounds; rows rebuilt
+	// Canonical codes of the GOAL: the consumption rungs must never bear on them
+	// (the ladder used to reward sending the LIGERS to the graveyard, an artefact
+	// of the destruction cost in x*, and the bare run archived cells "in progress"
+	// that had destroyed their own goal pieces).
 	std::vector<uint32_t> goal_codes;
 	size_t n_rename = 0;
 	size_t n_igniter = 0;
-	// Le cache est MUTABLE sous const : depuis s22 les workers appellent
-	// Solve() en parallele (RefineLadderHere) — le verrou est obligatoire.
+	// The cache is MUTABLE under const: workers call Solve() in parallel
+	// (RefineLadderHere), so the lock is mandatory.
 	mutable std::mutex sc_mx;
 	mutable std::unordered_map<uint32_t, std::vector<uint64_t>> sc_cache;
 };
@@ -559,87 +548,85 @@ double BuildAndSolveBalance(
 	const std::vector<std::pair<uint32_t, uint32_t>>& goal,
 	const std::vector<std::pair<uint32_t, uint32_t>>& transient = {});
 
-// Rend le nombre de cas passes sur le nombre de cas. Doit valoir n/n.
+// Returns the number of cases passed over the number of cases. Must be n/n.
 size_t SelfTestOperatorLP(size_t* total);
 
-// Extraction d'UN script deja lu. Exposee pour le test : elle ne touche ni au
-// disque ni a la base.
+// Extraction of ONE already-read script. Exposed for the test: it touches
+// neither the disk nor the database.
 //
-// `init_fn` nomme la fonction dont les effets sont des OPERATEURS. C'est
-// `initial_effect` pour un script de carte ; pour un fichier `proc_*.lua` c'est
-// la procedure appelee (`Pendulum.AddProcedure`), et les effets qu'elle
-// enregistre appartiennent alors a la carte appelante.
+// `init_fn` names the function whose effects are OPERATORS. That is
+// `initial_effect` for a card script; for a `proc_*.lua` file it is the
+// procedure called (`Pendulum.AddProcedure`), and the effects it registers then
+// belong to the calling card.
 CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 						  const ConstantTable& kt,
 						  const std::string& init_fn = "initial_effect");
 
-// --- LE TYPE DE NŒUD MANQUANT (chantier 1, session 19) -----------------------
+// --- THE MISSING NODE TYPE ---------------------------------------------------
 //
-// Le graphe de recettes range `Lunalight Leo Dancer` comme un PRODUIT A
-// FABRIQUER — d'ou `--backward` et ses « 2 sous-produits, 0,02 fabrique »
-// (9.24 (e)) : il essayait de construire une carte non constructible, puisque
-// son materiau nomme est absent du deck.
+// The recipe graph files `Lunalight Leo Dancer` as a PRODUCT TO BUILD, hence
+// `--backward` and its "2 subproducts, 0.02 built": it was trying to build a
+// non-buildable card, since its named material is absent from the deck.
 //
-// Or Leo n'est pas ici un produit : c'est une PROPRIETE ACQUERABLE. `Kaleido
-// Chick` accorde `EFFECT_ADD_CODE` — le code de la carte qu'elle envoie au
-// cimetiere, valable comme MATERIAU DE FUSION. Le coup EST dans l'espace ; il
-// demande une preparation en deux temps, et rien dans le graphe ne pouvait
-// l'exprimer.
+// But Leo is not a product here: it is an ACQUIRABLE PROPERTY. `Kaleido Chick`
+// grants `EFFECT_ADD_CODE`, the code of the card it sends to the graveyard,
+// valid as FUSION MATERIAL. The move IS in the space; it takes a two-step
+// preparation, and nothing in the graph could express that.
 //
-// Une arete d'acquisition, c'est donc : « ce CODE s'obtient si l'HOTE est dans
-// sa zone et si une SOURCE portant ce code est dans la zone que l'operateur
-// atteint ». Deux exigences, aucune fabrication.
+// So an acquisition edge is: "this CODE is obtained if the HOST is in its zone
+// and a SOURCE carrying that code is in the zone the operator reaches". Two
+// requirements, no manufacturing.
 struct AcquirableCode {
-	uint32_t code = 0;         // le code acquis
-	uint32_t host = 0;         // la carte qui porte l'operateur
-	uint64_t host_range = 0;   // ou elle doit etre (LOCATION_*, deja normalise)
-	uint64_t source_zone = 0;  // ou la source doit etre
+	uint32_t code = 0;         // the acquired code
+	uint32_t host = 0;         // the card carrying the operator
+	uint64_t host_range = 0;   // where it must be (LOCATION_*, already normalised)
+	uint64_t source_zone = 0;  // where the source must be
 	std::string grant;         // EFFECT_ADD_CODE / EFFECT_CHANGE_CODE
 };
 
-// `owned` : les cartes que le deck possede (main + extra). L'arete n'est posee
-// que vers des codes REELLEMENT disponibles — une acquisition vers un code
-// absent serait une route morte, exactement le piege 63 du graphe de recettes.
+// `owned`: the cards the deck owns (hand + extra). The edge is only posted
+// towards codes that are REALLY available; an acquisition towards an absent
+// code would be a dead route.
 std::vector<AcquirableCode> AcquirableCodesOf(const OperatorTable& tbl,
 											  const CardDB& db,
 											  const std::vector<uint32_t>& owned);
 
-// --- LE HARNAIS : CONFRONTER LA TABLE AU PLAN RESOLU -------------------------
+// --- THE HARNESS: CONFRONTING THE TABLE WITH THE RESOLVED PLAN ---------------
 //
-// Une activation relevee dans le rejeu. Le decodeur des messages la rend ;
-// `operators.cpp` ne decode rien lui-meme.
+// One activation recorded during the replay. The message decoder returns it;
+// `operators.cpp` decodes nothing itself.
 struct ObservedActivation {
-	size_t at = 0;            // index de reponse
+	size_t at = 0;            // answer index
 	uint8_t message = 0;      // MSG_SELECT_IDLECMD, _CHAIN, _EFFECTYN, ...
-	uint32_t code = 0;        // carte engagee (canonique)
+	uint32_t code = 0;        // card engaged (canonical)
 	uint64_t desc = 0;
-	uint8_t location = 0;     // zone PHYSIQUE d'ou la carte s'active
+	uint8_t location = 0;     // PHYSICAL zone the card activates from
 	uint32_t sequence = 0;
 	int turn = 0;
 };
 
 struct HarnessVerdict {
 	size_t total = 0;
-	// La description est un `aux.Stringid` d'une carte du deck : elle designe UN
-	// operateur et un seul. C'est le cas le plus fort.
+	// The description is an `aux.Stringid` of a card in the deck: it designates ONE
+	// operator and one only. This is the strongest case.
 	size_t matched_by_desc = 0;
-	// La description est une chaine SYSTEME que l'operateur declare lui-meme
-	// (`SetDescription(1160)` d'une procedure) : l'appariement reste exact.
+	// The description is a SYSTEM string the operator declares itself
+	// (`SetDescription(1160)` of a procedure): the match stays exact.
 	size_t matched_by_system = 0;
-	// La description est fabriquee par le CORE (`processor.cpp` emet 221 ou 0
-	// pour « activer l'effet declencheur de cette carte ? »). Le message ne dit
-	// alors PAS quel effet : seule la carte identifie l'operateur. Ce compteur
-	// mesure donc, en creux, ce que l'identite (code, description) NE separe
-	// PAS — et c'est une propriete du protocole, pas de l'extraction.
+	// The description is manufactured by the CORE (`processor.cpp` emits 221 or 0
+	// for "activate this card's trigger effect?"). The message then does NOT say
+	// which effect: only the card identifies the operator. So this counter
+	// measures, in negative, what the (code, description) identity does NOT
+	// separate, and that is a property of the protocol, not of the extraction.
 	size_t matched_by_card = 0;
-	// ... et parmi celles-ci, celles ou plusieurs operateurs restent possibles
-	// meme apres la zone. Le harnais ne tranche pas : il compte.
+	// ... and among those, the ones where several operators stay possible even
+	// after the zone. The harness does not decide: it counts.
 	size_t ambiguous = 0;
-	size_t unmatched = 0;            // AUCUN operateur declare : la table ment
-	size_t no_script = 0;            // carte sans script lu (hors table)
+	size_t unmatched = 0;            // NO declared operator: the table lies
+	size_t no_script = 0;            // card with no script read (outside the table)
 	size_t zone_checked = 0, zone_ok = 0, zone_violated = 0;
 	size_t count_checked = 0, count_violated = 0;
-	std::vector<std::string> failures;   // le detail, borne
+	std::vector<std::string> failures;   // the detail, bounded
 };
 
 HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,

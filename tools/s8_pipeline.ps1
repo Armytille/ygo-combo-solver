@@ -1,6 +1,6 @@
-# Enchainement SEQUENTIEL des mesures de la session 8.
-# Un seul run a la fois : deux mesures en parallele se volent les coeurs et
-# rendent les durees — donc les bras limites par le BUDGET — incomparables.
+# SEQUENTIAL chaining of the session's measurements. One run at a time: two
+# measurements in parallel steal each other's cores and make the durations (and
+# therefore the budget-limited arms) incomparable.
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"
 
 Write-Output "=== 1. sante finale (porte) ==="

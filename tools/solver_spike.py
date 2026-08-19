@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Jalon 0 du combo solver : rejeu instrumente de la ligne de reference.
+"""Milestone 0 of the combo solver: instrumented replay of the reference line.
 
-Amorce un duel ocgcore headless a partir d'un .yrpX, lui reinjecte les reponses
-enregistrees dans le yrp1 embarque, et mesure ce dont depend toute la suite :
+Boots a headless ocgcore duel from a .yrpX, feeds it back the answers recorded
+in the embedded yrp1, and measures what everything else depends on:
 
-  * le nombre reel de points de decision et leur type ;
-  * le facteur de branchement offert par le core a chaque decision ;
-  * le cout de la ligne de reference (C_ref, A_ref, D_ref) ;
-  * le board cible en fin de tour du joueur cible.
+  * the real number of decision points and their type;
+  * the branching factor the core offers at each decision;
+  * the cost of the reference line (C_ref, A_ref, D_ref);
+  * the target board at the end of the target player's turn.
 
 usage: solver_spike.py <replay.yrpX> [--workdir D:\\ProjectIgnis] [--verbose]
 """
@@ -63,7 +63,7 @@ class Buf:
 
 
 def nsubsets(n, lo, hi):
-    """Nombre de sous-ensembles de taille lo..hi parmi n."""
+    """Number of subsets of size lo..hi out of n."""
     hi = min(hi, n)
     if lo > hi:
         return 0
@@ -71,10 +71,10 @@ def nsubsets(n, lo, hi):
 
 
 def parse_prompt(msg, payload):
-    """Extrait le facteur de branchement d'un MSG_SELECT_*.
+    """Extracts the branching factor of a MSG_SELECT_*.
 
-    Renvoie (n_brut, n_dedup, detail). n_dedup applique la reduction par
-    multiset de codes decrite au 4.1 du document de conception.
+    Returns (n_raw, n_dedup, detail). n_dedup applies the reduction by
+    multiset of codes described in the design notes.
     """
     b = Buf(payload)
     try:
@@ -213,7 +213,7 @@ def parse_prompt(msg, payload):
 
 
 def board_snapshot(duel, con):
-    """Etat des zones publiques d'un joueur, au sens du 1er critere d'equivalence."""
+    """State of a player's public zones, in the sense of the first equivalence criterion."""
     flags = (oc.QUERY_CODE | oc.QUERY_POSITION | oc.QUERY_TYPE
              | oc.QUERY_LEVEL | oc.QUERY_ATTACK | oc.QUERY_DEFENSE
              | oc.QUERY_OVERLAY_CARD | oc.QUERY_COUNTERS | oc.QUERY_LINK)
@@ -325,7 +325,7 @@ def run(path, workdir, dll, verbose, scriptdirs=None):
                 turn += 1
                 turn_player = payload[0] if payload else -1
                 if turn == 2 and target_board is None:
-                    # le tour du joueur cible vient de se terminer
+                    # the target player's turn has just ended
                     target_board = (board_snapshot(duel, 0),
                                     board_snapshot(duel, 1))
                     target_turn_end_at = ri
@@ -352,8 +352,8 @@ def run(path, workdir, dll, verbose, scriptdirs=None):
 
         if status == oc.DUEL_STATUS_AWAITING:
             if ri >= len(y.responses):
-                # Normal : l'enregistrement s'arrete quand le joueur quitte,
-                # pas a la fin du duel. Seul un manque PRECOCE serait suspect.
+                # Normal: the recording stops when the player leaves, not at the
+                # end of the duel. Only an EARLY shortfall would be suspicious.
                 print(f"\n  (fin de l'enregistrement : {ri} reponses epuisees, "
                       f"le duel continuait)")
                 break

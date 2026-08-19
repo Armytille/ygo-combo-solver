@@ -1,7 +1,7 @@
-# Session 7ter — A/B de sqrt-LTS (--reroot) sur l'ETALON 1.
-# Les DEUX bras tournent sur le binaire courant : le temoin des runs
-# d'escalade date d'un binaire anterieur, et un A/B se juge sur des bras
-# contemporains meme quand le mecanisme est cense etre inerte.
+# A/B of sqrt-LTS (--reroot) on BENCHMARK 1. BOTH arms run on the current
+# binary: the control of the climb runs dates from an earlier binary, and an
+# A/B is judged on contemporary arms even when the mechanism is supposed to be
+# inert.
 param([string]$Seed = '888', [int]$Ms = 600000)
 
 Set-Location "D:\ProjectIgnis\replay2video\combosolver"

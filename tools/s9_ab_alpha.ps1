@@ -1,34 +1,34 @@
-# CADRAN ALPHA DU REROOTER DOUX, REFAIT SUR L'ECHELLE CORRIGEE (session 9, C3).
+# ALPHA DIAL OF THE SOFT REROOTER, REDONE ON THE CORRECTED SCALE.
 #
-# POURQUOI LE CADRAN DE LA SESSION 8 EST A JETER
+# WHY THE EARLIER DIAL IS TO BE THROWN AWAY
 #
-# inv_w = exp(alpha * h(n) / h_root) — Eq. 7 de arXiv:2605.30664, ou h_root est
+# inv_w = exp(alpha * h(n) / h_root), Eq. 7 of arXiv:2605.30664, where h_root
 # h A LA RACINE DE LA RECHERCHE COURANTE. La session 8 y mettait
-# |cible| + Sigma resolve_min, c'est-a-dire h au depart du DUEL : une constante
-# du probleme, valant 8 sur l'etalon B. Or le finisseur ne demarre pas au duel,
-# il demarre a un etat de recul deja a 7/8 cartes, donc h_root vaut 1.
+# used to be |target| + Sigma resolve_min, i.e. h at the start of the DUEL: a
+# constant of the problem, worth 8 on benchmark B. But the finisher does not
+# start at the duel, it starts at a backtrack state already at 7/8 cards, so
 #
-# Le cadran 8/15/25/40/60 de la session 8 a donc ete parcouru a alpha_effectif
-# = 1 / 1,9 / 3,1 / 5 / 7,5. Ce cadran-ci reprend la MEME plage effective sur
-# l'echelle corrigee, pour que le resultat de la session 8 (gain au bord
-# superieur, alpha = 25, une racine sur quatre) soit comparable point a point :
+# h_root is 1. The earlier 8/15/25/40/60 dial was therefore swept at an
+# effective alpha of 1 / 1.9 / 3.1 / 5 / 7.5. This dial covers the SAME
+# effective range on the corrected scale, so the earlier result (a gain at the
+# upper edge, alpha = 25, one root out of four) is comparable point by point:
 #
 #     s8 alpha  8   15   25   40   60
 #     s9 alpha  1    2    3    5    8
 #
-# Montage inchange par ailleurs — c'est l'etalon 0, l'A/B DETERMINISTE :
-# racines imposees (--approach), politique vide dans tous les bras (--no-nrpa),
-# regime but seul (--no-plan). Ce qui bouge dans la table « appr0 recul N » ne
-# peut venir que de la fonction de cout.
+# Setup unchanged otherwise: benchmark 0, the DETERMINISTIC A/B, with imposed
+# roots (--approach), an empty policy in every arm (--no-nrpa) and goal-only
+# mode (--no-plan). Whatever moves in the "appr0 backtrack N" table can only
+# come from the cost function.
 #
-# CONTROLE DE CORRECTION GRATUIT, a verifier dans chaque bras :
+# FREE CORRECTNESS CHECK, to verify in every arm:
 #   appr0 recul 0  ->  42 exp.,  b=0,  EPUISE
-# 42 parce qu'une fonction de cout change l'ORDRE des expansions, pas
-# l'ensemble atteignable ; b=0 parce qu'aucun plafond n'a mordu, sans quoi
-# « EPUISE » ne serait pas une preuve d'absence (C2).
+# 42 because a cost function changes the ORDER of the expansions, not the
+# reachable set; b=0 because no ceiling bit, without which "EXHAUSTED" would not
+# be a proof of absence.
 #
-# La colonne h0= imprime h_root : elle doit valoir 1 sur cet etalon. Si elle
-# vaut 8, la correction C3 n'est pas dans le binaire.
+# The h0= column prints h_root: it must be 1 on this benchmark. If it is 8, the
+# fix is not in the binary.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
       [string]$Seed = '888',

@@ -1,68 +1,68 @@
 <#
 .SYNOPSIS
-  Extrait la version d'ocgcore (et de son Lua) requise par le combo solver.
+  Extracts the version of ocgcore (and of its Lua) the combo solver needs.
 
 .DESCRIPTION
-  Le solveur doit tourner sur un core CONTEMPORAIN du replay analyse : une
-  version decalee ne plante pas, elle diverge en silence (cf.
-  docs/combo-solver-design.md section 6bis). Le pin du sous-module dans
-  edopro/ est fige au 2025-04-17 et ne convient pas aux replays recents.
+  The solver has to run on a core CONTEMPORARY with the replay being analysed:
+  a mismatched version does not crash, it diverges silently. The submodule pin
+  in edopro/ is frozen at 2025-04-17 and does not suit recent replays.
 
-  Ce script extrait un commit precis d'ocgcore, plus le commit correspondant
-  de son sous-module lua/src, vers deps/ocgcore/. Il n'ecrit jamais dans
-  l'installation EDOPro ni dans le clone edopro/ (hors git fetch).
+  This script extracts a precise ocgcore commit, plus the matching commit of
+  its lua/src submodule, into deps/ocgcore/. It never writes into the EDOPro
+  installation nor into the edopro/ clone (apart from git fetch).
 
 .EXAMPLE
   .\tools\fetch_solver_deps.ps1
   .\tools\fetch_solver_deps.ps1 -Commit 8e5f4e4f0ab6b8ca750e8e1c91c1a58f407e3272
 #>
 param(
-    # 2026-08-10. Remonte depuis 8e5f4e4 (2026-04-07) en session 7ter, apres
-    # mesure : les cinq patchs d'arene s'appliquent sans conflit sur cet arbre,
-    # les listes de sources sont identiques, et la porte de sante du replay de
-    # reference (2026-04-13) est IDENTIQUE ligne a ligne — 0 retry, 290 digests
-    # distincts / 0 fusion, reference retrouvee a 0 ecart, A/B nouveaute
-    # inchange. Le core precedent reste extractible : -Commit 8e5f4e4f...
+    # 2026-08-10. Moved up from 8e5f4e4 (2026-04-07) after measuring that the
+    # five arena patches apply without conflict on this tree, that the source
+    # lists are identical, and that the health gate of the reference replay
+    # (2026-04-13) is IDENTICAL line by line: 0 retries, 290 distinct digests
+    # with 0 merges, reference found again at 0 deviations, novelty A/B
+    # unchanged. The previous core is still extractable: -Commit 8e5f4e4f...
     #
-    # Rappel §6bis : ce pin doit rester contemporain du replay ANALYSE, pas de
-    # la date du jour. Un replay enregistre par un client EDOPro ancien exige un
-    # core ancien, meme si ses scripts, eux, se mettent a jour tout seuls — cas
-    # rencontre en session 7ter avec un client date du 2025-05-05.
+    # Reminder: this pin must stay contemporary with the ANALYSED replay, not
+    # with today's date. A replay recorded by an older EDOPro client needs an
+    # older core, even though its scripts update themselves.
     [string]$Commit = "5a985af7c43c8470b06bef697bfb9051b40e114c",
     [string]$Dest = "deps/ocgcore",
-    # Scripts de cartes a la date du replay de reference. Un jeu decale fait
-    # diverger le rejeu aussi surement qu'un core decale, et sans le dire.
+    # Card scripts as of the reference replay's date. A mismatched script set
+    # makes the replay diverge just as surely as a mismatched core, and just as
+    # silently.
     [string]$ScriptsCommit = "0e90a3e8",
     [string]$ScriptsDate = "2026-04-13"
 )
 
 $ErrorActionPreference = "Stop"
-# Le depot du solveur est imbrique dans l'arborescence replay2video : c'est de
-# LA que viennent le clone edopro/ (source d'ocgcore et des sources LZMA) et le
-# dossier deps/ ou tout est extrait. Ces deux chemins sont les seules
-# dependances externes du projet ; premake les vise pareillement en `../`.
+# The solver repository is nested inside the replay2video tree: that is where
+# the edopro/ clone (the source of ocgcore and of the LZMA sources) and the
+# deps/ directory everything is extracted into come from. Those two paths are
+# the project's only external dependencies; premake targets them the same way,
+# through `../`.
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $src = Join-Path $root "edopro/ocgcore"
 $dst = Join-Path $root $Dest
 
 if (-not (Test-Path (Join-Path $src ".git"))) {
-    throw "edopro/ocgcore introuvable. Lancer build_windows.bat d'abord."
+    throw "edopro/ocgcore not found. Run build_windows.bat first."
 }
 
-# Le fetch n'est utile que si le commit manque localement : une coupure reseau
-# ne doit pas empecher de reconstruire a partir d'objets deja presents.
+# Fetching is only useful when the commit is missing locally: a network outage
+# must not stop a rebuild from objects that are already there.
 $haveCommit = $(git -C $src cat-file -t $Commit 2>$null) -eq "commit"
 if (-not $haveCommit) {
-    Write-Host "recuperation des objets ocgcore..."
+    Write-Host "fetching ocgcore objects..."
     git -C $src fetch --quiet origin
-    if ($LASTEXITCODE -ne 0) { throw "git fetch a echoue dans $src et le commit $Commit est absent localement" }
+    if ($LASTEXITCODE -ne 0) { throw "git fetch failed in $src and commit $Commit is missing locally" }
 } else {
-    Write-Host "objets ocgcore deja presents localement"
+    Write-Host "ocgcore objects already present locally"
 }
 
-# Le pin de lua/src est porte par l'arbre du commit cible, pas par le HEAD.
+# The lua/src pin is carried by the target commit's tree, not by HEAD.
 $luaLine = git -C $src ls-tree $Commit lua/src
-if (-not $luaLine) { throw "commit $Commit introuvable ou sans lua/src" }
+if (-not $luaLine) { throw "commit $Commit not found, or has no lua/src" }
 $luaCommit = ($luaLine -split '\s+')[2]
 Write-Host "  ocgcore : $Commit"
 Write-Host "  lua/src : $luaCommit"
@@ -71,68 +71,67 @@ if (Test-Path $dst) { Remove-Item $dst -Recurse -Force -Confirm:$false }
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dst "lua/src") | Out-Null
 
-Write-Host "extraction d'ocgcore..."
+Write-Host "extracting ocgcore..."
 $tar = Join-Path $env:TEMP "ocgcore-$($Commit.Substring(0,8)).tar"
 git -C $src archive --output=$tar $Commit
 tar -x -f $tar -C $dst
 Remove-Item $tar -Confirm:$false
 
-Write-Host "extraction de lua..."
+Write-Host "extracting lua..."
 $luaSrc = Join-Path $src "lua/src"
 if ($(git -C $luaSrc cat-file -t $luaCommit 2>$null) -ne "commit") {
     git -C $luaSrc fetch --quiet origin
-    if ($LASTEXITCODE -ne 0) { throw "git fetch a echoue dans $luaSrc et le commit $luaCommit est absent localement" }
+    if ($LASTEXITCODE -ne 0) { throw "git fetch failed in $luaSrc and commit $luaCommit is missing locally" }
 }
 $tar = Join-Path $env:TEMP "lua-$($luaCommit.Substring(0,8)).tar"
 git -C $luaSrc archive --output=$tar $luaCommit
 tar -x -f $tar -C (Join-Path $dst "lua/src")
 Remove-Item $tar -Confirm:$false
 
-# --- patchs pour l'instantane memoire ---------------------------------------
-# Deux modifications, toutes deux dans Lua : le core C++ n'est PAS touche, ses
-# allocations sont captees par la surcharge globale d'operator new cote solveur.
-# Voir docs/combo-solver-design.md section 5.
-Write-Host "application des patchs d'arene..."
+# --- patches for the memory snapshot ----------------------------------------
+# Two modifications, both in Lua: the C++ core is NOT touched, since its
+# allocations are captured by the solver's global operator new overload.
+Write-Host "applying the arena patches..."
 
 function Edit-File([string]$path, [string]$anchor, [string]$replacement, [string]$label) {
     $text = [IO.File]::ReadAllText($path)
-    if ($text.Contains($replacement)) { Write-Host "  $label : deja applique"; return }
+    if ($text.Contains($replacement)) { Write-Host "  ${label}: already applied"; return }
     if (-not $text.Contains($anchor)) {
-        throw "patch '$label' : ancre introuvable dans $path. La version d'ocgcore a change, le patch doit etre revu."
+        throw "patch '$label': anchor not found in $path. The ocgcore version changed and the patch must be revised."
     }
     [IO.File]::WriteAllText($path, $text.Replace($anchor, $replacement))
-    Write-Host "  $label : ok"
+    Write-Host "  ${label}: ok"
 }
 
-# 1. luaconf-customize.h est force-include dans chaque .c de Lua (lua/premake5.lua).
-#    On y fixe la graine de hachage (sinon elle derive d'une adresse de pile et de
-#    l'horloge : deux runs identiques divergent) et on y declare le point
-#    d'accroche de l'allocateur d'arene.
+# 1. luaconf-customize.h is force-included into every Lua .c (lua/premake5.lua).
+#    We fix the hash seed there (otherwise it derives from a stack address and
+#    the clock, so two identical runs diverge) and declare the hook of the arena
+#    allocator.
 $hookDecl = @'
-/* ---- combosolver : instantane memoire du duel ---------------------------- */
-/* Graine de hachage des chaines constante : rend le core reproductible d'un
-   run a l'autre. Sans cela, luai_makeseed melange une adresse de pile et
-   l'horloge (lstate.c). Le seed ne sert qu'a la protection anti-collision. */
+/* ---- combosolver: memory snapshot of the duel ---------------------------- */
+/* Constant string hash seed: makes the core reproducible from one run to the
+   next. Without it, luai_makeseed mixes a stack address and the clock
+   (lstate.c). The seed only serves the anti-collision protection. */
 #define luai_makeseed(L) ((void)(L), 0u)
 
-/* Allocateur fourni par l'hote. Laisse nul, Lua utilise realloc/free. Quand il
-   est renseigne, TOUT le heap Lua (tables, closures, upvalues, coroutines
-   suspendues) vit dans l'arene et devient instantanable. */
+/* Allocator supplied by the host. Left null, Lua uses realloc/free. When it is
+   filled in, the WHOLE Lua heap (tables, closures, upvalues, suspended
+   coroutines) lives in the arena and becomes snapshottable. */
 #include <stddef.h>
 #if defined(__cplusplus)
 extern "C" {
 #endif
-/* Propres au thread : chaque worker a sa propre arene, et l'etat Lua qu'il cree
-   doit y puiser. Un pointeur global les ferait se melanger. */
+/* Thread-local: each worker has its own arena, and the Lua state it creates
+   must draw from that one. A global pointer would mix them up. */
 typedef void* (*combosolver_alloc_fn)(void* ud, void* ptr, size_t osize, size_t nsize);
 extern thread_local combosolver_alloc_fn combosolver_lua_alloc;
 extern thread_local void* combosolver_lua_alloc_ud;
-/* Etat Lua du dernier duel cree sur ce thread. Le core ne l'expose pas, et il
-   faut y acceder pour arreter le ramasse-miettes : son marquage ecrit dans
-   l'en-tete de TOUS les objets vivants, ce qui salit la quasi-totalite des
-   pages et ruine l'interet d'une restauration incrementale. Sans GC, la
-   memoire n'est pas perdue : une restauration recupere tout ce qu'une branche
-   abandonnee a alloue. */
+/* Lua state of the last duel created on this thread. The core does not expose
+   it, and it has to be reachable in order to stop the garbage collector: its
+   marking writes into the header of EVERY live object, which dirties nearly
+   every page and ruins the point of an incremental restore. With no GC, no
+   memory is lost: a restore reclaims everything an abandoned branch
+   allocated. */
 extern thread_local void* combosolver_lua_state;
 #if defined(__cplusplus)
 }
@@ -144,11 +143,11 @@ $customize = Join-Path $dst "lua/luaconf-customize.h"
 Edit-File $customize `
     '#if defined(LUA_EPRO_APICHECK)' `
     ($hookDecl + '#if defined(LUA_EPRO_APICHECK)') `
-    "luaconf-customize.h (graine + accroche allocateur)"
+    "luaconf-customize.h (seed + allocator hook)"
 
-# 2. luaL_newstate est le seul endroit ou le core cree son lua_State
-#    (interpreter.cpp appelle luaL_newstate()). On y branche l'allocateur sans
-#    toucher a ocgcore lui-meme, ce qui garde atpanic et setwarnf intacts.
+# 2. luaL_newstate is the only place where the core creates its lua_State
+#    (interpreter.cpp calls luaL_newstate()). We wire the allocator in there
+#    without touching ocgcore itself, which keeps atpanic and setwarnf intact.
 $lauxlib = Join-Path $dst "lua/src/lauxlib.c"
 Edit-File $lauxlib `
     '  lua_State *L = lua_newstate(l_alloc, NULL);' `
@@ -159,18 +158,18 @@ Edit-File $lauxlib `
                    : lua_newstate(l_alloc, NULL);
   combosolver_lua_state = L;
 '@ `
-    "lauxlib.c (luaL_newstate -> allocateur d'arene + export de l'etat)"
+    "lauxlib.c (luaL_newstate -> arena allocator + state export)"
 
-# 3. Etat du processeur. L'API publique n'expose que les zones ; deux etats
-#    peuvent avoir le meme terrain, la meme main et le meme prompt tout en
-#    differant par la pile de resolution en cours ou les compteurs "une fois par
-#    tour". Les confondre fait DISPARAITRE des solutions sans rien signaler
-#    (mesure : 10 fusions sur les 290 etats de la ligne de reference).
+# 3. Processor state. The public API only exposes the zones; two states can
+#    have the same field, the same hand and the same prompt while differing in
+#    the resolution stack in progress or in the once-per-turn counters.
+#    Conflating them makes solutions DISAPPEAR with nothing to show for it
+#    (measured: 10 merges over the 290 states of the reference line).
 $procState = @'
-/* --- combosolver : etat du processeur -------------------------------------
-   Serialise ce que les zones ne disent pas : pile d'unites en cours de
-   resolution, chaine courante, compteurs d'activation par tour, phase et LP.
-   Sert de complement a la cle de transposition du solveur. */
+/* --- combosolver: processor state ------------------------------------------
+   Serialises what the zones do not say: the stack of units being resolved, the
+   current chain, the per-turn activation counters, the phase and the life
+   points. Complements the solver's transposition key. */
 static uint16_t combosolver_unit_step(const processor_unit& u) {
 	return std::visit([](const auto& arg) -> uint16_t {
 		using T = std::decay_t<decltype(arg)>;
@@ -182,8 +181,8 @@ static uint16_t combosolver_unit_step(const processor_unit& u) {
 }
 static void combosolver_dump_counts(std::vector<uint8_t>& buf,
 									const std::unordered_map<uint64_t, uint32_t>& m) {
-	/* Trie : un unordered_map n'a pas d'ordre stable, et une cle instable
-	   rendrait le digest non deterministe. */
+	/* Sorted: an unordered_map has no stable order, and an unstable key would
+	   make the digest non-deterministic. */
 	std::vector<std::pair<uint64_t, uint32_t>> sorted(m.begin(), m.end());
 	std::sort(sorted.begin(), sorted.end());
 	insert_value<uint32_t>(buf, sorted.size());
@@ -192,8 +191,8 @@ static void combosolver_dump_counts(std::vector<uint8_t>& buf,
 		insert_value<uint32_t>(buf, kv.second);
 	}
 }
-/* Pas de prefixe OCGAPI ici : dans cette version du core la liaison est portee
-   par la declaration de l'en-tete, les definitions n'en portent pas. */
+/* No OCGAPI prefix here: in this version of the core the linkage is carried by
+   the header declaration, and the definitions do not repeat it. */
 void* OCG_DuelQueryProcessorState(OCG_Duel ocg_duel, uint32_t* length) {
 	auto* pduel = static_cast<duel*>(ocg_duel);
 	auto& field = *pduel->game_field;
@@ -209,8 +208,8 @@ void* OCG_DuelQueryProcessorState(OCG_Duel ocg_duel, uint32_t* length) {
 		insert_value<uint32_t>(buf, field.player[p].used_location);
 		insert_value<uint32_t>(buf, field.player[p].extra_p_count);
 	}
-	/* Pile de resolution : c'est elle qui distingue deux instants au board
-	   identique au milieu d'une meme chaine. */
+	/* Resolution stack: it is what tells apart two instants with an identical
+	   board in the middle of the same chain. */
 	insert_value<uint32_t>(buf, field.core.units.size());
 	for(const auto& u : field.core.units) {
 		insert_value<uint8_t>(buf, u.index());
@@ -253,30 +252,30 @@ Edit-File (Join-Path $dst "ocgapi.h") `
     @'
 OCGAPI void* OCG_DuelQueryField(OCG_Duel ocg_duel, uint32_t* length);
 
-/* combosolver : etat du processeur, invisible depuis les zones seules. */
+/* combosolver: processor state, invisible from the zones alone. */
 OCGAPI void* OCG_DuelQueryProcessorState(OCG_Duel ocg_duel, uint32_t* length);
 '@ `
     "ocgapi.h (declaration)"
 
-# --- Scripts de cartes contemporains du replay.
+# --- Card scripts contemporary with the replay.
 #
-# Le core ne suffit pas : un jeu de scripts decale fait diverger le rejeu tout
-# aussi silencieusement. Les scripts installes dans EDOPro suivent le depot
-# vivant et avancent en permanence ; il faut donc en figer un export a la date
-# du replay et le passer au solveur via --scriptdir.
+# The core is not enough: a mismatched script set makes the replay diverge just
+# as silently. The scripts installed in EDOPro follow the live repository and
+# move constantly, so an export has to be frozen at the replay's date and passed
+# to the solver through --scriptdir.
 $scriptsDst = Join-Path $root "deps/scripts_$ScriptsDate"
 if (Test-Path (Join-Path $scriptsDst "script")) {
-    Write-Host "scripts deja extraits -> deps/scripts_$ScriptsDate"
+    Write-Host "scripts already extracted -> deps/scripts_$ScriptsDate"
 } else {
     $scriptsSrc = Join-Path $root "deps/CardScripts.git"
     if (-not (Test-Path (Join-Path $scriptsSrc ".git"))) {
-        Write-Host "clonage du depot de scripts (une fois)..."
+        Write-Host "cloning the script repository (once)..."
         git clone --quiet --bare https://github.com/ProjectIgnis/CardScripts.git $scriptsSrc
-        if ($LASTEXITCODE -ne 0) { throw "clonage du depot de scripts en echec" }
+        if ($LASTEXITCODE -ne 0) { throw "cloning the script repository failed" }
     }
     if ($(git -C $scriptsSrc cat-file -t $ScriptsCommit 2>$null) -ne "commit") {
         git -C $scriptsSrc fetch --quiet origin
-        if ($LASTEXITCODE -ne 0) { throw "git fetch a echoue et $ScriptsCommit est absent localement" }
+        if ($LASTEXITCODE -ne 0) { throw "git fetch failed and $ScriptsCommit is missing locally" }
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $scriptsDst "script") | Out-Null
     $tar = Join-Path $env:TEMP "scripts-$($ScriptsCommit.Substring(0,8)).tar"
@@ -286,12 +285,12 @@ if (Test-Path (Join-Path $scriptsDst "script")) {
     Write-Host "scripts -> deps/scripts_$ScriptsDate  ($ScriptsCommit)"
 }
 
-# Trace de version : le solveur la relit pour l'inscrire dans ses rapports.
+# Version stamp: the solver reads it back to record it in its reports.
 @{ ocgcore = $Commit; lua = $luaCommit; patched = $true;
    fetched = (Get-Date -Format "o") } | ConvertTo-Json |
     Set-Content (Join-Path $dst "SOLVER_DEPS.json")
 
 Write-Host "ok -> $Dest"
-Write-Host ("  {0} fichiers .cpp, lua {1} fichiers .c" -f
+Write-Host ("  {0} .cpp files, lua {1} .c files" -f
     (Get-ChildItem $dst -Filter *.cpp).Count,
     (Get-ChildItem (Join-Path $dst "lua/src") -Filter *.c).Count)

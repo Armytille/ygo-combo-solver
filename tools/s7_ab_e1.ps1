@@ -1,6 +1,6 @@
-# Session 7 — bras ADAPT de l'etalon 1 (escalade meme-deck enracinee sur la
-# ligne 259). Le bras temoin est le run d'escalade de MEME graine (s7_esc<seed>) :
-# meme binaire, meme commande, le mecanisme etant inerte sans --adapt.
+# ADAPT arm of benchmark 1 (same-deck climb rooted on line 259). The control
+# arm is the climb run with the SAME seed (s7_esc<seed>): same binary, same
+# command, the mechanism being inert without --adapt.
 param([string]$Seed = '888',
       [string]$Corpus = 'sF_final',
       [int]$Passes = 4,

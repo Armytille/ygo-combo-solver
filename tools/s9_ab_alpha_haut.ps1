@@ -1,35 +1,35 @@
-# PROLONGEMENT DU CADRAN ALPHA VERS LE HAUT (session 9, C3 — suite).
+# EXTENSION OF THE ALPHA DIAL UPWARDS.
 #
-# POURQUOI CE SECOND CADRAN EXISTE
+# WHY THIS SECOND DIAL EXISTS
 #
-# Le premier (tools/s9_ab_alpha.ps1) a ete centre sur une arithmetique fausse.
-# J'avais suppose h_root = 1 partout apres la correction C3, parce que le
-# finisseur part d'un etat de recul « deja a 7/8 cartes ». La colonne h0=,
-# ajoutee par la meme correction, montre que c'est faux : h_root vaut 1 a la
-# racine « recul 0 » — celle qui EPUISE en 42 expansions et ne pese rien dans la
-# comparaison — mais 4, 5 et 6 aux reculs 10, 20/45 et 30, qui sont les quatre
+# The first one (tools/s9_ab_alpha.ps1) was centred on wrong arithmetic. It
+# assumed h_root = 1 everywhere after the fix, because the finisher starts from
+# a backtrack state "already at 7/8 cards". The h0= column, added by the same
+# fix, shows that is false: h_root is 1 at the "backtrack 0" root (the one that
+# EXHAUSTS in 42 expansions and weighs nothing in the comparison) but 4, 5 and 6
+# at backtracks 10, 20/45 and 30, which are the four that count.
 # racines effectivement comparees.
 #
-# L'equivalence correcte entre les deux echelles est donc :
+# So the correct equivalence between the two scales is:
 #
 #     inv_w = exp(alpha * h(n) / h_root)
 #     session 8 : h_root = 8 (constante)   ->  coefficient effectif alpha_s8 / 8
 #     session 9 : h_root = h(racine)       ->  coefficient effectif alpha_s9 / h0
 #     equivalence :  alpha_s9 = alpha_s8 * h0 / 8,  soit x0,5 a x0,75
 #
-# Le cadran 1/2/3/5/8 couvre donc des equivalents s8 de ~1,5 a ~13 : il est
-# ENTIEREMENT SOUS le point ou la session 8 avait vu son gain (alpha_s8 = 25,
-# equivalent s9 ~ 12,5 a 18,75). Il mesure la queue basse, pas l'optimum.
+# The 1/2/3/5/8 dial therefore covers old-scale equivalents of ~1.5 to ~13: it
+# is ENTIRELY BELOW the point where the earlier session saw its gain (alpha_old
+# = 25, new-scale equivalent ~12.5 to 18.75). It measures the low tail, not the
 #
-# Ce cadran-ci va chercher l'optimum la ou il devrait etre, et le depasse d'un
-# cran pour qu'il soit ENCADRE et non seulement atteint (piege 46 : un cadran se
-# prolonge, et un point isole ne prouve rien) :
+# optimum. This dial goes looking for the optimum where it should be, and one
+# notch past it so that it is BRACKETED rather than merely reached (a dial is
+# extended, and an isolated point proves nothing):
 #
 #     alpha_s9   12    16    20    28
 #     equiv. s8  ~16   ~21   ~27   ~37
 #
-# Montage identique au premier cadran — etalon 0, A/B DETERMINISTE. Meme
-# controle gratuit : « appr0 recul 0 » doit rendre 42 exp., b=0, EPUISE dans
+# Setup identical to the first dial: benchmark 0, DETERMINISTIC A/B. Same free
+# check: "appr0 backtrack 0" must return 42 expansions, b=0, EXHAUSTED in
 # chaque bras.
 param([int]$Ms = 300000,
       [int]$FinMin = 260000,
