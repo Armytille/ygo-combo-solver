@@ -19,19 +19,9 @@ s[0-9A-Z]*_*/
 __pycache__/
 
 # --- portage WebAssembly ---
-# Liste BLANCHE : dans wasm/, tout est genere (build, objets, assets
-# rassembles, sorties de runs, amalgamation sqlite copiee depuis vcpkg) sauf les
-# quelques sources ci-dessous. Une liste noire se serait fait deborder au
-# premier repertoire de mesure.
-wasm/*
-!wasm/build_wasm.ps1
-!wasm/patch_features.py
-!wasm/sqlite/
-wasm/sqlite/*
-!wasm/sqlite/sqlite3-vcpkg-config.h
-!wasm/web/
-wasm/web/*
-!wasm/web/index.html
-!wasm/web/serve.py
-!wasm/web/mesure.mjs
-!wasm/web/etalonB.yrpX
+# Il ne vit plus ici : ses sources sont sur la branche `web`, avec l'atelier
+# navigateur et les documents qui n'ont de sens que pour la page. Ce qui reste
+# dans wasm/ sur cette branche-ci est un arbre de BUILD (91 Mo de module, de
+# donnees empaquetees et de node_modules) qu'on ne veut ni suivre ni effacer :
+# on l'ignore en bloc.
+wasm/
