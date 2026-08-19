@@ -164,6 +164,9 @@ private:
 		size_t live_bytes = 0;
 	};
 
+	// Marque un bloc frais comme sale (voir arena.cpp) : referme le trou des
+	// copies en bloc, que l'instrumentation de clang ne voit pas.
+	static void MarkFresh(const void* p, size_t n);
 	bool CommitTo(size_t offset);
 	void* AllocSpans(size_t span_count);
 	void FreeSpans(size_t span_index, size_t span_count);
@@ -175,6 +178,16 @@ private:
 	size_t SyncDirty();
 	void CaptureMetadata(Checkpoint& cp) const;
 	void RestoreMetadata(const Checkpoint& cp);
+#if defined(__EMSCRIPTEN__)
+	// Le suivi materiel des pages sales n'existe pas en wasm ; il est remplace
+	// par une barriere d'ecriture logicielle, qui n'est pas prouvable par
+	// lecture. Ces trois-la l'EXIGENT au lieu de la supposer (R2V_ARENA_VERIFY=1).
+	void VerifyDirtySet(const Checkpoint& cp);
+public:
+	static bool VerifyBarrier();
+	static void PrintVerifyReport();
+private:
+#endif
 
 	uint8_t* base = nullptr;
 	std::uintptr_t base_addr = 0;

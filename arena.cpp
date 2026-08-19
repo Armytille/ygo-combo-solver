@@ -7,12 +7,243 @@
 #include <cstring>
 #include <new>
 
+#if defined(__EMSCRIPTEN__)
+// --- DOS WEBASSEMBLY -------------------------------------------------------
+//
+// Trois choses manquent, et une seule est difficile.
+//
+//   1. VirtualAlloc/VirtualFree. La memoire lineaire wasm est UN bloc contigu
+//      qui ne bouge jamais : un malloc unique au demarrage satisfait, gratis,
+//      l'invariant central de l'arene (« restaurer a la MEME adresse de base »).
+//      La reserve paresseuse disparait — `reserve` devient du commit reel, il
+//      faut donc le dimensionner au filigrane observe (--arena-mb), pas a
+//      l'espace d'adressage. L'empoisonnement existant est le garde-fou.
+//   2. _BitScanForward64 / __rdtsc. Substitutions directes.
+//   3. GetWriteWatch. AUCUN equivalent : ni mprotect, ni gestionnaire de faute
+//      de page, ni bits sales (la proposition memory-control n'est pas
+//      expediee). C'est le seul verrou dur du portage, et il est traite par une
+//      BARRIERE D'ECRITURE logicielle — voir `barrier` plus bas.
+#include <atomic>
+#include <emscripten.h>
+#include <cstdlib>
+#define R2V_WASM 1
+// Il n'existe pas de compteur de cycles en wasm. `emscripten_get_now()` rend
+// des millisecondes ; on compte donc en NANOSECONDES, ce qui fait tomber
+// TscGhz() sur 1,0 et laisse toute la table de profil juste, sans la toucher.
+//
+// ATTENTION : c'est un appel vers JS. Sous node il est nanoseconde et bon
+// marche ; dans le navigateur, `performance.now()` est BRIDE A 5 us en contexte
+// cross-origin isolé — donc en isolation, la table --profile ne veut plus rien
+// dire. Les juges du navigateur sont le temps de mur et les compteurs exacts.
+static inline unsigned long long r2v_tsc_ns() {
+	return static_cast<unsigned long long>(emscripten_get_now() * 1e6);
+}
+#define __rdtsc() r2v_tsc_ns()
+#else
 #include <intrin.h>   // _BitScanForward64
 #include <windows.h>
+#endif
 
 // Point d'accroche declare par le patch lua/luaconf-customize.h. C'est par la
 // que tout le heap Lua bascule dans l'arene.
 #include "luaconf-customize.h"
+
+#if defined(R2V_WASM)
+// --- BARRIERE D'ECRITURE ---------------------------------------------------
+//
+// Remplace le suivi materiel des pages sales. Deux replis plus simples ont ete
+// REFUTES avant d'ecrire ceci, et par la BANDE PASSANTE, pas par le CPU
+// (docs/etude-portage-navigateur.md §4) :
+//   - copie pleine de la zone servie : x21,4 sur les octets, 4,63 To en 26 s ;
+//   - detection par comparaison au miroir : 10,8 To lus, meme mur.
+// Ici le trafic reste celui du natif ; on ne paie qu'en instructions.
+//
+// Le bitmap couvre TOUTE la memoire lineaire et il est indexe par le numero de
+// page ABSOLU. Consequence : la barriere n'a NI test d'intervalle NI
+// branchement — un store vers la pile C marque un bit que personne ne lit,
+// puisque SyncDirty ne balaye que la tranche de l'arene. C'est ce qui la rend
+// assez bon marche pour etre posee devant chaque ecriture de ocgcore et de Lua.
+//
+// L'instrumentation vient de clang (-fsanitize-coverage=trace-stores), appliquee
+// AUX SEULES unites de ocgcore et de Lua. Les intrinseques memoire (memcpy,
+// memset, memmove) ne sont PAS instrumentees par ce passage : elles sont
+// interceptees a l'edition de liens (-Wl,--wrap=) et marquees a la main. Le
+// juge de correction n'est pas un raisonnement, c'est le harnais deja present :
+// « test de fidelite de la restauration » et « test de stress des instantanes ».
+namespace barrier {
+
+constexpr size_t kPageShift = 12;
+constexpr size_t kPageSize = size_t(1) << kPageShift;
+// Couverture : TOUT l'espace adressable de wasm32 (4 Gio). A 4 Ko par page et
+// 1 bit par page, cela fait 2^20 pages, soit 128 Ko de bitmap par thread —
+// alloue une fois, jamais realloue, resident en cache. Couvrir tout l'espace
+// est ce qui permet a la barriere de n'avoir ni test d'intervalle ni
+// branchement : un store hors arene marque un bit que personne ne lit.
+//
+// PIEGE 32 BITS : ecrire `size_t(4) << 30` donne ZERO ici — size_t fait 32 bits
+// en wasm32. Le bitmap devenait un tableau vide et chaque marquage ecrivait
+// hors bornes. On compte donc en PAGES, jamais en octets.
+constexpr size_t kPages = size_t(1) << (32 - kPageShift);
+constexpr size_t kWords = kPages >> 6;
+
+// PAS de `thread_local uint64_t bits[kWords]` : 128 Ko de TLS par thread font
+// tomber le build threade d'emscripten (mesure : -fsanitize-coverage seul, ou
+// -mno-bulk-memory-opt seul, suffisent alors a planter — l'image TLS est copiee
+// par des instructions bulk a la naissance de chaque thread). Le TLS ne porte
+// donc qu'un POINTEUR ; le bitmap vit sur le tas, un par thread, alloue par
+// Arena::Init sur le thread proprietaire.
+//
+// `dummy` sert de cible aux threads qui n'ont pas d'arene : le marquage y est
+// sans effet et personne ne le lit, ce qui evite un test de nullite dans la
+// barriere — l'endroit ou une branche couterait le plus cher.
+alignas(64) uint64_t dummy[kWords];
+thread_local uint64_t* bits = dummy;
+
+#define R2V_NOCOV __attribute__((no_sanitize("coverage")))
+
+R2V_NOCOV inline void MarkPage(uintptr_t a) {
+	const size_t page = a >> kPageShift;
+	bits[page >> 6] |= uint64_t(1) << (page & 63);
+}
+
+// Dote le thread courant de son propre bitmap. Idempotent.
+void EnsureBits() {
+	if(bits != dummy)
+		return;
+	if(void* p = std::calloc(kWords, sizeof(uint64_t)))
+		bits = static_cast<uint64_t*>(p);
+}
+
+// Pour les ecritures en bloc, que l'instrumentation ne voit pas.
+R2V_NOCOV void MarkRange(const void* p, size_t n) {
+	if(!n)
+		return;
+	uintptr_t a = reinterpret_cast<uintptr_t>(p);
+	const uintptr_t end = a + n - 1;
+	for(a &= ~(kPageSize - 1); a <= end; a += kPageSize)
+		MarkPage(a);
+}
+
+// --- REGISTRE DES ARENES (variables GLOBALES, surtout PAS thread_local) -----
+//
+// Les crochets memcpy/memset sont poses sur TOUT le programme, y compris sur
+// `__wasm_init_tls`, qui copie le bloc TLS d'un thread naissant... avec memcpy.
+// Or `bits` VIT dans ce bloc TLS. Marquer depuis le crochet a ce moment-la
+// ecrit a travers un TLS pas encore en place — et c'est exactement ce qui
+// faisait tomber la recherche (le rejeu, lui, ne cree aucun thread : le bug
+// etait invisible au test de fidelite).
+//
+// Le crochet ne touche donc au TLS QUE si la destination tombe dans une arene.
+// Filtre en deux temps : l'enveloppe de toutes les arenes vivantes (deux
+// comparaisons, jamais de TLS), puis, sur touche seulement, le registre exact —
+// une adresse peut etre dans l'enveloppe sans etre dans aucune arene, et un
+// bloc TLS pourrait justement s'y trouver.
+constexpr size_t kMaxArenas = 64;
+std::atomic<uintptr_t> hull_lo{ ~uintptr_t(0) }, hull_hi{ 0 };
+std::atomic<uintptr_t> reg_lo[kMaxArenas], reg_hi[kMaxArenas];
+std::atomic<size_t> reg_count{ 0 };
+
+void Register(uintptr_t lo, uintptr_t hi) {
+	const size_t i = reg_count.fetch_add(1, std::memory_order_relaxed);
+	if(i < kMaxArenas) {
+		reg_lo[i].store(lo, std::memory_order_relaxed);
+		reg_hi[i].store(hi, std::memory_order_relaxed);
+	}
+	// L'enveloppe ne fait que grandir : un rétrecissement serait une course.
+	uintptr_t cur = hull_lo.load(std::memory_order_relaxed);
+	while(lo < cur && !hull_lo.compare_exchange_weak(cur, lo, std::memory_order_relaxed)) {}
+	cur = hull_hi.load(std::memory_order_relaxed);
+	while(hi > cur && !hull_hi.compare_exchange_weak(cur, hi, std::memory_order_relaxed)) {}
+}
+
+R2V_NOCOV inline bool InAnyArena(const void* p) {
+	const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+	if(a < hull_lo.load(std::memory_order_relaxed) ||
+	   a >= hull_hi.load(std::memory_order_relaxed))
+		return false;
+	const size_t n = reg_count.load(std::memory_order_relaxed);
+	for(size_t i = 0; i < n && i < kMaxArenas; ++i)
+		if(a >= reg_lo[i].load(std::memory_order_relaxed) &&
+		   a < reg_hi[i].load(std::memory_order_relaxed))
+			return true;
+	return false;
+}
+
+// Analogue de ResetWriteWatch(base, committed) : efface la tranche du bitmap
+// qui couvre l'arene. Appele apres une restauration, sinon les ecritures de la
+// restauration ELLE-MEME s'accumuleraient (l'arene est alors identique au
+// miroir : rien n'y est sale).
+R2V_NOCOV void ClearSlice(uintptr_t base_addr, size_t bytes) {
+	const size_t first = (base_addr >> kPageShift) >> 6;
+	const size_t words = (bytes >> kPageShift) / 64 + 2;
+	for(size_t w = 0; w < words; ++w)
+		bits[first + w] = 0;
+}
+
+} // namespace barrier
+
+#if !defined(R2V_NO_BARRIER)
+extern "C" {
+// Rappels de -fsanitize-coverage=trace-stores. Definis ici pour que le LTO
+// puisse les replier dans le code instrumente : sans inlining, l'appel coute
+// plus cher que le marquage lui-meme.
+R2V_NOCOV void __sanitizer_cov_store1(void* p) { barrier::MarkPage(reinterpret_cast<uintptr_t>(p)); }
+R2V_NOCOV void __sanitizer_cov_store2(void* p) { barrier::MarkPage(reinterpret_cast<uintptr_t>(p)); }
+R2V_NOCOV void __sanitizer_cov_store4(void* p) { barrier::MarkPage(reinterpret_cast<uintptr_t>(p)); }
+R2V_NOCOV void __sanitizer_cov_store8(void* p) { barrier::MarkPage(reinterpret_cast<uintptr_t>(p)); }
+R2V_NOCOV void __sanitizer_cov_store16(void* p) { barrier::MarkPage(reinterpret_cast<uintptr_t>(p)); }
+// Une ecriture de 16 octets peut chevaucher deux pages ; les autres tailles
+// sont alignees par le compilateur et ne chevauchent jamais.
+R2V_NOCOV void __sanitizer_cov_storeN(void* p, size_t n) { barrier::MarkRange(p, n); }
+
+// Interception des ecritures en bloc (voir --wrap dans build_wasm.ps1).
+void* __real_memcpy(void* d, const void* s, size_t n);
+void* __real_memmove(void* d, const void* s, size_t n);
+void* __real_memset(void* d, int c, size_t n);
+R2V_NOCOV void* __wrap_memcpy(void* d, const void* s, size_t n) {
+#if !defined(R2V_WRAP_INERT)
+	if(barrier::InAnyArena(d))
+		barrier::MarkRange(d, n);
+#endif
+	return __real_memcpy(d, s, n);
+}
+R2V_NOCOV void* __wrap_memmove(void* d, const void* s, size_t n) {
+#if !defined(R2V_WRAP_INERT)
+	if(barrier::InAnyArena(d))
+		barrier::MarkRange(d, n);
+#endif
+	return __real_memmove(d, s, n);
+}
+R2V_NOCOV void* __wrap_memset(void* d, int c, size_t n) {
+#if !defined(R2V_WRAP_INERT)
+	if(barrier::InAnyArena(d))
+		barrier::MarkRange(d, n);
+#endif
+	return __real_memset(d, c, n);
+}
+// --- ABAISSEMENT DES OPERATIONS EN BLOC (wasm-opt) --------------------------
+//
+// Avec des threads, `bulk-memory` est obligatoire : clang abaisse alors les
+// copies de STRUCTURE en instruction `memory.copy`, invisible a
+// -fsanitize-coverage comme a --wrap. Le verificateur chiffre le trou : 2 pages
+// par run, et ce sont des tableaux de pointeurs — de la vraie corruption.
+//
+// `wasm-opt --llvm-memory-copy-fill-lowering` remplace ces instructions par des
+// APPELS a `__memory_copy` / `__memory_fill`. En les DEFINISSANT ici, on
+// reprend la main sur la seule ecriture qui echappait encore.
+R2V_NOCOV void __memory_copy(void* d, const void* s, size_t n) {
+	if(barrier::InAnyArena(d))
+		barrier::MarkRange(d, n);
+	__real_memmove(d, s, n);   // memmove : la source peut chevaucher
+}
+R2V_NOCOV void __memory_fill(void* d, int v, size_t n) {
+	if(barrier::InAnyArena(d))
+		barrier::MarkRange(d, n);
+	__real_memset(d, v, n);
+}
+} // extern "C"
+#endif   // !R2V_NO_BARRIER
+#endif   // R2V_WASM
 
 namespace solver {
 namespace {
@@ -77,6 +308,26 @@ ArenaPause::ArenaPause() : previous(t_active) { t_active = nullptr; }
 ArenaPause::~ArenaPause() { t_active = previous; }
 
 bool Arena::Init(size_t reserve, std::uintptr_t preferred_base, std::string& error) {
+#if defined(R2V_WASM)
+	(void)preferred_base;   // une seule memoire lineaire : la base est ce qu'elle est
+	page_size = barrier::kPageSize;
+	reserve = (reserve + kSpanSize - 1) & ~(kSpanSize - 1);
+	// Alignement sur 64 pages : la tranche du bitmap de la barriere tombe alors
+	// sur une frontiere de MOT, et SyncDirty la verse sans decalage.
+	constexpr size_t kBaseAlign = barrier::kPageSize * 64;
+	base = static_cast<uint8_t*>(std::aligned_alloc(kBaseAlign,
+					(reserve + kBaseAlign - 1) & ~(kBaseAlign - 1)));
+	write_watch = base != nullptr;   // la barriere joue le role du suivi materiel
+	if(!base) {
+		error = "aligned_alloc a echoue pour " + std::to_string(reserve) + " octets";
+		return false;
+	}
+	barrier::EnsureBits();
+	// Fait connaitre la plage aux crochets memoire : sans cela ils ne peuvent
+	// pas savoir, SANS toucher au TLS, si une copie en bloc vise l'arene.
+	barrier::Register(reinterpret_cast<uintptr_t>(base),
+					  reinterpret_cast<uintptr_t>(base) + reserve);
+#else
 	SYSTEM_INFO si{};
 	GetSystemInfo(&si);
 	page_size = si.dwPageSize;
@@ -107,6 +358,7 @@ bool Arena::Init(size_t reserve, std::uintptr_t preferred_base, std::string& err
 		error = "VirtualAlloc a echoue pour " + std::to_string(reserve) + " octets";
 		return false;
 	}
+#endif
 
 	base_addr = reinterpret_cast<std::uintptr_t>(base);
 	reserved = reserve;
@@ -143,7 +395,11 @@ void Arena::Shutdown() {
 	free_span_runs.clear();
 	dirty_scratch.clear();
 	if(base) {
+#if defined(R2V_WASM)
+		std::free(base);
+#else
 		VirtualFree(base, 0, MEM_RELEASE);
+#endif
 		base = nullptr;
 	}
 	reserved = committed = 0;
@@ -156,8 +412,16 @@ bool Arena::CommitTo(size_t offset) {
 	want = (std::min)(want, reserved);
 	if(want <= committed)
 		return false;
+#if defined(R2V_WASM)
+	// Rien a demander au systeme : la plage est deja a nous. `committed` reste
+	// un FILIGRANE — il borne le miroir et le balayage de SyncDirty, donc il
+	// garde tout son sens. La page est mise a zero pour que le miroir parte
+	// d'un contenu defini (VirtualAlloc(MEM_COMMIT) le faisait gratuitement).
+	std::memset(base + committed, 0, want - committed);
+#else
 	if(!VirtualAlloc(base + committed, want - committed, MEM_COMMIT, PAGE_READWRITE))
 		return false;
+#endif
 	committed = want;
 	return true;
 }
@@ -194,6 +458,29 @@ void Arena::FreeSpans(size_t span_index, size_t span_count) {
 	free_span_runs.push_back(span_index);
 }
 
+// FERMETURE DU TROU `memory.copy` (wasm threade).
+//
+// Avec des threads, `bulk-memory` est obligatoire — donc clang abaisse les
+// copies de STRUCTURE en instruction `memory.copy`, que ni
+// -fsanitize-coverage ni --wrap ne voient. Constat du verificateur : 2 pages
+// echappaient a chaque run.
+//
+// Or ces copies visent presque toujours un bloc QUI VIENT D'ETRE ALLOUE. On
+// marque donc le bloc a l'allocation : n'importe quelle ecriture ulterieure,
+// vue ou non par l'instrumentation, tombe alors sur une page deja sale. Le
+// sur-marquage est toujours SUR (il recopie une page de trop, jamais une de
+// moins) et il coute une poignee d'instructions par allocation.
+//
+// Ce qui reste dehors — une copie en bloc vers un objet DEJA VIEUX — est ce que
+// le verificateur doit continuer de chiffrer a zero.
+void Arena::MarkFresh(const void* p, size_t n) {
+#if defined(R2V_WASM)
+	barrier::MarkRange(p, n);
+#else
+	(void)p; (void)n;
+#endif
+}
+
 void* Arena::Allocate(size_t size) {
 	if(size == 0)
 		size = 1;
@@ -213,6 +500,7 @@ void* Arena::Allocate(size_t size) {
 		for(size_t i = 1; i < span_count; ++i)
 			spans[idx + i].klass = kLargeTail;
 		live_bytes += span_count * kSpanSize;
+		MarkFresh(p, span_count * kSpanSize);
 		return p;
 	}
 
@@ -236,6 +524,7 @@ void* Arena::Allocate(size_t size) {
 	void* p = head;
 	head = *reinterpret_cast<void**>(p);
 	live_bytes += kClassSizes[klass];
+	MarkFresh(p, kClassSizes[klass]);
 	return p;
 }
 
@@ -307,6 +596,63 @@ void Arena::EnsureMirror() {
 size_t Arena::SyncDirty() {
 	if(!write_watch || !committed)
 		return 0;
+#if defined(R2V_WASM) && defined(R2V_NO_BARRIER)
+	// TEMOIN. Sans barriere, on ne sait rien : tout ce qui est servi est
+	// declare sale. C'est CORRECT (le repli deja prevu quand GetWriteWatch
+	// echoue) et c'est le bras contre lequel se mesure la barriere.
+	const size_t pages = committed / page_size + 1;
+	const size_t words = (pages + 63) / 64 + 1;
+	if(!checkpoints.empty()) {
+		std::vector<uint64_t>& bits = checkpoints.back().dirty;
+		if(bits.size() < words)
+			bits.resize(words, 0);
+		std::fill(bits.begin(), bits.end(), ~uint64_t(0));
+	}
+	return pages;
+#elif defined(R2V_WASM)
+	// R2V_ARENA_ALLDIRTY=1 : MEME binaire, dirty-set complet. C'est le seul
+	// moyen de departager « la barriere est incomplete » de « autre chose est
+	// casse » sans changer une seule ligne de code genere.
+	static const bool all_dirty = [] {
+		const char* e = std::getenv("R2V_ARENA_ALLDIRTY");
+		return e && *e && *e != '0';
+	}();
+	if(all_dirty) {
+		const size_t pages = committed / page_size + 1;
+		const size_t nw = (pages + 63) / 64 + 1;
+		barrier::ClearSlice(base_addr, committed);
+		if(!checkpoints.empty()) {
+			std::vector<uint64_t>& b = checkpoints.back().dirty;
+			if(b.size() < nw)
+				b.resize(nw, 0);
+			std::fill(b.begin(), b.end(), ~uint64_t(0));
+		}
+		return pages;
+	}
+	// Verse la tranche du bitmap de la barriere qui couvre l'arene dans le
+	// niveau courant, ET la remet a zero — meme semantique que
+	// GetWriteWatch(WRITE_WATCH_FLAG_RESET). La base etant alignee sur 64
+	// pages, la tranche commence sur une frontiere de mot : pas de decalage.
+	const size_t first = (base_addr >> barrier::kPageShift) >> 6;
+	const size_t words = (committed / page_size + 63) / 64 + 1;
+	std::vector<uint64_t>* bits = nullptr;
+	if(!checkpoints.empty()) {
+		bits = &checkpoints.back().dirty;
+		if(bits->size() < words)
+			bits->resize(words, 0);
+	}
+	size_t count = 0;
+	for(size_t w = 0; w < words; ++w) {
+		const uint64_t v = barrier::bits[first + w];
+		if(!v)
+			continue;
+		barrier::bits[first + w] = 0;
+		count += __builtin_popcountll(v);
+		if(bits)
+			(*bits)[w] |= v;
+	}
+	return count;
+#else
 	size_t capacity = committed / page_size + 1;
 	if(capacity > dirty_scratch.capacity())
 		return 0;
@@ -335,7 +681,80 @@ size_t Arena::SyncDirty() {
 		}
 	}
 	return static_cast<size_t>(count);
+#endif
 }
+
+#if defined(R2V_WASM)
+namespace {
+std::atomic<uint64_t> g_verify_checked{ 0 }, g_verify_missed{ 0 };
+}
+
+bool Arena::VerifyBarrier() {
+	static const bool on = [] {
+		const char* e = std::getenv("R2V_ARENA_VERIFY");
+		return e && *e && *e != '0';
+	}();
+	return on;
+}
+
+void Arena::VerifyDirtySet(const Checkpoint& cp) {
+	const size_t limit = (std::min)(cp.in_use, mirror.size());
+	uint64_t missed = 0;
+	for(size_t off = 0; off + page_size <= limit; off += page_size) {
+		if(std::memcmp(base + off, mirror.data() + off, page_size) == 0)
+			continue;
+		const size_t page = off / page_size;
+		const bool marked = (page >> 6) < cp.dirty.size() &&
+							(cp.dirty[page >> 6] & (uint64_t(1) << (page & 63)));
+		if(!marked) {
+			if(missed == 0 && g_verify_missed.load(std::memory_order_relaxed) < 4) {
+				std::fprintf(stderr,
+							 "!! barriere INCOMPLETE : page %zu (offset %zu) differe "
+							 "du miroir sans etre marquee\n", page, off);
+				// QUOI a change, et pas seulement OU : du texte designe une
+				// fonction de libc non interceptee, des pointeurs une copie de
+				// structure abaissee en `memory.copy`.
+				size_t shown = 0;
+				for(size_t k = 0; k + 16 <= page_size && shown < 3; ++k) {
+					if(base[off + k] == mirror[off + k])
+						continue;
+					++shown;
+					std::fprintf(stderr, "   +%04zu miroir:", k);
+					for(size_t j = 0; j < 16; ++j)
+						std::fprintf(stderr, " %02x", mirror[off + k + j]);
+					std::fprintf(stderr, "\n         arene :");
+					for(size_t j = 0; j < 16; ++j)
+						std::fprintf(stderr, " %02x", base[off + k + j]);
+					std::fprintf(stderr, "\n         texte : ");
+					for(size_t j = 0; j < 16; ++j) {
+						const uint8_t c = base[off + k + j];
+						std::fprintf(stderr, "%c", (c >= 32 && c < 127) ? c : '.');
+					}
+					std::fprintf(stderr, "\n");
+					k += 15;
+				}
+			}
+			++missed;
+		}
+	}
+	g_verify_checked.fetch_add(limit / page_size, std::memory_order_relaxed);
+	if(missed)
+		g_verify_missed.fetch_add(missed, std::memory_order_relaxed);
+}
+
+void Arena::PrintVerifyReport() {
+	if(!VerifyBarrier())
+		return;
+	const uint64_t checked = g_verify_checked.load(std::memory_order_relaxed);
+	const uint64_t missed = g_verify_missed.load(std::memory_order_relaxed);
+	std::printf("\n--- verificateur de la barriere d'ecriture ---\n"
+				"  pages comparees au miroir : %llu\n"
+				"  pages sales NON marquees  : %llu  %s\n",
+				(unsigned long long)checked, (unsigned long long)missed,
+				missed ? "<-- CORRUPTION : la barriere laisse passer des ecritures"
+					   : "(aucune : la barriere capture tout ce qui a bouge)");
+}
+#endif
 
 void Arena::CaptureMetadata(Checkpoint& cp) const {
 	cp.in_use = next_span * kSpanSize;
@@ -363,8 +782,12 @@ static void ForEachDirtyPage(const std::vector<uint64_t>& bits, F&& fn) {
 	for(size_t w = 0; w < bits.size(); ++w) {
 		uint64_t word = bits[w];
 		while(word) {
+#if defined(R2V_WASM)
+			const unsigned b = __builtin_ctzll(word);
+#else
 			unsigned long b;
 			_BitScanForward64(&b, word);
+#endif
 			word &= word - 1;
 			fn((w << 6) + b);
 		}
@@ -429,6 +852,20 @@ void Arena::Restore() {
 	ArenaPause off;
 	SyncDirty();
 	Checkpoint& cp = checkpoints.back();
+#if defined(R2V_WASM)
+	// VERIFICATEUR DE LA BARRIERE (R2V_ARENA_VERIFY=1).
+	//
+	// La barriere logicielle n'est pas prouvable par lecture : clang peut
+	// abaisser une copie de structure en `memory.copy`, que ni
+	// -fsanitize-coverage ni --wrap ne voient. On ne SUPPOSE donc pas qu'elle
+	// est complete — on l'exige, et on la mesure : toute page qui differe du
+	// miroir sans etre marquee est une page que Restore() ne remettrait pas en
+	// place, c'est-a-dire une corruption silencieuse.
+	//
+	// Cout : un memcmp de la zone servie par restauration. Reserve au diagnostic.
+	if(VerifyBarrier())
+		VerifyDirtySet(cp);
+#endif
 	size_t pages = 0;
 	ForEachDirtyPage(cp.dirty, [&](size_t page) {
 		size_t off_p = page * page_size;
@@ -442,8 +879,15 @@ void Arena::Restore() {
 	// l'empilement de ce niveau. On repart d'un suivi vierge, sinon les pages
 	// ecrites par la restauration elle-meme s'accumuleraient.
 	std::fill(cp.dirty.begin(), cp.dirty.end(), 0);
+#if defined(R2V_WASM)
+	// L'arene vient d'etre remise a l'etat du miroir. Les ecritures que la
+	// restauration a faites ELLE-MEME ont marque des bits : il faut les jeter,
+	// exactement comme ResetWriteWatch le fait cote Windows.
+	barrier::ClearSlice(base_addr, committed);
+#else
 	if(write_watch && committed)
 		ResetWriteWatch(base, committed);
+#endif
 	last_restore = { pages, pages * page_size };
 	prof::Count(prof::kPagesRestored, pages);
 }
@@ -542,8 +986,15 @@ void Arena::PopToAndRestore(size_t k) {
 	checkpoints.resize(target + 1);
 	RestoreMetadata(tcp);
 	std::fill(tcp.dirty.begin(), tcp.dirty.end(), 0);
+#if defined(R2V_WASM)
+	// L'arene vient d'etre remise a l'etat du miroir. Les ecritures que la
+	// restauration a faites ELLE-MEME ont marque des bits : il faut les jeter,
+	// exactement comme ResetWriteWatch le fait cote Windows.
+	barrier::ClearSlice(base_addr, committed);
+#else
 	if(write_watch && committed)
 		ResetWriteWatch(base, committed);
+#endif
 	last_restore = { pages, pages * page_size };
 	prof::Count(prof::kPagesRestored, pages);
 }
@@ -885,7 +1336,14 @@ void* operator new(size_t n, std::align_val_t al) {
 		a->NoteFallback();
 		solver::detail::NoteHostFallback();
 	}
+#if defined(R2V_WASM)
+	// aligned_alloc exige une taille multiple de l'alignement (C11) ; la CRT
+	// Windows ne l'exige pas. On arrondit.
+	const size_t a = static_cast<size_t>(al);
+	void* p = std::aligned_alloc(a, ((n ? n : 1) + a - 1) & ~(a - 1));
+#else
 	void* p = _aligned_malloc(n ? n : 1, static_cast<size_t>(al));
+#endif
 	if(!p)
 		throw std::bad_alloc();
 	return p;
@@ -900,7 +1358,11 @@ void operator delete(void* p, std::align_val_t) noexcept {
 			return;
 		}
 	}
+#if defined(R2V_WASM)
+	std::free(p);
+#else
 	_aligned_free(p);
+#endif
 }
 void operator delete[](void* p, std::align_val_t al) noexcept { operator delete(p, al); }
 void operator delete(void* p, size_t, std::align_val_t al) noexcept { operator delete(p, al); }

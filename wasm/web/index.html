@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>combosolver — wasm</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         margin: 0; padding: 1rem 1.25rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .25rem; font-weight: 600; }
+  .sub { opacity: .65; margin: 0 0 1rem; }
+  #etat { padding: .4rem .6rem; border-radius: 4px; display: inline-block;
+          background: color-mix(in srgb, currentColor 8%, transparent); }
+  pre { white-space: pre-wrap; word-break: break-word; max-height: 70vh;
+        overflow: auto; border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+        border-radius: 4px; padding: .6rem .8rem; }
+  button, select { font: inherit; padding: .35rem .9rem; }
+</style>
+
+<h1>combosolver — WebAssembly</h1>
+<p class="sub">Tout tourne chez le visiteur. Aucun octet ne repart.</p>
+<p>
+  <button id="go">Lancer l'étalon B (60 s)</button>
+  <label>workers <select id="th"></select></label>
+  <span id="etat">prêt</span>
+</p>
+<pre id="out"></pre>
+
+<script src="combosolver.js"></script>
+<script>
+const out  = document.getElementById('out');
+const etat = document.getElementById('etat');
+const sel  = document.getElementById('th');
+
+// LE THREAD PRINCIPAL NE DOIT RIEN FAIRE PENDANT LE CALCUL.
+//
+// emscripten proxie chaque ligne de stdout vers le thread principal, et le
+// solveur en imprime des milliers. Rendre un <pre> qui grossit, toutes les
+// 400 ms, sur ce thread, VOLE un cœur aux workers. On accumule dans un tableau
+// et on ne touche au DOM qu'a la fin.
+let buf = [];
+const emit = t => { buf.push(t); };
+window.__dump = () => buf.join(String.fromCharCode(10));
+
+const REF = '/replays/etalonB.yrpX';
+const baseArgs = (threads) => [
+  REF, '--scriptdir', '/scripts', '--workdir', '/edopro',
+  '--start', REF, '--no-plan', '--solve-ms', '60000', '--seed', '888',
+  '--arena-mb', '16', '--threads', String(threads),
+  '--guard', '5:Crystal Wing|Zalen@terrain+Junk Signal@main',
+  '--guard-off', 'mainadv<=2',
+  '--no-activate', 'Duel Evolution - Assault Zone',
+  '--no-chain', 'Zalen', '--no-chain', 'Crystal Wing',
+  '--resolve', 'PSY-Framelord Omega@terrain:2',
+  '--resolve', 'Trishula, Dragon of the Ice Barrier@terrain',
+  '--outdir', '/sortie',
+];
+
+const hc = navigator.hardwareConcurrency || 4;
+for (const n of [...new Set([hc, hc - 1, Math.max(1, hc >> 1), 4])].sort((a, b) => b - a)) {
+  const o = document.createElement('option');
+  o.value = n; o.textContent = n; sel.appendChild(o);
+}
+sel.value = String(hc);
+
+document.getElementById('go').onclick = async () => {
+  document.getElementById('go').disabled = true;
+  sel.disabled = true;
+  buf = [];
+  etat.textContent = 'chargement du module…';
+  const t0 = performance.now();
+  const mod = await createSolver({
+    print: emit, printErr: emit,
+    onExit: (code) => {
+      const s = (performance.now() - t0) / 1000;
+      etat.textContent = `termine (code ${code}) en ${s.toFixed(1)} s`;
+      out.textContent = buf.join('\n');          // le DOM, une seule fois
+      window.__r2v = { code, seconds: s, texte: buf.join('\n'),
+                       threads: Number(sel.value), load: window.__r2v_load };
+    },
+  });
+  const tLoad = performance.now() - t0;
+  window.__r2v_load = tLoad;
+  // Le replay de reference : depose dans MEMFS. Dans un vrai deploiement c'est
+  // un <input type=file> — le fichier ne quitte jamais la machine.
+  const yrp = new Uint8Array(await (await fetch('etalonB.yrpX')).arrayBuffer());
+  mod.FS.mkdir('/replays'); mod.FS.mkdir('/sortie');
+  mod.FS.writeFile(REF, yrp);
+  emit(`module + assets charges en ${(tLoad / 1000).toFixed(2)} s`);
+  etat.textContent = 'calcul en cours...';
+  mod.callMain(baseArgs(Number(sel.value)));
+};
+
+addEventListener('DOMContentLoaded', () => {
+  emit(`navigator.hardwareConcurrency = ${hc}`);
+  emit(`crossOriginIsolated = ${self.crossOriginIsolated}`);
+  emit(`SharedArrayBuffer = ${typeof SharedArrayBuffer !== 'undefined'}`);
+  out.textContent = buf.join('\n');
+});
+</script>

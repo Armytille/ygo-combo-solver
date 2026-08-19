@@ -10781,8 +10781,18 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 } // namespace
 
 int main(int argc, char** argv) {
+#if defined(__EMSCRIPTEN__)
+	// EN WASM, C'EST L'INVERSE : chaque ecriture non tamponnee est PROXIEE vers
+	// le thread principal du navigateur (emscripten y route stdout depuis les
+	// pthreads). Le solveur imprime des milliers de lignes pendant la recherche ;
+	// non tamponne, cela reveille le thread principal en permanence et vole du
+	// temps aux seize workers. On tamponne donc largement, et `exit` vide.
+	static char stdout_buf[1 << 20];
+	std::setvbuf(stdout, stdout_buf, _IOFBF, sizeof stdout_buf);
+#else
 	// Sans cela, un plantage emporte la fin du tampon et masque l'endroit exact.
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
+#endif
 	Options opt;
 	if(!ParseArgs(argc, argv, opt)) {
 		Usage();
@@ -12083,6 +12093,12 @@ int main(int argc, char** argv) {
 		}
 	}
 	arena.Shutdown();
+#if defined(__EMSCRIPTEN__)
+	// Bilan du verificateur de la barriere d'ecriture (R2V_ARENA_VERIFY=1) :
+	// en wasm, c'est lui qui tient le role du suivi materiel de pages sales, et
+	// une barriere incomplete corrompt en SILENCE. Muet si non demande.
+	Arena::PrintVerifyReport();
+#endif
 	// Cumul du run entier — les phases deja imprimees plus ce qui a tourne hors
 	// d'elles (rejeu de reference, mesures du jalon 0...).
 	prof::PrintTotal();
