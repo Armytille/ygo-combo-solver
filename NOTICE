@@ -1,0 +1,64 @@
+ygo-combo-solver
+Copyright (C) 2026 Armytille
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program, in the file LICENSE.  If not, see
+<https://www.gnu.org/licenses/>.
+
+Source code: https://github.com/Armytille/ygo-combo-solver
+
+
+THIRD-PARTY COMPONENTS
+======================
+
+combosolver.exe is statically linked. The following components are compiled
+into it, and their licences apply to the parts of the binary derived from them.
+
+ocgcore (edo9300's YGOPro script engine)
+----------------------------------------
+https://github.com/edo9300/ygopro-core
+Copyright (C) 2019-2026 Edoardo Lolletti (edo9300) and contributors
+GNU Affero General Public License version 3 or later.
+
+Derived from Fluorohydride's YGOPro script engine
+(https://github.com/Fluorohydride/ygopro-core), Copyright (c) 2015 Argon Sun,
+MIT License.
+
+Because ocgcore is AGPL-3.0-or-later and is linked into this program, the
+combined work is distributed under the same terms. The solver applies small
+patches to the engine so it can observe and snapshot a duel; those patches are
+in this repository, and the exact upstream commit they apply to is pinned in
+tools/fetch_solver_deps.ps1.
+
+Lua
+---
+https://www.lua.org
+Copyright (C) 1994-2019 Lua.org, PUC-Rio
+MIT License.
+
+LZMA SDK
+--------
+Public domain. Used to read and write compressed replay files.
+
+SQLite
+------
+https://www.sqlite.org
+Public domain. Used to read EDOPro card databases.
+
+
+NOT INCLUDED
+============
+
+Card data and card scripts are read at run time from the EDOPro installation on
+the machine. They are not part of this program and are not redistributed with
+it. Yu-Gi-Oh! is a trademark of Konami Digital Entertainment; this project is
+unaffiliated with and unendorsed by Konami.

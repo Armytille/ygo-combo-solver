@@ -165,7 +165,10 @@ $dist = Join-Path $root 'dist'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Force $dist | Out-Null
 Copy-Item $exe $dist
-Copy-Item 'README.md' $dist
+# LICENSE and NOTICE must travel with the binary: the engine linked into it is
+# AGPL-3.0-or-later, so the licence and the third-party notices are part of the
+# deliverable, not repository decoration.
+Copy-Item 'README.md', 'LICENSE', 'NOTICE' $dist
 New-Item -ItemType Directory -Force (Join-Path $dist 'gabarits') | Out-Null
 Copy-Item "$gabarit" (Join-Path $dist 'gabarits')
 
