@@ -15,6 +15,9 @@ It plays the game through the same engine EDOPro runs, so every line it hands
 you is legal and playable. There is no second rules model that might disagree
 with the real one.
 
+**[Download the latest release](https://github.com/Armytille/ygo-combo-solver/releases/latest)**
+— Windows x64, one executable, no dependencies. Needs an EDOPro installation.
+
 ---
 
 ## Contents
@@ -83,12 +86,17 @@ error rather than guessing.
 
 ## Install
 
-Download the release zip and unpack it anywhere. It contains a single
-executable with no dependencies, plus a sample replay.
+Download the [latest release](https://github.com/Armytille/ygo-combo-solver/releases/latest) and unpack it anywhere.
 
-The executable can live anywhere and be run from any directory. It reads cards
-and scripts from the EDOPro installation, and writes its results to whatever
-`--outdir` points at, relative to wherever you launched it.
+| File | |
+|---|---|
+| `combosolver.exe` | the solver; one file, no dependencies |
+| `gabarits/` | a sample replay, used by the examples below |
+| `README.md` | this document |
+
+The executable can live anywhere and run from any directory. It reads cards and
+scripts from the EDOPro installation, and writes its results wherever
+`--outdir` points, relative to where you launched it.
 
 To build it yourself, see [Build from source](#build-from-source).
 
