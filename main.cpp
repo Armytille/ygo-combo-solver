@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <filesystem>
@@ -976,7 +977,11 @@ struct Options {
 	// Replay supplying the STARTING position (deck, hand, seed). Empty: we search
 	// inside the reference's own duel.
 	std::string start_replay;
-	std::string workdir = "D:\\ProjectIgnis";
+	// EDOPro installation. No default: an absolute path baked into the binary
+	// only ever works on one machine. Taken from --workdir, else from the
+	// COMBOSOLVER_WORKDIR environment variable; absent both, the run refuses
+	// to start rather than guess.
+	std::string workdir;
 	std::vector<std::string> scriptdirs;
 	// Directory of the replays produced: the requested deliverable.
 	std::string outdir = "solutions";
@@ -1649,7 +1654,9 @@ void Usage() {
 		"that implies it) the run is a replay plus the self-checks, and no search.\n"
 		"\n"
 		"INPUT AND OUTPUT\n"
-		"  --workdir <dir>    EDOPro installation (default D:\\ProjectIgnis)\n"
+		"  --workdir <dir>    EDOPro installation. REQUIRED, unless the\n"
+		"                     COMBOSOLVER_WORKDIR environment variable\n"
+		"                     supplies it.\n"
 		"  --scriptdir <dir>  card script set, highest priority first (repeatable).\n"
 		"                     Use an export of the repository contemporary with the\n"
 		"                     replay: a mismatched set makes the replay diverge in\n"
@@ -2511,6 +2518,15 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 	// substantive lesson: it grafted MCPS's conditioning onto an NRPA LOGIT, where
 	// the paper conditions a REWARD AVERAGE. `--qhat` is what implements the
 	// mechanism.
+	if(o.workdir.empty()) {
+		if(const char* env = std::getenv("COMBOSOLVER_WORKDIR"))
+			o.workdir = env;
+	}
+	if(o.workdir.empty()) {
+		std::printf("!! no EDOPro installation: pass --workdir <dir>, or set the "
+					"COMBOSOLVER_WORKDIR environment variable\n");
+		return false;
+	}
 	return !o.replay.empty();
 }
 

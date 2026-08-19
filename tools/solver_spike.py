@@ -9,7 +9,7 @@ in the embedded yrp1, and measures what everything else depends on:
   * the cost of the reference line (C_ref, A_ref, D_ref);
   * the target board at the end of the target player's turn.
 
-usage: solver_spike.py <replay.yrpX> [--workdir D:\\ProjectIgnis] [--verbose]
+usage: solver_spike.py <replay.yrpX> [--workdir <edopro-install>] [--verbose]
 """
 
 import argparse
@@ -456,7 +456,8 @@ def run(path, workdir, dll, verbose, scriptdirs=None):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("replay")
-    ap.add_argument("--workdir", default=r"D:\ProjectIgnis")
+    ap.add_argument("--workdir", default=os.environ.get("COMBOSOLVER_WORKDIR"),
+                    required="COMBOSOLVER_WORKDIR" not in os.environ)
     ap.add_argument("--dll", default=DEFAULT_DLL)
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--scriptdir", action="append", default=None,

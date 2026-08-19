@@ -43,7 +43,7 @@ what the core offered at every decision, captures the target board, and then
 runs its own self-checks: restore fidelity and a snapshot stress test.
 
 ```bash
-combosolver.exe duel.yrpX --scriptdir <scripts> --workdir D:\ProjectIgnis
+combosolver.exe duel.yrpX --scriptdir <scripts> --workdir <edopro-install>
 ```
 
 **2. A better line to the same board, in the same duel.** Bounded-discrepancy
@@ -67,7 +67,7 @@ combosolver.exe ref.yrpX --scriptdir <scripts> --start other.yrpX --outdir solut
 
 # from a decklist plus an opening hand, with no starting replay
 combosolver.exe ref.yrpX --scriptdir <scripts> \
-    --deck "D:\ProjectIgnis\deck\Lunalight.ydk" \
+    --deck "<edopro-install>\deck\Lunalight.ydk" \
     --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom" \
     --outdir solutions
 ```
@@ -102,11 +102,21 @@ combosolver.exe solutions/solution_00.yrp --scriptdir <scripts> \
 ## Requirements
 
 Windows x64, Visual Studio 2022 build tools, PowerShell, Python 3 for the
-verification scripts in `tools/`.
+verification scripts in `tools/` (sympy, for the ones that check a formula).
 
 A working EDOPro installation, pointed at by `--workdir`. It must contain
 `cards.cdb`, `expansions/`, `repositories/` and the card scripts — the solver
 reads them the way the client does, and never writes into that tree.
+
+There is no default: the binary contains no absolute path. Either pass
+`--workdir` on every run, or set it once in the environment:
+
+```powershell
+setx COMBOSOLVER_WORKDIR "C:\Games\ProjectIgnis"
+```
+
+`--workdir` wins over the variable. With neither, the run refuses to start
+rather than guess.
 
 External dependencies, all outside this repository:
 
@@ -162,7 +172,7 @@ actually need to know:
 
 | Flag | Meaning |
 |---|---|
-| `--workdir <dir>` | EDOPro installation |
+| `--workdir <dir>` | EDOPro installation (or `COMBOSOLVER_WORKDIR`) |
 | `--scriptdir <dir>` | card script set, highest priority first (see below) |
 | `--player <0\|1>` | whose turn is being optimised |
 | `--outdir <dir>` | where the replays are written |
@@ -451,7 +461,7 @@ the board, so only what holds is written out.
 | `operators.h` / `.cpp` | static analysis of the deck's Lua scripts, and the LP over the operator table |
 | `premake5.lua` | build definition (solver, ocgcore, Lua, LZMA) |
 | `gabarits/` | a small replay used by the smoke run above |
-| `tools/` | dependency fetch, replay inspection, and the per-session measurement harnesses |
+| `tools/` | dependency fetch, replay inspection, and the sympy proofs of the formulas in the code |
 | `docs/` | design notes, flag inventory, session reports |
 
 `docs/combo-solver-design.md` is the long form: the trade-offs, the
@@ -489,11 +499,18 @@ carrying `!! INERT` invalidates the arm before the budget is spent.
 
 **Known gaps in this repository as published.** The diagnostic report is still
 printed in French — the code comments, the `--help` text and the constraint
-grammar are English; the report text is not yet. The scripts under `tools/` are
-per-session measurement harnesses with machine-specific paths hard-coded in
-them, and their header comments are still part French; they are kept as an
-archive of how the figures quoted here were obtained, not as a supported
-interface. There is no license file yet.
+grammar are English; the report text is not yet. The design notes and session
+reports under `docs/` are French throughout.
+
+The per-session measurement harnesses that produced the figures quoted here
+are **not in this repository**. One file per A/B, each hard-coding this
+machine's paths, usually a seed and a budget, and a third of them an output
+directory left by an earlier session: reproducible on the machine that ran
+them, on no other. `docs/` names them as `measurements/<name>.ps1` so the
+provenance of a number is still traceable, but the files themselves are
+ignored. What remains in `tools/` builds or inspects the project.
+
+There is no license file yet.
 
 ---
 

@@ -1,27 +1,36 @@
-# Sorties de build
+# Build outputs
 bin/
 obj/
 build/
 
-# Replays produits par --outdir
+# Replays written by --outdir
 solutions/
 solutions_*/
 archive_runs/
 
-# Sorties des campagnes de runs (sessions 4-5 : mA_*..mO_*, sA_*..sY_* ;
-# sessions 6-7 : sZ6_*, s7_*)
+# Per-session run campaigns (sessions 4-5: mA_*..mO_*, sA_*..sY_*;
+# sessions 6-7: sZ6_*, s7_*)
 m[A-Z]*_*/
 s[0-9A-Z]*_*/
 
-# Logs et fichiers de travail
+# Logs and working files
 *.log
 
 __pycache__/
 
-# --- portage WebAssembly ---
-# Il ne vit plus ici : ses sources sont sur la branche `web`, avec l'atelier
-# navigateur et les documents qui n'ont de sens que pour la page. Ce qui reste
-# dans wasm/ sur cette branche-ci est un arbre de BUILD (91 Mo de module, de
-# donnees empaquetees et de node_modules) qu'on ne veut ni suivre ni effacer :
-# on l'ignore en bloc.
+# --- measurement harnesses ---
+# One file per A/B or battery that was run once, and from which a figure quoted
+# in docs/ came. They are the executable record of a measurement, not tools:
+# every one of them hard-codes this machine's paths, most hard-code a seed and a
+# budget, and a third depend on an output directory produced by an earlier
+# session. They stay on disk as an archive and out of the repository, so that
+# tools/ holds only what actually builds or inspects the project.
+measurements/
+
+# --- WebAssembly port ---
+# It no longer lives here: its sources are on the `web` branch, together with
+# the browser workshop and the documents that only make sense for that page.
+# What is left in wasm/ on this branch is a BUILD tree (91 MB of module, packed
+# data and node_modules) that we want neither to track nor to delete: ignored
+# wholesale.
 wasm/

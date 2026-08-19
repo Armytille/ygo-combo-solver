@@ -2110,7 +2110,7 @@ graphe de recettes (chantier 16) fournirait.
 **(e) L'étalon A en mode but seul — ce que valait la référence, et pourquoi le chiffre n'est
 pas encore attribuable.**
 
-Montage : `tools/lunalight_butseul.ps1`, 1 800 s, graine 888, `--no-ref --target` ×4,
+Montage : `measurements/lunalight_butseul.ps1`, 1 800 s, graine 888, `--no-ref --target` ×4,
 `--max-decisions 700`, mêmes `--resolve`/`--summon-min`/`--hint` que le run de référence de la
 session 7ter (ce sont des connaissances de DOMAINE écrites à la main, pas du répertoire — au
 sens de Bonet & Geffner, un *sketch*). Zéro erreur de core (piège 47 vérifié).
@@ -2234,7 +2234,7 @@ de coût change l'ordre, pas l'ensemble atteignable.
 
 Un premier cadran (α = 1/2/3/5/8) a été construit sur l'arithmétique fausse ci-dessus
 (`α_s9 = α_s8/8`) et couvrait donc **entièrement sous** le point où la session 8 avait vu son
-gain. Il a été refait et prolongé jusqu'à α = 28 — `tools/s9_ab_alpha_complet.ps1` — sur un
+gain. Il a été refait et prolongé jusqu'à α = 28 — `measurements/s9_ab_alpha_complet.ps1` — sur un
 **seul binaire**, parce que le gating de la nouveauté (audit 3.7) avait entre-temps changé le
 débit de +20 % : prolonger sur un autre binaire aurait comparé des bras qui n'explorent pas à
 la même vitesse.
@@ -2751,7 +2751,7 @@ métrique d'A/B — la même dans tous les bras — elle reste valide, et la ré
 sur la qualité des lignes trouvées.
 **(l) L'étalon B AVEC ses contraintes — et la question du §9.11, tranchée.**
 
-Le montage contraint (`tools/s9_etalon_b_contraint.ps1`) reprend le jeu de la session 7 : garde
+Le montage contraint (`measurements/s9_etalon_b_contraint.ps1`) reprend le jeu de la session 7 : garde
 `5:Crystal Wing|Zalen@terrain+Junk Signal@main` avec extinction à `mainadv<=2`, les deux rips
 (`PSY-Framelord Omega@terrain:2`, `Trishula@terrain`), et `--no-activate` sur Assault Zone. La
 référence les satisfait toutes (Omega 2/2, Trishula 1/1).
@@ -2870,7 +2870,7 @@ s'était arrêté. La première mesure a retiré la deuxième avant même d'êtr
 
 **(a) L'A/B de l'amorce était monté sur le mauvais étalon, et la mesure le dit.**
 
-Le montage `tools/s9_recettes_amorce.ps1` tourne sur l'étalon B. Or l'amorce ne retient que
+Le montage `measurements/s9_recettes_amorce.ps1` tourne sur l'étalon B. Or l'amorce ne retient que
 les matériaux nommés entre guillemets, et le board de l'étalon B est fait de Synchros et de
 Liens — « 1 Tuner + 1+ non-Tuner monsters », « 2+ monsters » : aucun nom entre guillemets.
 L'en-tête du run le dit au premier coup d'œil, une fois qu'on le lit :
@@ -3040,7 +3040,7 @@ borne de Levin comme si elles étaient atomiques — c'est le critère de sélec
 (arXiv:2410.11262), appliqué à nos données. Deux conservatismes assumés pour que le chiffre soit
 une borne BASSE : le catalogue entier est supposé proposé à chaque décision, et aucune macro
 n'est créditée de raccourcir une ligne que le corpus a jouée. La mesure elle-même
-(`tools/s10_options.ps1`, 30 s) **reste à lire** : la session a été arrêtée avant.
+(`measurements/s10_options.ps1`, 30 s) **reste à lire** : la session a été arrêtée avant.
 
 ### 9.18 Session 11 : le profil est un instrument — deux régimes décomposés, et le facteur 70 expliqué
 
@@ -3191,7 +3191,7 @@ finisseur — et la lecture de la prévision des options.
 
 **(a) Les médianes : le « +31,8 % d'états à temps égal » de la session 11 NE SURVIT PAS.**
 Étalon B contraint, 60 s, graine 888, trois répétitions par bras, bras INTERCALÉS
-(`tools/s12_ab_medianes.ps1`) :
+(`measurements/s12_ab_medianes.ps1`) :
 
 | bras | tirages ×3 | médiane | états, médiane |
 |---|---|---|---|
@@ -3248,7 +3248,7 @@ racine. Les sauts ONT des préfixes profonds communs ; c'était la pile qui les 
 **`--dive-full`** empile un niveau d'arène à CHAQUE nœud de chaîne rejoué (pas seulement au
 nœud développé) : le trafic de pages d'un segment se RÉPARTIT entre les Push — seules les pages
 chaudes communes sont journalisées plusieurs fois — et la pile détient la branche entière.
-Étalon 0, quatre bras sous `--profile` (`tools/s12_rejeux.ps1`), contrôle identique partout
+Étalon 0, quatre bras sous `--profile` (`measurements/s12_rejeux.ps1`), contrôle identique partout
 (recul 0 : 42 exp., b=0, ÉPUISÉ ; mêmes `best` par racine — l'ordre d'extraction est inchangé,
 seule la vitesse change) :
 
@@ -3276,9 +3276,9 @@ nœud rejoué), pas le core. Piste : un pas de pile (stride) ou des journaux plu
 
 **(d) PGO : GARDÉ — −21,4 % par appel, distributions disjointes.** Mécanique sans toucher
 premake : le linker MSVC lit `_LINK_` — `/GENPROFILE`, entraînement (santé + étalon B 30 s +
-étalon 0 30 s : les trois régimes), `/USEPROFILE` (`tools/s12_pgo.ps1`). Santé stricte du
+étalon 0 30 s : les trois régimes), `/USEPROFILE` (`measurements/s12_pgo.ps1`). Santé stricte du
 binaire PGO : 24 lignes de diff, toutes des durées (et 0,199 → 0,177 ms/décision sur le
-déroulement de référence). Mesure au par-appel (`tools/s12_pgo_mesure.ps1`, étalon B contraint
+déroulement de référence). Mesure au par-appel (`measurements/s12_pgo_mesure.ps1`, étalon B contraint
 60 s ×3 par bras, intercalés, sonde identique des deux côtés) :
 
 | bras | `Process` µs/appel (tirages) ×3 | médiane |
@@ -3293,7 +3293,7 @@ témoin pré-optimisation : `Process` 27,2 → 23,6 (LTO, jour du même montage)
 
 **ATTENTION REPRODUCTIBILITÉ** : un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` et perd le
 PGO en silence (le binaire redevient LTO nu). Après tout changement de moteur : recompiler,
-santé, puis RE-DÉROULER `tools/s12_pgo.ps1` avant toute mesure. Le témoin LTO du jour est
+santé, puis RE-DÉROULER `measurements/s12_pgo.ps1` avant toute mesure. Le témoin LTO du jour est
 conservé (`combosolver_lto_s12.exe`), comme `combosolver_preopt.exe` avant lui.
 
 **(e) Observation ouverte — versée au dossier, non tranchée.** Le binaire INSTRUMENTÉ
@@ -3322,7 +3322,7 @@ l'espace. `--options <n>` (0 = éteint, défaut), exige un corpus `--adapt`. Tri
 imprimé : prises / décisions absorbées / avortées (piège 52).
 
 Premier A/B (étalon B contraint + `--adapt solutions`, 60 s ×3 par bras,
-`tools/s12_options_ab.ps1`), forme naïve — toutes les macros applicables proposées, biais
+`measurements/s12_options_ab.ps1`), forme naïve — toutes les macros applicables proposées, biais
 répertoire hérité du premier coup :
 
 | lecture | témoin ×3 | `--options 256` ×3 |
@@ -3340,7 +3340,7 @@ aux décisions 40-47 est proposée dès la décision 5, où sa première clé es
 suite). Deux gardes posées en réponse : UNE macro par première clé (la mieux classée), et
 AUCUN biais hérité (le poids part de zéro, l'adaptation seule les élève).
 
-**Deuxième A/B (mêmes montage et graine, `tools/s12_options_ab2.ps1`) : toujours PERDANT.**
+**Deuxième A/B (mêmes montage et graine, `measurements/s12_options_ab2.ps1`) : toujours PERDANT.**
 Les gardes n'ont pas réduit la fréquence — 8-9 prises/tirage (chaque choix du prompt apporte
 encore SA macro), absorption 1,0-1,6/prise, 78-84 % d'avortements. Sorties : best témoin
 8/8, 8/8, 6/8 contre opt 7/8, 7/8, 7/8 ; un signal isolé sur ≥ 2 résolutions (opt 1059 et
@@ -3370,7 +3370,7 @@ programmation dynamique de segmentation par ligne, vivier 1024, faisceau 64, app
 documentées). Effet immédiat : **la taille du catalogue devient un résultat — 19 macros
 retenues sur plafond 256** — et la perte modèle passe de 85,4 → 33,8 log10 (contre 87,6 →
 79,1 pour la forme naïve). A/B (étalon B contraint + `--adapt`, 60 s ×3,
-`tools/s12_suite_audit.ps1`) :
+`measurements/s12_suite_audit.ps1`) :
 
 | lecture | témoin ×3 | sélection Levin ×3 | + fenêtre ±16 ×3 |
 |---|---|---|---|
@@ -3416,7 +3416,7 @@ Go-Explore » n'a plus de charge utile à récupérer. Évalué, écarté, rien 
 **(h) Suite best-effort : le cadran des workers tranche une conjecture, le dépilage fusionné
 prend les 21 % d'arène.**
 
-*Le cadran du nombre de workers (jamais mesuré, `tools/s12_threads.ps1`, binaire PGO, µs/appel
+*Le cadran du nombre de workers (jamais mesuré, `measurements/s12_threads.ps1`, binaire PGO, µs/appel
 par la même sonde) :*
 
 | workers | `Process` µs/appel (méd. ×2) | appels totaux / 60 s |
@@ -3447,7 +3447,7 @@ par `RestoreMetadata` et re-carvés par `Allocate` avant tout usage, le contenu 
 jamais lu.
 
 **(j) LE BOOTSTRAP S'AUTO-AMORCE — le test de découverte est positif sur la masse.** Protocole
-(`tools/s12_bootstrap.ps1`) : étalon A but seul (`--no-ref`, aucune ligne enregistrée
+(`measurements/s12_bootstrap.ps1`) : étalon A but seul (`--no-ref`, aucune ligne enregistrée
 n'existe), corpus fabriqué par le solveur LUI-MÊME — les `best_approach_1of4.yrp` de trois
 runs de génération à graines distinctes (3 lignes de 65-72 décisions, toutes à 1/4) — puis
 trois bras d'attribution sur deux graines de mesure (300 s chacun) :
@@ -3486,10 +3486,10 @@ par le cimetière — et un mémo sous réclamation dépendrait de l'ordre de vi
 sous-estimant, déterministe. (3) **Ordre canonique dans `Observe`** : la même invocation vue
 avec ses matériaux dans deux ordres est LA MÊME recette (elle occupait deux des huit places
 par produit). Santé stricte : 0 ligne hors durées. Le 2×2 décisif (h plat/amorcé × coût
-actuel/canonique, `tools/s12_retro_ab.ps1`) tourne sur ce moteur.
+actuel/canonique, `measurements/s12_retro_ab.ps1`) tourne sur ce moteur.
 
 **(l) Le 2×2 du rétro : NEUTRE sur les seize paires — et les deux questions tombent pour la
-même cause.** Étalon A déterministe (`tools/s12_retro_ab.ps1`), quatre bras : h plat/amorcé ×
+même cause.** Étalon A déterministe (`measurements/s12_retro_ab.ps1`), quatre bras : h plat/amorcé ×
 coût actuel/canonique, sur le moteur robustifié (k). L'amorce pose bien son gradient en tête
 (Liger 5, Bagooska 3 — inchangés par la consommation intra-recette, comme attendu à terrain
 vide) ; et pourtant expansions (±2 %), `best` par racine et `hR` (3,0-4,0) sont identiques
@@ -3546,7 +3546,7 @@ vérifié (22 lignes de diff contre `s12_sante_fin.log`, que des durées et le n
 
 **(a) La gen2 ARMÉE, appariée à la gen1 : mêmes graines, même budget, seule l'armure change —
 et la graine 4242 écrit le PREMIER 2/4 en mode but seul.** Protocole
-(`tools/s13_bootstrap_gen2.ps1`) : les trois graines de génération de la session 12
+(`measurements/s13_bootstrap_gen2.ps1`) : les trois graines de génération de la session 12
 (888/1234/4242, 240 s, étalon A but seul) relancées avec `--adapt s12_boot_corpus
 --adapt-passes 4 --options 256`. Comparaison par paire à graine égale :
 
@@ -3594,20 +3594,20 @@ une macro n'est proposée que si le contexte courant (cartes cibles posées EXAC
 test entre dans le modèle de sélection par perte de Levin (le catalogue retenu peut changer) et
 dans le rollout ; `PolicyStep::ctx` existait déjà des deux côtés (relevé inconditionnel dans
 `LiftPolicyRun`, calculé au tirage quand la garde ou `ctx_shrink` l'exigent). `15` ≈ garde sur
-les seules cartes posées ; l'A/B est `tools/s13_options_ctx_ab.ps1`. (2) **`--finisher-post-goal`**
+les seules cartes posées ; l'A/B est `measurements/s13_options_ctx_ab.ps1`. (2) **`--finisher-post-goal`**
 — le point 9.18 (g) est TRANCHÉ par lecture : `GoalCheck` ENREGISTRE la solution avant que
 `advance()` ne rende `Adv::Goal` (rien n'était perdu), mais sous `--optimize` la récupération
 d'après-but (piège 35) était bien structurellement absente de `RunLevin` (nœud-but = jamais
 d'enfants). Le drapeau fait continuer la ligne après le but sous anytime, comme les rollouts.
 À juger sur A/B avant tout défaut.
 
-**Piège de build reconduit** : après le relink de ces mécanismes, `tools/s13_pgo.ps1` —
+**Piège de build reconduit** : après le relink de ces mécanismes, `measurements/s13_pgo.ps1` —
 variante s13 du pipeline PGO qui N'ÉCRASE PAS le témoin s12 (`combosolver_lto_s13.exe` neuf)
 et ajoute un 4ᵉ run d'entraînement avec options+ctx pour couvrir le mineur v3 et la garde.
 
 **(d) LE RUN LONG D'EXPLOITATION CONVERTIT — premières lignes complètes AVEC rips sur
 l'étalon B contraint.** Chantier 2 de 9.19 (m) : le bras `sel` gagnant (adapt + options 256),
-budget ×20 (1200 s), graines 888 et 1234 (`tools/s13_exploitation_longue.ps1`). Graine 888 :
+budget ×20 (1200 s), graines 888 et 1234 (`measurements/s13_exploitation_longue.ps1`). Graine 888 :
 **32 lignes atteignent le board via le finisseur** (lignes `crete-rip 8/8 <-- BUT` sur les
 racines de recul 20/40), **16 solutions écrites**, toutes à **19 brûlées / 56 actions /
 264-266 décisions — contre 276 décisions pour la référence humaine** à brûlées et actions
@@ -3633,7 +3633,7 @@ branchement du finisseur, de la même famille que le « mécanisme silencieuseme
 chemin ».
 
 **(f) La gen3 PLAFONNE à budget de génération constant.** Gen3 armée du CUMUL
-(`tools/s13_bootstrap_gen3.ps1`, mêmes graines, 240 s) : les trois graines rendent 1/4
+(`measurements/s13_bootstrap_gen3.ps1`, mêmes graines, 240 s) : les trois graines rendent 1/4
 (74/87/53 décisions), ≥2/≥3 au niveau de la gen2 (147-220 k / 33-49 k), catalogue identique au
 bras cumul (6 macros, 25,8 → 18,4). Lecture : le grand gain de l'itération était l'ARMEMENT
 lui-même (gen1→gen2) ; ré-miner sur un corpus plus riche ne franchit pas de cran
@@ -3653,10 +3653,10 @@ contrairement aux scripts.
 
 **(g) La garde SÉMANTIQUE des options (`--options-ctx`) : vivante, NON-destructive — et
 positive sans être tranchante.** Rebuild + santé stricte (structurel identique), pipeline PGO
-s13 re-déroulé (`tools/s13_pgo.ps1`, témoin `combosolver_lto_s13.exe`, 4 régimes
+s13 re-déroulé (`measurements/s13_pgo.ps1`, témoin `combosolver_lto_s13.exe`, 4 régimes
 d'entraînement dont un run options+ctx ; la santé INSTRUMENTÉE est restée propre — l'anomalie
 C10 de 9.19 (e) ne s'est pas reproduite une seconde fois). A/B
-(`tools/s13_options_ctx_ab.ps1`), trois bras : off / `ctx 1` (posées exactes, main ±1) /
+(`measurements/s13_options_ctx_ab.ps1`), trois bras : off / `ctx 1` (posées exactes, main ±1) /
 `ctx 15` (posées seules).
 
 *Étalon B contraint (60 s ×3, graine 888)* : INDÉCIS — la dispersion engloutit tout (crêtes
@@ -3731,7 +3731,7 @@ corpus vivant ou les lignes s'allongent : le minage est en O(lignes × longueur 
 
 **Santé stricte** : 24 lignes de diff contre `s13_sante_pgo.log`, QUE des durées et le nom
 d'outdir (273 digests, 210/273, 209 candidates, 16 replays) — le mécanisme est bien DORMANT
-éteint. **PGO s14** (`tools/s14_pgo.ps1`, témoin `combosolver_lto_s14.exe`, cinq régimes
+éteint. **PGO s14** (`measurements/s14_pgo.ps1`, témoin `combosolver_lto_s14.exe`, cinq régimes
 d'entraînement dont un run `--options-online` SANS corpus — le chemin neuf) : santé du binaire
 PGO à 22 lignes de diff, toutes des durées. La santé INSTRUMENTÉE est restée propre pour la
 troisième fois : l'anomalie C10 de 9.19 (e) ne s'est jamais reproduite.
@@ -3760,7 +3760,7 @@ cadran bouge, exactement la variable cachée de C15.
 
 **(d) L'A/B DE LA MISSION : le run part NU et convertit — 3 graines sur 3.** Étalon A but seul,
 `--no-ref`, **aucun `--adapt`, aucun `--approach`, une seule traite**, 300 s, trois bras
-intercalés par graine (`tools/s14_options_online_ab.ps1`). Le témoin est exactement la gen1 nue
+intercalés par graine (`measurements/s14_options_online_ab.ps1`). Le témoin est exactement la gen1 nue
 de 9.20 (a). Le juge est l'**approche ÉCRITE** — le meilleur état que le RUN ENTIER a su
 atteindre, pas la ligne « NRPA … best k/4 » qui ne résume que la phase tirages (voir le piège
 d'instrument ci-dessous) :
@@ -3804,12 +3804,12 @@ de régime statique, pas une propriété du mécanisme — et il est retiré pou
 tirages ENRACINÉS du finisseur, invisibles dans cette ligne. Lire le bootstrap sur elle aurait
 compté une conversion sur trois au lieu de trois sur trois. Le juge est l'approche ÉCRITE ;
 c'est d'ailleurs déjà la colonne que 9.20 (a) lisait, mais rien ne le disait dans l'outil.
-`tools/s14_lecture.ps1` la lit désormais, et imprime les deux côte à côte.
+`measurements/s14_lecture.ps1` la lit désormais, et imprime les deux côte à côte.
 
 **(e) LES RÉPÉTITIONS LIMITÉES (R=4) : positives sur les résolutions profondes, NEUTRES sur la
 conversion — et le verdict de la session 4 n'est pas renversé, il est CIRCONSCRIT.** Deux bras
 neufs, appariés aux bras déjà mesurés du (d) — mêmes graines, même budget, même binaire
-(`tools/s14_diversite_ab.ps1`), R=4 (strictement entre « tout de suite » et la stagnation à 8) :
+(`measurements/s14_diversite_ab.ps1`), R=4 (strictement entre « tout de suite » et la stagnation à 8) :
 
 | graine | bras | approche | ≥2 | ≥3 | avortées/prise |
 |---|---|---|---|---|---|
@@ -3841,7 +3841,7 @@ avec plus de graines** — et le bras à apparier la prochaine fois est `--optio
 reste valide, il n'est simplement pas adossé à la meilleure forme connue).
 
 **(f) LE TEST REINE (1 200 s, une traite) : le budget seul suffit pour 2/4, et le finisseur ne
-travaille PAS dans ce régime.** Deux bras, graine 4242, `tools/s14_traite_longue.ps1`. Le
+travaille PAS dans ce régime.** Deux bras, graine 4242, `measurements/s14_traite_longue.ps1`. Le
 témoin nu est RELANCÉ à ce budget et non supposé — précisément parce que 9.20 (d) avertit que
 « le budget convertit » :
 
@@ -3888,7 +3888,7 @@ met en perspective — la cible est 3 Liger Dancer (Fusion) + 1 Bagooska (Xyz), 
 humaine met **17 invocations pour 273 décisions, soit ~16 décisions par invocation** : l'unité
 naturelle du domaine, le cycle d'invocation complet, fait DEUX FOIS la taille qu'une macro a le
 droit d'atteindre. Une macro actuelle ne peut couvrir qu'une demi-invocation.
-Pilote (`tools/s14_masse_ab.ps1`) : lever le plafond à 16 et 24 et ne lire QUE le catalogue
+Pilote (`measurements/s14_masse_ab.ps1`) : lever le plafond à 16 et 24 et ne lire QUE le catalogue
 (longueur max et moyenne) avant de juger le reste. Deux issues, toutes deux informatives — les
 macros s'allongent, et le plafond liait ; ou elles restent à 8, et c'est le SUPPORT qui lie
 (une séquence longue se répète moins), auquel cas le bras suivant est `--options-support`.
@@ -3923,7 +3923,7 @@ Reste non épinglée : la `.cdb`. À traiter le jour où un A/B inter-jours dive
 l'énumération.
 
 **(i) LES DEUX LEVIERS DE MASSE « GRATUITS » SONT RÉFUTÉS — et l'un d'eux réfute une lecture de
-cette session même.** Pilote 4 bras, graine 888, 300 s, gabarit épinglé (`tools/s14_masse_ab.ps1`) :
+cette session même.** Pilote 4 bras, graine 888, 300 s, gabarit épinglé (`measurements/s14_masse_ab.ps1`) :
 
 | bras | catalogue | absorbées/prise | avortées | perte modèle | ≥2 | ≥3 |
 |---|---|---|---|---|---|---|
@@ -4031,11 +4031,11 @@ monte le coup joué et descend ses alternatives, branche par branche — l'effet
 ce n'est pas la moyenne du papier. Si l'A/B est neutre, c'est la première chose à changer.
 
 **Santé stricte** : 24 lignes de diff éteint (que des durées), et 20 après le PGO re-déroulé
-(`tools/s14_pgo_b.ps1`, témoin `combosolver_lto_s14b.exe`), dont **aucune** hors durées, tailles
+(`measurements/s14_pgo_b.ps1`, témoin `combosolver_lto_s14b.exe`), dont **aucune** hors durées, tailles
 et nom d'outdir. Le mécanisme est dormant à l'octet près.
 
 **Le montage d'A/B, et le bras qui empêche une conclusion trop facile.** Quatre bras
-(`tools/s14_masse_ab.ps1`) sur deux graines : `temoin` (`--options-online 60`), **`ctx8`
+(`measurements/s14_masse_ab.ps1`) sur deux graines : `temoin` (`--options-online 60`), **`ctx8`
 (`--ctx-shrink 8` SEUL, ancien conditionnement)**, `mcps6`, `mcps12`. Le bras `ctx8` est celui
 qui compte pour l'honnêteté du résultat : le niveau contextuel est ÉTEINT par défaut
 (`ctx_shrink = -1`), donc sans lui un gain de `mcps` serait attribuable à « on a allumé le
@@ -4044,7 +4044,7 @@ d'abord — la leçon de (i) est qu'une conversion mono-graine ne vaut rien.
 
 **(k) `--mcps` : RÉFUTÉ DEUX FOIS — et le recadrage qui compte est que MCPS n'a jamais été
 implémenté.** A/B quatre bras × deux graines, étalon A but seul, 300 s, binaire PGO du jour
-(`tools/s14_masse_ab.ps1`) :
+(`measurements/s14_masse_ab.ps1`) :
 
 | graine | témoin | `ctx8` (ancien cond., ALLUMÉ) | `mcps6` | `mcps12` |
 |---|---|---|---|---|
@@ -4057,7 +4057,7 @@ tour**, ≥2 = 0 alors que ≥1 = 757 720, et **27 lignes distinctes retenues su
 C'est un verrouillage de bassin : le conditionnement donne à chaque branche ses propres poids,
 chaque case reçoit peu de mises à jour concurrentes, le softmax y durcit, la politique se fige.
 
-*(2) Réfuté en représentation*, par la courbe d'accord (`tools/s14_accord_mcps.ps1`,
+*(2) Réfuté en représentation*, par la courbe d'accord (`measurements/s14_accord_mcps.ps1`,
 déterministe, quelques secondes) — palier à 256 passes, α = 1,0 :
 
 | conditionnement | niveau éteint | ACTIF | SIGNATURE (mémorisation pure) |
@@ -4258,7 +4258,7 @@ désormais imprimées, et c'est la seconde qui est l'instrument.
 | `--finisher-options` | écrit, compilant, **jamais jugé** ; sans objet sur étalon A (rien à compresser dans 3 expansions) | **non traité** — son juge est l'étalon B contraint, il reste en tête du chantier suivant |
 
 **Le criblage a fait son travail, et il a éliminé.** 90 s, graine 888, lecture sur le critère
-INTERNE de chaque mécanisme (`tools/s15_ab.ps1`) :
+INTERNE de chaque mécanisme (`measurements/s15_ab.ps1`) :
 
 | bras | critère interne du mécanisme | témoin | bras |
 |---|---|---|---|
@@ -5024,7 +5024,7 @@ copie de `steps` par amélioration, et 126 lignes ré-adaptées à chaque itéra
 
 **Statut honnête : CONFIRMÉ sur deux graines avec séparation complète, pas encore DÉMONTRÉ** au sens
 du dossier (qui demande plus de deux tirages et le passage sur l'étalon B — le seul cas où une
-solution existe). `tools/s17_ab_B.ps1` est écrit et n'a pas été lancé.
+solution existe). `measurements/s17_ab_B.ps1` est écrit et n'a pas été lancé.
 
 #### (g) LE PREMIER PLAN RÉSOLU DE L'ÉTALON A — et ce qu'il révèle : TROIS TROUS DE COUVERTURE
 
@@ -5511,7 +5511,7 @@ et conclu « le couplage est ailleurs » : le correctif n'agissait pas.
 **LA MESURE, ET ELLE NE TOUCHE PAS AU CODE.** `--hint-bias 0` annule le seul canal comportemental
 sans rien recompiler. Sous ce drapeau, `--card-on-select` est **sémantiquement inerte** : il ne peut
 plus modifier un seul logit. Étalon B optimisé, 90 s, graine 888, quatre bras
-(`tools/s18_axe1.ps1`) :
+(`measurements/s18_axe1.ps1`) :
 
 | bras | visibilité des indices | ≥1 | ≥2 | ≥3 | crête | approche écrite |
 |---|---|---|---|---|---|---|
@@ -5542,7 +5542,7 @@ Le dossier écrit depuis la session 6 que « fixer la graine ne rend pas le run 
 sous-estimation de nature, pas de facteur.**
 
 **RECENSEMENT DU TÉMOIN — configuration IDENTIQUE, graine IDENTIQUE (888), 90 s, cinq runs**
-(`s17B_temoin`, `s18a_temoin_888`, `s18n_m1/m2/m3`, `tools/s18_axe9.ps1`) :
+(`s17B_temoin`, `s18a_temoin_888`, `s18n_m1/m2/m3`, `measurements/s18_axe9.ps1`) :
 
 | run | `≥1` | approche écrite | décisions | ligne NRPA du bilan |
 |---|---|---|---|---|
@@ -5995,7 +5995,7 @@ impose, puis attaquer le mur avec l'instrument réparé. Santé identique à cha
 lieu du temps de mur. `BudgetExhausted()` les teste **avant** l'horloge — sinon le temps resterait
 la borne qui mord et le mode n'existerait pas.
 
-**LE CONTRÔLE** (`tools/s18_determinisme.ps1`), étalon B, `--threads 1`, 20 000 tirages,
+**LE CONTRÔLE** (`measurements/s18_determinisme.ps1`), étalon B, `--threads 1`, 20 000 tirages,
 500 000 nœuds, graine 888, deux exécutions :
 
 | | avant (budget en ms) | **après (budget en compte)** |
@@ -6105,7 +6105,7 @@ dans le graphe de recettes.
 #### (e) LE MUR, PREMIÈRE ATTAQUE — et un DRAPEAU QUI SE DÉCLARAIT ALLUMÉ EN ÉTANT ÉTEINT
 
 Étalon A **NU** (aucun `--hint`, aucun `--resolve`, aucune référence ; `--watch` compte et rien
-d'autre), 90 s, graine 888, `tools/s18_mur.ps1`. Juge : la colonne « invoquée » de Liger Dancer
+d'autre), 90 s, graine 888, `measurements/s18_mur.ps1`. Juge : la colonne « invoquée » de Liger Dancer
 passe-t-elle de zéro à non nul ?
 
 | bras | tirages | Perfume ≥1 | Perfume ≥2 | **Sabre ≥1** (arité 3) | Leo | Liger |
@@ -6556,7 +6556,7 @@ deck, Kaleido Chick comprise. Ce qui change n'est pas la liste, c'est la **struc
 
 #### (e) LA PROMOTION EN DÉFAUT, MESURÉE SUR L'ÉTALON B EN PROPORTION
 
-Dette n°1 de la mission. `tools/s19_promotion.ps1`, **dix runs par bras**, graines
+Dette n°1 de la mission. `measurements/s19_promotion.ps1`, **dix runs par bras**, graines
 1000-1009, `--solve-ms 60000`, un seul facteur.
 
 | étalon B, 10 runs/bras | `>=1` | `>=2` | valeurs de `>=2` |

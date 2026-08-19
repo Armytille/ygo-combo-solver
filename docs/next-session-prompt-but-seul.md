@@ -130,7 +130,7 @@ doivent servir de porte avant tout run (piège 40).
 # Un mecanisme inerte sans son drapeau doit rendre une sante identique AUX
 # DUREES PRES — le diff complet le verifie.
 
-# etalon A (Lunalight) : le montage complet est dans tools/lunalight3.ps1
+# etalon A (Lunalight) : le montage complet est dans measurements/lunalight3.ps1
 # (temoin, scripts compat, cible editee, --max-decisions, --resolve des
 # evenements rares du combo). En mode but seul, il faudra le meme SANS temoin.
 ```

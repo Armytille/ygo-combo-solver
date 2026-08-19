@@ -86,7 +86,7 @@ la recherche courante**. L'échelle effective est donc α/8 sur l'étalon B.
 les autres nœuds), avec un plancher à 1. Puis **refaire le cadran α** : les
 valeurs 8/15/25/40/60 ne testent pas ce qu'on croyait.
 
-**Vérification.** Rejouer l'A/B déterministe (`tools/s8_ab_finisseur.ps1`) et
+**Vérification.** Rejouer l'A/B déterministe (`measurements/s8_ab_finisseur.ps1`) et
 retrouver — ou non — la monotonie. La lecture qualitative doit survivre ; c'est
 l'échelle qui bouge.
 

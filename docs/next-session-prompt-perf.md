@@ -34,7 +34,7 @@ contexte), et §9.18. **Ne redécouvre rien de ce qui y est chiffré.**
 
 Un `MSBuild` ordinaire RELIE SANS `/USEPROFILE` : le binaire redevient LTO nu,
 en silence. Après tout changement de moteur : rebuild, santé, puis re-dérouler
-`tools/s12_pgo.ps1` AVANT toute mesure. Témoins conservés :
+`measurements/s12_pgo.ps1` AVANT toute mesure. Témoins conservés :
 `combosolver_preopt.exe` (pré-s11), `combosolver_lto_s12.exe` (LTO, code s12).
 
 ## ACQUIS DE LA SUITE DE SESSION (9.19 (h)-(m)) — ne pas re-mesurer
@@ -56,13 +56,13 @@ en silence. Après tout changement de moteur : rebuild, santé, puis re-déroule
 
 ## À FAIRE, par rendement estimé décroissant
 
-1. **ITÉRER le bootstrap** (`tools/s12_bootstrap.ps1`) : gen2 ARMÉE des
+1. **ITÉRER le bootstrap** (`measurements/s12_bootstrap.ps1`) : gen2 ARMÉE des
    macros (--adapt corpus1 --options 256) → approches meilleures → corpus2 →
    macros meilleures. Et le conditionnement SÉMANTIQUE des macros (`ctx` ;
    le graphe de recettes est le substrat). Juge : « ≥ k résolutions » et
    best/4 — jamais le compteur de tirages.
 2. **Run LONG d'exploitation** (étalon B, bras `sel` de
-   `tools/s12_suite_audit.ps1`, 600-1800 s) : convertir les 8/8 en lignes
+   `measurements/s12_suite_audit.ps1`, 600-1800 s) : convertir les 8/8 en lignes
    complètes AVEC rips.
 3. **Coût fixe d'arène résiduel** (~37 % de la phase du finisseur) : Push
    allégé (miroir paresseux), stride. Contrôle : étalon 0.
@@ -75,8 +75,8 @@ en silence. Après tout changement de moteur : rebuild, santé, puis re-déroule
 
 - Santé : commande dans `docs/next-session-prompt.md` (60 s) — diff attendu :
   QUE des durées.
-- Étalon B contraint : `tools/s9_etalon_b_contraint.ps1` ; ±`--profile` pour le
+- Étalon B contraint : `measurements/s9_etalon_b_contraint.ps1` ; ±`--profile` pour le
   µs/appel ; bras intercalés, médianes ×3 minimum.
-- Étalon 0 : `tools/s12_rejeux.ps1` (contrôle 42/b=0/ÉPUISÉ, colonne rj=).
+- Étalon 0 : `measurements/s12_rejeux.ps1` (contrôle 42/b=0/ÉPUISÉ, colonne rj=).
 - Runs séquentiels, un `--outdir` par run, jamais de relink pendant une mesure.
 - Logs PowerShell 5.1 en UTF-16 : `Select-String`/`pwsh`, pas `grep`.
