@@ -15,13 +15,13 @@
 # us per Process call, a 4.6 % median gain over three interleaved repetitions at
 # an identical call count (49 280 calls in all six runs, so this is a fixed-work
 # comparison), distributions disjoint. That is well under the 21.4 % recorded in
-# docs/combo-solver-design.md 9.19 (d), which was trained on seven regimes
-# including the benchmark it was then measured on; the narrow profile below buys
-# a narrower gain. The judge is us per call, never the rollout counter, whose
-# dispersion at a fixed seed swallows an effect this size.
+# the design note 9.19 (d), which was trained on seven regimes including the
+# benchmark it was then measured on; the narrow profile below buys a narrower
+# gain. The judge is us per call, never the rollout counter, whose dispersion at
+# a fixed seed swallows an effect this size.
 #
-# Training runs on the replay template shipped in gabarits/ and on nothing else,
-# so the build is reproducible on any machine with an EDOPro installation. Three
+# Training runs on the replay passed as -Gabarit and on nothing else, so the
+# profile is reproducible from one file plus an EDOPro installation. Three
 # regimes, chosen because they exercise different code: startup and faithful
 # replay with the arena's snapshot/restore and no search at all; bounded-
 # discrepancy search following the recorded line; and the goal-only regime where
@@ -40,6 +40,10 @@
 param(
     # EDOPro installation. Falls back to COMBOSOLVER_WORKDIR.
     [string]$Workdir = $env:COMBOSOLVER_WORKDIR,
+    # Replay the PGO profile is trained on. Required unless -NoPgo. Any .yrpX the
+    # installation named by -Workdir can reproduce will do; a hand test keeps the
+    # three regimes below near three minutes.
+    [string]$Gabarit,
     # Skip the instrument/train/relink cycle: a plain LTO build, ~6 minutes faster
     # and ~21 % slower per call. For iteration, not for publishing.
     [switch]$NoPgo
@@ -83,8 +87,21 @@ $pgort = Get-ChildItem (Join-Path $vsroot 'VC\Tools\MSVC') -Directory |
     Select-Object -First 1
 
 $exe = 'bin\Release\combosolver.exe'
-$gabarit = 'gabarits\etalon_a_lunalight.yrp'
 $train = 'obj\pgo-train'
+
+# The training replay is supplied by the operator, not carried in the tree. A
+# profile trained on a replay this installation cannot reproduce is worthless,
+# so the file is checked here rather than three regimes later.
+if (-not $NoPgo) {
+    if (-not $Gabarit) {
+        Write-Output "!! PGO training needs a replay: pass -Gabarit <replay.yrpX>, or -NoPgo to skip"
+        exit 1
+    }
+    if (-not (Test-Path $Gabarit)) {
+        Write-Output "!! -Gabarit not found: $Gabarit"
+        exit 1
+    }
+}
 
 function Invoke-Build([string]$linkFlag, [string]$label) {
     $env:_LINK_ = $linkFlag
@@ -115,18 +132,18 @@ if ($NoPgo) {
 
     # a. loading, faithful replay, snapshot/restore stress. No search at all:
     #    this is the only regime that exercises the startup and the self-checks.
-    & ".\$exe" $gabarit *> "$train.a.log"
+    & ".\$exe" $Gabarit *> "$train.a.log"
     Write-Output "  a. replay and restore            EXIT=$LASTEXITCODE"
 
     # b. bounded-discrepancy search around the recorded line, and the writing of
     #    the produced replays.
-    & ".\$exe" $gabarit --solve --solve-ms 60000 --outdir "$train\b" *> "$train.b.log"
+    & ".\$exe" $Gabarit --solve --solve-ms 60000 --outdir "$train\b" *> "$train.b.log"
     Write-Output "  b. bounded-discrepancy search    EXIT=$LASTEXITCODE"
 
     # c. goal-only regime: the reference's repertoire is set aside, so the policy
     #    starts uniform and the Levin finisher rebuilds lines from scratch. This
     #    is where the search actually spends its time in a real run.
-    & ".\$exe" $gabarit --solve --no-plan --finisher levin --finisher-min 40000 `
+    & ".\$exe" $Gabarit --solve --no-plan --finisher levin --finisher-min 40000 `
         --archive-k 24 --solve-ms 90000 --outdir "$train\c" *> "$train.c.log"
     Write-Output "  c. goal-only finisher            EXIT=$LASTEXITCODE"
 
@@ -169,8 +186,6 @@ Copy-Item $exe $dist
 # AGPL-3.0-or-later, so the licence and the third-party notices are part of the
 # deliverable, not repository decoration.
 Copy-Item 'README.md', 'LICENSE', 'NOTICE' $dist
-New-Item -ItemType Directory -Force (Join-Path $dist 'gabarits') | Out-Null
-Copy-Item "$gabarit" (Join-Path $dist 'gabarits')
 
 $zip = Join-Path $root "combosolver-$version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }

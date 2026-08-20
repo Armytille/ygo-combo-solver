@@ -44,9 +44,9 @@ and playable.
 
 ## Setup
 
-The release archive contains `combosolver.exe`, a sample replay under
-`gabarits/`, this document, and the licence files. The executable runs from any
-directory. Output goes to `--outdir`, resolved against the current directory.
+The release archive contains `combosolver.exe`, this document, and the licence
+files. The executable runs from any directory. Output goes to `--outdir`,
+resolved against the current directory.
 
 Cards and card scripts are read from an EDOPro installation, which the solver
 only reads. Set its location once:
@@ -864,8 +864,11 @@ MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 patches the solver requires to observe and snapshot a duel, and freezes a
 matching card script export. It does not modify the EDOPro installation.
 
-`.\tools\build_release.ps1 -Workdir <dir>` produces the optimised,
-self-contained executable and the release archive.
+`.\tools\build_release.ps1 -Workdir <dir> -Gabarit <replay.yrpX>` produces the
+optimised, self-contained executable and the release archive. The replay is the
+PGO training input: the profile is trained on that file and on nothing else, so
+it is supplied per machine rather than carried in the tree. `-NoPgo` skips the
+training and the requirement, at about 21 % per call.
 
 ---
 

@@ -38,3 +38,20 @@ measurements/
 # data and node_modules) that we want neither to track nor to delete: ignored
 # wholesale.
 wasm/
+
+# --- working notes ---
+# Session reports, states of the art and design notes: the record of how the
+# solver got here, written for one reader. They stay on disk and out of the
+# repository, which carries what builds and what runs.
+docs/
+
+# --- replay templates ---
+# build_release.ps1 trains the PGO profile on the file passed as -Gabarit, so
+# the training input is supplied per machine instead of being tracked.
+gabarits/
+
+# --- verification scripts ---
+# sympy proofs, LP duals, closed forms, replay inspection: each verified one
+# result once and is quoted in docs/. Same rule as measurements/ above. tools/
+# keeps only the two scripts that fetch the dependencies and build the release.
+tools/*.py
