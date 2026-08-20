@@ -62,10 +62,9 @@ public:
 	// measures afterwards (nodes, board keys, solutions) describes a corrupt duel.
 	// So this is not a statistic, it is a stop condition.
 	//
-	// The counter used to be a `thread_local` read from the MAIN thread: worker
-	// escapes were structurally invisible and the report printed "none: all state
-	// is captured" by construction. It is now a member, atomic, and the flag is
-	// STICKY.
+	// It is a member, atomic, and the flag is STICKY. A `thread_local` read from
+	// the MAIN thread would make worker escapes structurally invisible and print
+	// "none: all state is captured" by construction.
 	void NoteFallback() {
 		fallbacks.fetch_add(1, std::memory_order_relaxed);
 		poisoned.store(true, std::memory_order_relaxed);

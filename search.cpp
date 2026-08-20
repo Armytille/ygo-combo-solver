@@ -577,10 +577,10 @@ bool Search::FillChoices(ChoiceList& out) {
 	}
 	if(out.empty()) {
 		// Non-enumerable prompt: we try the default answer rather than letting the
-		// branch die. This is a REDUCTION TO ONE BRANCH, and it used to be mute: a
-		// combo requiring a card name to be declared (ANNOUNCE_*), a counter to be
-		// chosen or a sort to be done is structurally out of reach, and nothing said
-		// so. Counted by prompt type so the report can say WHICH.
+		// branch die. This is a REDUCTION TO ONE BRANCH, and it would otherwise be
+		// mute: a combo requiring a card name to be declared (ANNOUNCE_*), a counter
+		// to be chosen or a sort to be done is structurally out of reach, and nothing
+		// would say so. Counted by prompt type so the report can say WHICH.
 		Choice& c = out.Emit();
 		if(!DefaultResponse(prompt_type, prompt_payload.data(),
 							static_cast<uint32_t>(prompt_payload.size()),
@@ -804,10 +804,9 @@ void Search::Descend(uint32_t depth, uint32_t actions, uint32_t prompt_depth) {
 	}
 
 	// CEILING cuts: it is not the space that stops here, it is the bound. Counted,
-	// otherwise "EXHAUSTED" would lie. Tested BEFORE the enumeration, as
-	// originally: enumerating a node we are about to cut would be a cost added TO
-	// THE CONTROL ARM, and the A/B would no longer measure the mechanism but the
-	// move of this call.
+	// otherwise "EXHAUSTED" would lie. Tested BEFORE the enumeration: enumerating a
+	// node we are about to cut would charge the cut path for work it does not do,
+	// so what is measured would be the move of this call and not the mechanism.
 	if(depth >= cfg.max_decisions) {
 		++stats.edges_skipped;
 		return;
@@ -950,7 +949,7 @@ void Search::Descend(uint32_t depth, uint32_t actions, uint32_t prompt_depth) {
 // (finisher, full table) and `RecipeEval` (rollouts, table reduced to the
 // required zones). They MUST have exactly the same claiming semantics,
 // otherwise the distance measured in the rollouts and the finisher's would not
-// be the same quantity and the A/B would compare two definitions. Templated
+// be the same quantity and the two would not be comparable. Templated
 // because `Search::PresentInfo` is a private type: the instantiation happens
 // from the members.
 template<typename Info>
@@ -1850,8 +1849,8 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	};
 	// Progress comes BEFORE overlap: a cell that has crossed an intermediate
 	// subgoal is worth more than one that placed a target card by chance.
-	// Without serialisation, `sp` is 0 and the ranking is the previous one, so
-	// the mechanism cannot degrade the control arm.
+	// Without serialisation, `sp` is 0 and the ranking is the previous one, so the
+	// mechanism cannot degrade it when it is off.
 	auto pack_sp = [&](uint32_t b) -> uint64_t {
 		const uint64_t base = pack(b);
 		if(cfg.serial_reqs.empty())
@@ -1934,12 +1933,12 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 			return;
 		archive_cells.erase(archive[worst].cell);
 		archive_cells.emplace(cell, worst);
-		// THE STORED KEY IS `cell`, NOT `here.hash`. The entry used to carry the
-		// board hash although the `archive_cells` map is indexed by the progress
-		// rung: from the first eviction under serialisation,
-		// `erase(archive[worst].cell)` targeted an ABSENT key, the real key stayed
-		// and pointed at an entry of another cell, and the ladder corrupted itself
-		// silently, in exactly the regime (a full archive) where a bare run lives.
+		// THE STORED KEY IS `cell`, NOT `here.hash`. `archive_cells` is indexed by
+		// the progress rung, so an entry carrying the board hash makes
+		// `erase(archive[worst].cell)` target an ABSENT key from the first eviction
+		// under serialisation: the real key stays, points at an entry of another
+		// cell, and the ladder corrupts itself silently, in exactly the regime (a
+		// full archive) where a bare run lives.
 		archive[worst] = { cell, score, overlap, rp, depth, burned, path };
 	}
 	archive_min_score = ~0ull;
@@ -2238,8 +2237,8 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 			++stats.transpositions;
 			return false;
 		}
-		// ALREADY SEEN BUT WITH LESS BUDGET: the state is RE-EXPANDED. Only the cut
-		// used to be counted, never this work.
+		// ALREADY SEEN BUT WITH LESS BUDGET: the state is RE-EXPANDED, and that work
+		// is counted here and not only at the cut.
 		if(it != tt.end())
 			++stats.tt_reexplored;
 		if(it == tt.end() && depth < stats.distinct_by_depth.size())
@@ -2285,10 +2284,10 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	// WINDOWED repertoire: after a first deviation, a move the reference plays
 	// within `repair_window` decisions of the current point is FREE. That is what
 	// makes local permutations affordable: swapping summons #4/#5 (~17 decisions
-	// apart, one activation between them) used to cost one deviation PER reordered
-	// decision (measured unfindable up to k=12) and now costs only one, with the
-	// digest resynchronisation hooking the exact suffix back on afterwards. Never
-	// on the pure prefix.
+	// apart, one activation between them) costs ONE deviation instead of one per
+	// reordered decision (unfindable up to k=12 otherwise), with the digest
+	// resynchronisation hooking the exact suffix back on afterwards. Never on the
+	// pure prefix.
 	const bool windowed = disc < cfg_discrepancies && cfg.ref_keys &&
 						  !cfg.ref_keys->empty();
 	ChoiceList& alts = ChoicesAt(depth);
@@ -2441,8 +2440,8 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 			++stats.transpositions;
 			return false;
 		}
-		// ALREADY SEEN BUT WITH LESS BUDGET: the state is RE-EXPANDED. Only the cut
-		// used to be counted, never this work.
+		// ALREADY SEEN BUT WITH LESS BUDGET: the state is RE-EXPANDED, and that work
+		// is counted here and not only at the cut.
 		if(it != tt.end())
 			++stats.tt_reexplored;
 		if(it == tt.end() && depth < stats.distinct_by_depth.size())
@@ -2607,10 +2606,9 @@ bool Search::Rollout(uint64_t& rng) {
 			return hit;
 		}
 		ArchiveObserve(here, depth, resolved);
-		// Rollout-IW without a tree (a rollout that stops producing anything new
-		// is cut) used to cut here. Removed: REFUTED, and the cause was
-		// measured. Since the table is shared between rollouts, re-walking the
-		// same beginning kills the rollout before it could deviate (2/8 instead
+		// Rollout-IW without a tree (a rollout that stops producing anything new is
+		// cut) must NOT cut here. The table is shared between rollouts, so re-walking
+		// the same beginning kills the rollout before it could deviate (2/8 instead
 		// of 6/8 on the transplantation case).
 
 		ChoiceList& choices = ro_choices;
@@ -2779,9 +2777,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	// second also counts activations.
 	const bool probe_watch = !cfg.probe_watch.empty();
 	double novel_states = 0;
-	// Consecutive decisions with no unseen atom. The rollout-level novelty cut
-	// used to consume them; it is removed (REFUTED) and `stale` now only serves as
-	// a gradient tie-break.
+	// Consecutive decisions with no unseen atom. No cut consumes them: `stale`
+	// serves only as a gradient tie-break.
 	uint32_t stale = 0;
 	bool novelty_cut = false;
 	std::vector<double> logit;
@@ -2806,10 +2803,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	const bool want_ctx = cfg.ctx_shrink >= 0.0f ||
 						  (cfg.options && cfg.options->ctx_tol >= 0) ||
 						  (mine_flat && cfg.options_online->ctx_tol >= 0);
-	// A PATH CONDITIONING (mixed sum of the moves of the first k decisions) used to
-	// be maintained here. Removed: REFUTED twice, 0 comparisons won out of 4
-	// against `--ctx-shrink` alone and a collapse at k = 6. The contextual level's
-	// context is now always the SEMANTIC descriptor (`step.ctx`).
+	// NO PATH CONDITIONING (mixed sum of the moves of the first k decisions) is
+	// maintained here: it wins 0 comparisons out of 4 against `--ctx-shrink` alone
+	// and collapses at k = 6. The contextual level's context is always the SEMANTIC
+	// descriptor (`step.ctx`).
 	// HEAD BANDIT (--qhat): key of the current node, mixed sum of the moves ALREADY
 	// played. It carries the move ACTUALLY chosen (the macro's id when a macro is
 	// taken, not its first key) and it simply stops being consulted past k.
@@ -2903,8 +2900,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 	//
 	// So `depth` stops being the loop index: it counts REAL DECISIONS, and `pi`
 	// counts the prompts. A consequence worth stating: `--max-decisions` changes
-	// meaning under the flag, so depths only compare with the control arm at equal
-	// TIME budget.
+	// meaning under the flag, so depths only compare at equal TIME budget.
 	//
 	// WHAT IS PRESERVED ON AN ELIDED PROMPT, and it is not negotiable: the
 	// bookkeeping of actions, turns, summons and resolutions. A forced chain
@@ -3158,11 +3154,10 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 		// lines with the same material, the one that visited unseen facts
 		// deserves the adaptation.
 		{
-			// GATE. `--novelty 0` turned NoveltyCut off (the DFS paths) but NOT this
-			// block: the `novel_states` term stayed in the score and the cost was
-			// paid in full, four core queries, four sorts and ~60-80 table probes PER
-			// DECISION, for a mere tie-break. So the "no novelty" control arm of the
-			// A/B only covered the LDS passes, never NRPA. It is also the run's main
+			// GATE. Without it, `--novelty 0` turns NoveltyCut off (the DFS paths)
+			// but not this block: the `novel_states` term stays in the score and the
+			// cost is paid in full, four core queries, four sorts and ~60-80 table
+			// probes PER DECISION, for a mere tie-break. This is also the run's main
 			// UNBOUNDED allocation: `seen` grows without limit, per worker.
 			if(cfg.novelty_patience) {
 				uint32_t partition = cfg.novelty_serialize
@@ -3179,8 +3174,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				if(cfg.backward)
 					partition = partition * 64u + (rec_back & 63u);
 				// SERIALISATION BY x*, the same gesture as above. The value also
-				// feeds the progress profile: it used to be computed and then
-				// thrown away after the partition.
+				// feeds the progress profile rather than being thrown away after
+				// the partition.
 				if(!cfg.serial_reqs.empty()) {
 					const uint32_t spv = SerialProgress(
 						duel, static_cast<uint8_t>(cfg.target_player),
@@ -3201,16 +3196,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					stale = 0;
 				} else {
 					++stats.novelty_stale;
-					// NOVELTY PRUNING IN THE POLICY ROLLOUTS. The rollout-level cut
-					// used to be wired into Rollout(), the GREEDY rollout, which no
-					// longer does anything, and NEVER here, although the novelty
-					// verdict is already COMPUTED here at every decision (four core
-					// queries, ~60-80 table probes) and thrown away after a mere
-					// tie-break. The rollout's most expensive mechanism only served
-					// to break score ties.
-					// The rollout-level cut fired here after `patience` mute
-					// decisions. Removed: REFUTED. `stale` is still counted, since
-					// it serves the gradient tie-break.
+					// NOVELTY PRUNING IN THE POLICY ROLLOUTS. No rollout-level cut
+					// fires here, although the novelty verdict is already COMPUTED at
+					// every decision (four core queries, ~60-80 table probes) and
+					// thrown away after a mere tie-break: cutting after `patience`
+					// mute decisions wins nothing. `stale` is still counted, since it
+					// serves the gradient tie-break.
 					++stale;
 				}
 			}
@@ -3245,17 +3236,16 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 				sc += static_cast<double>(cfg.landmark_weight) * 1000.0 *
 					  static_cast<double>(total - rem);
 			}
-			// `--recipe-w` used to pour the RECIPE DISTANCE in here as progress.
-			// Removed: REFUTED with a STRUCTURAL cause, and that is the lesson to
-			// keep. The distance to Liger counts "3 Lunalight monsters" as a
-			// CARDINAL requirement; but building Perfume CONSUMES two Lunalight to
-			// return one, so the distance RISES. The mechanism rewarded accumulating
-			// bodies and PUNISHED consuming them, i.e. punished summoning, the exact
-			// opposite of the goal. An h^add heuristic over an AND/OR graph is only
-			// correct when CONSUMPTION is modelled; the delete relaxation assumes
-			// reaching a subgoal destroys nothing, which is precisely false here.
-			// `recipe_base` and `rec_rem` are still RECORDED (stats.rec_roll_*): the
-			// distance is measured, it no longer enters any cost.
+			// The RECIPE DISTANCE must NOT be poured in here as progress, and the
+			// cause is STRUCTURAL. The distance to Liger counts "3 Lunalight
+			// monsters" as a CARDINAL requirement; but building Perfume CONSUMES two
+			// Lunalight to return one, so the distance RISES. Pouring it in rewards
+			// accumulating bodies and PUNISHES consuming them, i.e. punishes
+			// summoning, the exact opposite of the goal. An h^add heuristic over an
+			// AND/OR graph is only correct when CONSUMPTION is modelled; the delete
+			// relaxation assumes reaching a subgoal destroys nothing, which is
+			// precisely false here. `recipe_base` and `rec_rem` are still RECORDED
+			// (stats.rec_roll_*): the distance is measured, it enters no cost.
 			if(sc > run.score) {
 				run.score = sc;
 				// The peak is HERE, and it is all the gradient should learn under
@@ -3362,8 +3352,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			double mx = -1e300;
 			// LIVENESS OF THE OPERATOR BIAS: "at least one designated operator could
 			// be offered at this decision". Reset AT EVERY decision; a flag leaking
-			// from one decision to the next is the `ChoiceList::Emit` defect, and it
-			// has already cost a session.
+			// from one decision to the next is the `ChoiceList::Emit` defect.
 			bool any_op_useful = false;
 			for(size_t i = 0; i < choices.size(); ++i) {
 				uint64_t key = choices[i].plan_key;
@@ -3431,12 +3420,12 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 														   (useful ? 2 : 0)));
 			}
 			// OPTIONS: an applicable macro becomes one more choice, weighted by ITS
-			// OWN weight, the sampling unit that concentrates the mass. Two guards,
-			// set by the first A/B: ONE macro per first key (the best ranked, since
-			// the index follows the mining order), otherwise the catalogue floods
-			// the softmax (7.7 picks per rollout measured); and NO inherited bias
-			// (the weight starts at zero and only the adaptation raises it; with
-			// the repertoire bias, 82 % of picks aborted after ~1.3 steps).
+			// OWN weight, the sampling unit that concentrates the mass. Two guards:
+			// ONE macro per first key (the best ranked, since the index follows the
+			// mining order), otherwise the catalogue floods the softmax (7.7 picks
+			// per rollout measured); and NO inherited bias (the weight starts at
+			// zero and only the adaptation raises it; with the repertoire bias, 82 %
+			// of picks aborted after ~1.3 steps).
 			applicable.clear();
 			if(cfg.options) {
 				const uint32_t W = cfg.options->window;
@@ -3444,8 +3433,8 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 					auto it = cfg.options->by_first.find(choices[i].plan_key);
 					if(it == cfg.options->by_first.end())
 						continue;
-					// Preconditions: the position window (refuted, kept for the
-					// A/B) and the SEMANTIC guard (ctx compatible with a corpus
+					// Preconditions: the position window (which wins nothing on its
+					// own) and the SEMANTIC guard (ctx compatible with a corpus
 					// occurrence), the same tests as the selection model. The "best
 					// macro per first key" becomes the best ranked AMONG THE
 					// COMPATIBLE ONES.
@@ -3945,8 +3934,8 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	// ends).
 	//
 	// UNDER THE GRID: UNIFORM over the RIPPED cells ONLY (r > 0), no
-	// tournament. WARNING: BOTH VARIANTS ARE REFUTED IN PROPORTION (4 seeds,
-	// 180 s, MIN control on the same binary):
+	// tournament. WARNING: BOTH VARIANTS LOSE IN PROPORTION (4 seeds, 180 s,
+	// MIN control on the same binary):
 	//   V1 (uniform over ALL cells): 3/4 seeds at ZERO rips. The early-run
 	//      archive only has (0 rips, o) cells, re-entry pours the mass there
 	//      and the SHARED NRPA policy adapts on those continuations, so the
@@ -3956,14 +3945,11 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	//      are massively low-overlap, the policy adapts on continuations poor
 	//      in board, and the INTERLEAVED lines the control finds from the root
 	//      disappear.
-	// The lesson (the third measurement of the same channel after the ladder):
-	// re-entry by replay COUPLES the shared adaptive policy to the re-entered
-	// family, whatever it is. The independence assumption of the race (R6 of the
-	// refined closed form) is violated by this channel, and
-	// the additive grid cost is UNREACHABLE by "replay + shared adaptation"
-	// together. The mechanism stays wired as the CONTROL of its own refutation;
-	// any successor must DECOUPLE the adaptation from the re-entered lines, and
-	// go back through the A/B in proportion.
+	// The lesson: re-entry by replay COUPLES the shared adaptive policy to the
+	// re-entered family, whatever it is. The independence assumption of the race
+	// (R6 of the refined closed form) is violated by this channel, and the
+	// additive grid cost is UNREACHABLE by "replay + shared adaptation" together.
+	// Any successor must DECOUPLE the adaptation from the re-entered lines.
 	const ArchiveEntry* pick = nullptr;
 	if(cfg.grid && cfg.serial_reqs.empty()) {
 		static thread_local std::vector<const ArchiveEntry*> ripped;
@@ -4136,9 +4122,9 @@ double Search::Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng) 
 		reenter_active = false;
 		return best.score;
 	}
-	// ONE copy of the policy per level call. It used to be copied at every rollout
-	// (passed by value down to level 0): a table of thousands of entries
-	// duplicated tens of thousands of times per run.
+	// ONE copy of the policy per level call. Copying at every rollout (by value
+	// down to level 0) would duplicate a table of thousands of entries tens of
+	// thousands of times per run.
 	Policy local = pol;
 	best.score = -1;
 	uint32_t stagnant = 0, repeats = 0;
@@ -4973,7 +4959,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 		// best ranked among the compatible ones), NO inherited bias (the weight is
 		// the one the policy learned on its id). The positional window makes no
 		// sense here (the finisher counts no decisions since a rollout start) and
-		// it is refuted: only the SEMANTIC guard applies.
+		// it wins nothing: only the SEMANTIC guard applies.
 		//
 		// So the softmax denominator grows by `lapp.size()`: the atomic edges become
 		// LESS probable. That is exactly why benchmark 0's expansion count is no
@@ -5075,7 +5061,7 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 						++stats.reroot_by_overflow;
 					// The counter no longer says "a hint landed" (with this rerooter
 					// every node is one) but "re-rooting BEAT extension": at zero the
-					// mechanism is inert and the A/B measures nothing.
+					// mechanism is inert and there is nothing to measure.
 					++stats.reroots;
 				}
 				child.placed_parent = static_cast<uint16_t>(got);
@@ -5093,9 +5079,9 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 				// past ~709 in absolute value, exp overflows and the guard
 				// substitutes 1e300. From then on log(lam - 1) is CONSTANT for the
 				// whole descent and the sqrt-LTS best-first degenerates into its
-				// tie-break, so a --reroot A/B would be measuring a mechanism that
-				// switched itself off. Counted; non-zero, the arm is to be thrown
-				// away, not interpreted.
+				// tie-break, so --reroot would be measured on a mechanism that switched
+				// itself off. Counted; non-zero, the run is to be thrown away, not
+				// interpreted.
 				if(!std::isfinite(inv))
 					++stats.levin_overflow;
 				child.lam = base_lam + (std::isfinite(inv) ? inv : 1e300);
@@ -5951,8 +5937,7 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // the whole climb.
 //
 // COST: the zone queries are only made when requirements exist. Mechanism off
-// = zero queries, hence zero throughput regression on the control arms. That
-// is the guard three earlier mechanisms lacked.
+// = zero queries, hence zero throughput regression when it is off.
 uint32_t SerialProgress(Duel& duel, uint8_t con,
 						const std::vector<SearchConfig::SerialReq>& reqs,
 						const CardDB& db, uint32_t res0, uint64_t* packed) {

@@ -284,7 +284,7 @@ size_t LiftPlan(Duel& duel, Arena& arena, const Replay& yrp, int target_player,
 //     COVERAGE, and a single "no" is enough to make the line unreachable at any
 //     budget.
 //   - `keys[i] != 0` = is that move in the REPERTOIRE? That is another thing,
-//     and a move found but without a plan_key used to count as unidentified.
+//     and a move found but without a plan_key must not count as unidentified.
 //
 // The arity gives the likelihood: with a NEW policy every logit is equal (the
 // weights start at zero), so the probability that a uniform rollout reproduces
@@ -373,7 +373,7 @@ struct NrpaRun {
 	// everything it did after its peak is learned.
 	//
 	// Always filled (cost: one assignment per improvement); CONSUMED only under
-	// `--adapt-to-peak`, so that the A/B moves one factor only.
+	// `--adapt-to-peak`, so that turning the flag moves one factor only.
 	size_t peak_steps = 0;
 	// FLAT line (online mining): the SAME line, but with all its multiple-choice
 	// decisions in ATOMIC form, including those a macro absorbed, which produce no
@@ -437,9 +437,10 @@ using NrpaPolicy = std::unordered_map<uint64_t, float>;
 // aggregates every context and its sample size always dominates, so a weighting
 // by raw sample sizes would NEVER hand over to the contextual level. Hence the
 // calibrated k. It is a convex combination of two logits of the SAME scale: it
-// does not change the softmax temperature, so the A/B measures state dependence
-// and nothing else. But it is also, exactly, the bias hyperparameter the MCPS
-// derivation eliminates, and that is why this block cannot claim the paper.
+// does not change the softmax temperature, so what it measures is state
+// dependence and nothing else. But it is also, exactly, the bias hyperparameter
+// the MCPS derivation eliminates, and that is why this block cannot claim the
+// paper.
 struct CtxWeight {
 	float w = 0;
 	uint32_t n = 0;
@@ -464,9 +465,9 @@ inline uint64_t CtxKey(uint64_t key, uint64_t ctx) {
 	return key ^ ((ctx + 1) * 0x9e3779b97f4a7c15ull);
 }
 
-// --- PATH CONDITIONING: REFUTED, KEPT SO THE A/B CAN BE REPLAYED -------------
+// --- PATH CONDITIONING: WINS NOTHING, OFF BY DEFAULT ------------------------
 //
-// VERDICT: REFUTED TWICE. (1) In search, zero comparisons won out of four
+// VERDICT: it loses twice over. (1) In search, zero comparisons won out of four
 // against merely TURNING ON the contextual level with its older descriptor
 // (`--ctx-shrink 8`), and a total collapse at k = 6 on one seed (best 0/4, 99 %
 // of rollouts dead at the turn change, 27 distinct lines kept out of 8 751
@@ -481,8 +482,7 @@ inline uint64_t CtxKey(uint64_t key, uint64_t ctx) {
 // with none of the counterweight an average over all games would bring, and
 // each conditioned cell receives too few competing updates to recover. The
 // paper's mechanism is implemented below, under PermWindow / BanditNode
-// (--qhat); THIS flag only remains so the A/B can be replayed. It is OFF by
-// default and says so loudly when turned on.
+// (--qhat); THIS flag is OFF by default and says so loudly when turned on.
 //
 // What follows describes what the flag DOES, not what should be done:
 //
@@ -503,9 +503,9 @@ inline uint64_t MixMove(uint64_t key) {
 // --- PERMUTATION STATISTIC Q^ (MCPS, arXiv:2510.06381) -----------------------
 //
 // THE PAPER'S MECHANISM, for real. The path-conditioning attempt above took
-// MCPS's CONDITIONING and put it on NRPA logits (refuted). What follows takes
-// the OBJECT: reward averages over sets of rollouts, combined with weights
-// proportional to the sample sizes.
+// MCPS's CONDITIONING and put it on NRPA logits, which wins nothing. What
+// follows takes the OBJECT: reward averages over sets of rollouts, combined
+// with weights proportional to the sample sizes.
 //
 // WHAT MCPS DOES, in three lines. At a node s reached by the path (a0..ad), to
 // evaluate a move a it averages the rewards of three sets of games: Q(s,a)
@@ -751,9 +751,9 @@ struct BanditNode {
 };
 
 // One row of the bandit's PROBE (aggregated across workers by the caller): the
-// mandatory instrument BEFORE any A/B, because the corpus agreement curve
-// CANNOT judge Q^ (it measures the reproduction of a corpus containing ONLY
-// good lines, whereas Q^ draws its signal from the FAILURES).
+// mandatory instrument BEFORE any measurement, because the corpus agreement
+// curve CANNOT judge Q^ (it measures the reproduction of a corpus containing
+// ONLY good lines, whereas Q^ draws its signal from the FAILURES).
 struct BanditProbe {
 	uint64_t key = 0;
 	uint32_t code = 0;    // card engaged by the move (0 = macro or unknown)
@@ -764,7 +764,7 @@ struct BanditProbe {
 };
 
 // SEMANTIC compatibility between the current context and that of an occurrence
-// of a macro in the corpus. The POSITIONAL window is refuted: rollouts do not
+// of a macro in the corpus. The POSITIONAL window does not work: rollouts do
 // line up by index with the corpus, so the precondition has to be the STATE.
 // Target cards placed: EXACT (the combo's axis of progress, the one that
 // separates the climb from the finisher); hand: within +/-hand_tol (searches
@@ -981,8 +981,9 @@ struct OptionCatalog {
 	// Offer window: the macro is only offered while
 	// |current decision - pos| <= window. 0 = no guard.
 	uint32_t window = 0;
-	// SEMANTIC precondition (the alternative to the window, refuted): the DISTINCT
-	// contexts (PolicyStep::ctx) recorded at the START of each macro's occurrences
+	// SEMANTIC precondition (the alternative to the window, which does not work):
+	// the DISTINCT contexts (PolicyStep::ctx) recorded at the START of each macro's
+	// occurrences
 	// in the corpus. The macro is only offered when the current context is
 	// compatible with one of them (exact target cards placed, hand within
 	// +/-ctx_tol). ctx_tol < 0 = guard off.
@@ -1004,8 +1005,8 @@ struct OptionCatalog {
 // GREEDY SELECTION BY LEVIN LOSS (Alikhasi & Lelis, arXiv:2410.11262) rather
 // than by raw gain support x (length - 1): every macro added swells the
 // denominator of EVERY decision where it can be offered, so the selection stops
-// by itself once that cost exceeds the absorption. It is the fix for the first
-// A/B, where the catalogue flooded the softmax.
+// by itself once that cost exceeds the absorption. Without it the catalogue
+// floods the softmax.
 // Approximations documented in the implementation: candidate pool capped at the
 // 1024 best raw candidates, beam of 64 per round, denominator not capped at one
 // macro per first key (reality is cheaper than the model), and the paper's
@@ -1111,10 +1112,10 @@ double CorpusCoherence(const std::vector<NrpaRun>& runs, bool use_ctx,
 // gradient on its own (move, context) cell; the two levels estimate the same
 // quantity at different granularities.
 //
-// That promise was NOT kept for a while: `AdaptCorpus` called this function
-// with seven arguments out of eight, forcing hint_bias to 0 and leaving temp at
-// its default. The default for `temp` is kept here for calls with a single
-// distribution argument, but AdaptCorpus REQUIRES both.
+// The default for `temp` is kept here for calls with a single distribution
+// argument, but AdaptCorpus REQUIRES both: calling with seven arguments out of
+// eight forces hint_bias to 0 and leaves temp at its default, so the gradient
+// would not be computed under the rollouts' distribution.
 // `ctx_max`: cap on the number of entries of the contextual level (0 =
 // unlimited). Past it, existing cells keep being updated and no new one is
 // created, so path conditioning degrades gracefully towards the global level.
@@ -1167,8 +1168,8 @@ struct ArchiveEntry {
 // --- shared transposition table (lazy SMP) ---------------------------------
 //
 // Atomic slots with lossy overwrite: one entry = 48-bit tag | 16-bit budget.
-// The LDS workers used to redo the same work (private tables); here a state
-// solved by one prunes for all. Losing an entry (slot collision) only costs
+// With private tables the LDS workers redo the same work; here a state solved
+// by one prunes for all. Losing an entry (slot collision) only costs
 // redone work; a false positive would require a 64-bit digest collision.
 // Minimum size 1 MB (2^17 slots), otherwise some digest bits would take part in
 // neither the tag nor the index.
@@ -1894,17 +1895,16 @@ struct SearchConfig {
 	uint64_t max_nodes = 2000000;
 	// BUDGET IN ROLLOUTS: THE CONDITION FOR DETERMINISM.
 	//
-	// The budget used to be WALL TIME, and that is the cause of the
-	// non-determinism long attributed to exchanges between workers. The
-	// measurement refuted that attribution: two `--threads 1` runs on the same
+	// WALL TIME as the unit of the budget is the cause of the non-determinism, and
+	// not exchanges between workers: two `--threads 1` runs on the same
 	// seed, hence WITHOUT any exchange, do 41 232 and 42 179 rollouts. They do not
 	// stop at the same point of the NRPA trajectory, so they do not return the same
 	// result. The number of workers has nothing to do with it: it is the UNIT of
 	// the budget.
 	//
 	// At `--threads 1` and with this ceiling, two executions do exactly the same
-	// work. That is the only mode in which a fine A/B means anything; it is NOT the
-	// production mode (measured cost of a single worker: /5.1 to /5.9).
+	// work. That is the only mode in which a fine comparison means anything; it is
+	// NOT the production mode (measured cost of a single worker: /5.1 to /5.9).
 	// 0 = unlimited, i.e. byte-for-byte the previous behaviour.
 	uint64_t max_rollouts = 0;
 	EnumOptions enumeration;
@@ -1955,10 +1955,9 @@ struct SearchConfig {
 	// and the table did not.
 	//
 	// IT IS NOT PRUNING: no branch is removed, since a prompt with a single answer
-	// has no alternative by definition. The only effect is that `max_decisions` now
-	// counts REAL DECISIONS rather than prompts, so depths only compare with the
-	// control arm at equal TIME budget, and saying so is mandatory for the A/B to
-	// mean anything.
+	// has no alternative by definition. The only effect is that `max_decisions`
+	// counts REAL DECISIONS rather than prompts, so depths only compare at equal
+	// TIME budget.
 	bool elide_forced = false;
 
 	// Work partitioning between workers. The subtree opened by the FIRST deviation
@@ -2036,7 +2035,7 @@ struct SearchConfig {
 	// concentrated on them) instead of from the root.
 	// Only acts under armed serialisation (with no ladder a cell is a cache, not a
 	// rung): health checks and every mode without --target are unchanged byte for
-	// byte. 0 = the control arm of the A/B.
+	// byte. 0 = off.
 	float reenter = 0.5f;
 	// THE QUOTA HOSTS. The relevant state is not the board: it is (board,
 	// off-board resources), and the once-per-turn quota of the carrying effects
@@ -2075,8 +2074,8 @@ struct SearchConfig {
 	// tournament work unchanged on the refined ladder. ONE level to start with,
 	// measured. 0 = off.
 	uint32_t refine_after = 0;
-	// THE GRID (rips x overlap), derived from the refined closed form
-	// (tools/s24_forme_close_raffinee.py, 13/13). The cell key becomes
+	// THE GRID (rips x overlap), derived from the refined closed form. The cell
+	// key becomes
 	// (resolutions, overlap): one ELITE per cell of the 4x7 grid (28 cells)
 	// instead of a board hash under a scalar score. Archiving each choice frontier
 	// makes the interleaving cost additive (the scalar loses
@@ -2091,7 +2090,7 @@ struct SearchConfig {
 	// has ALREADY spent. Only bites at RefineLadderHere; an infeasible LP there
 	// gives up on refining, it cuts no line (a soft failure mode, intended as long
 	// as the theorem-2 walk with quotas is the judge).
-	// False by default (control arm = the historical behaviour byte for byte).
+	// False by default.
 	bool quota_h = false;
 	// The balance model (root of the LP), lent by main.cpp; null otherwise.
 	const class BalanceModel* balance = nullptr;
@@ -2102,7 +2101,6 @@ struct SearchConfig {
 	// `patience` decisions before it could deviate, 2/8 instead of 6/8 on the
 	// transplantation case. That is Rollout-IW's failure mode without a tree: the
 	// tree variant works around it, but NRPA gives more here for less complexity.
-	// rend ici davantage pour moins de complexite.
 
 	// --- NRPA (rollouts under a learned policy) ---
 	// Nesting level and iterations per level. The cost of a level-L call is
@@ -2143,8 +2141,9 @@ struct SearchConfig {
 	// ADAPTATION replay of the corpus: decision sequences recorded on the solution
 	// lines (LiftPolicyRun), adapted into the policy BEFORE the first rollout,
 	// `nrpa_adapt_passes` passes over each line. The injection point is that of the
-	// weight prior (initial policy of the first restart), so the A/B isolates the
-	// FORM of the injection, a per-move bonus against a discriminative gradient.
+	// weight prior (initial policy of the first restart), so what varies is the
+	// FORM of the injection alone, a per-move bonus against a discriminative
+	// gradient.
 	// 0 = inactive.
 	const std::vector<NrpaRun>* nrpa_adapt_runs = nullptr;
 	uint32_t nrpa_adapt_passes = 0;
@@ -2276,21 +2275,19 @@ struct SearchConfig {
 	// to ~1.5/14, Process per expansion from 54.5 to 12.8, +92 % expansions at
 	// equal time, with the same 42 expansions / b=0 / EXHAUSTED on the control and
 	// the same best per root (the extraction order is UNCHANGED, only the speed
-	// changes). --no-dive-full for the A/B.
-	// change). --no-dive-full pour l'A/B.
+	// changes). --no-dive-full turns it off.
 	bool dive_full = true;
 	// LIFO tie-break in the queue: at EQUAL Levin cost, extract the node queued
-	// LAST (the child of the node just expanded). REFUTED on its own: exact ties
-	// are rare (log-probabilities differ per node), rj does not move, and the
+	// LAST (the child of the node just expanded). Wins nothing on its own: exact
+	// ties are rare (log-probabilities differ per node), rj does not move, and the
 	// changed order visits more expensive states (90.4 against 70.4 us/Process) for
-	// -20 % expansions; neutral when combined with dive_full. Still available for
-	// the A/B, off by default.
+	// -20 % expansions; neutral when combined with dive_full. Off by default.
 	bool lifo_ties = false;
 	// MERGED pop (Arena::PopToAndRestore) when returning to the shared ancestor:
 	// each hot page is copied once instead of once per level. ON BY DEFAULT: exact
 	// equivalence checked on benchmark 0 (42/b=0/EXHAUSTED, same best), unit
 	// Restores 4.36 -> 0.58 per expansion, arena 47 -> 37 % of the phase, +4.5 %
-	// expansions at equal time. --no-merged-pop = the A/B control.
+	// expansions at equal time. --no-merged-pop turns it off.
 	bool merged_pop = true;
 	// POST-GOAL RECOVERY in the finisher (opt-in): under --optimize, a goal node of
 	// RunLevin keeps going instead of being treated as Dead. The goal is already
@@ -2300,7 +2297,7 @@ struct SearchConfig {
 	// behaviour).
 	bool finisher_post_goal = false;
 	// MACRO EDGES IN THE FINISHER (full adoption of Alikhasi & Lelis 2410.11262).
-	// Macros used to live only in PolicyRollout, yet it is RunLevin that CONVERTS
+	// Macros live in PolicyRollout, yet it is RunLevin that CONVERTS
 	// (32 lines to the board through the finisher, 16 solutions written). Here an
 	// applicable macro becomes an EDGE of the Levin tree: it costs log 1/pi_macro
 	// like any edge, advances by k decisions for ONE unit of depth, and a missing
@@ -2330,10 +2327,9 @@ struct SearchConfig {
 	// Worker identity, for the living corpus's per-worker quota. No effect when
 	// `options_online` is null.
 	uint32_t worker_id = 0;
-	// `--phs-canonical` (the paper's PHS*, (d + h)/pi) lived here. Removed: judged
-	// and never kept. The default form, log(d+1) + levin_h*h - log pi, is kept; it
-	// is a weighted-A*-style weighting without the paper's guarantee, and that is
-	// an ACKNOWLEDGED choice.
+	// The form used is log(d+1) + levin_h*h - log pi, not the paper's PHS*,
+	// (d + h)/pi: a weighted-A*-style weighting without the paper's guarantee, and
+	// that is an ACKNOWLEDGED choice.
 	// --- recipe graph ---
 	// Non-null: the graph is FED by the observed summons, and `h` becomes the
 	// distance over that graph instead of the count of missing cards. Null: the
@@ -2392,7 +2388,7 @@ struct SearchConfig {
 	// NRPA adaptation follows. 0 = measure without weighting.
 	float landmark_weight = 0.0f;
 	// Weight in the FINISHER's `h` (same entry point as `recipe_h`). Separate from
-	// the above so an A/B can move only one of them.
+	// the above so that only one of them need move.
 	float landmark_h = 0.0f;
 
 	// --- FOUR LEVERS AGAINST THE ARITY LAW -----------------------------------
@@ -2404,7 +2400,7 @@ struct SearchConfig {
 	// PRESENT, a term that is null while none is placed. Nothing rewards
 	// APPROACHING a payable Fusion.
 	//
-	// Four flags, four SEPARABLE mechanisms, all off by default. Each is A/B'd on
+	// Four flags, four SEPARABLE mechanisms, all off by default. Each is judged on
 	// its own: never change two factors at once.
 
 	// (1) RESOLVED ASSIGNMENT (--assign). Subset prompts ALSO emit the two extreme
@@ -2462,8 +2458,8 @@ struct SearchConfig {
 	float op_bias = 0.0f;
 	// GRADIENT TRUNCATION AT THE SCORE PEAK (--adapt-to-peak).
 	//
-	// See NrpaRun::peak_steps for the defect it fixes. Opt-in, so the A/B moves one
-	// factor only; when false, the path is byte for byte the previous one.
+	// See NrpaRun::peak_steps for the defect it fixes. Opt-in, so that turning it
+	// moves one factor only; when false, the path is byte for byte the other one.
 	bool adapt_to_peak = false;
 
 	// (2) HINDSIGHT (--hindsight w). Andrychowicz et al., NeurIPS 2017: a failure
@@ -2524,12 +2520,11 @@ struct SearchConfig {
 	// no trap. But the opening hand is three Fire Formation - Tenki, a CONTINUOUS
 	// spell (type 0x20002) that stays on the field as soon as it is activated or
 	// set, and `--resolve` adds Lunalight Masquerade, also in the S/T zone. No line
-	// could satisfy that goal. Seven sessions measured against the impossible: ZERO
-	// solutions written in goal-only mode, with a ceiling always described as "all
-	// the codes are there, the goal differs only in the DETAIL", the detail being
-	// the S/T cards the game forces one to leave. Player's ruling: the S/T are a
-	// bonus, and for Lunalight only the monsters count in the end.
-	// `--target-exact` restores the old semantics for the A/B.
+	// could satisfy that goal, and goal-only mode wrote ZERO solutions with a
+	// ceiling always described as "all the codes are there, the goal differs only
+	// in the DETAIL", the detail being the S/T cards the game forces one to leave.
+	// Player's ruling: the S/T are a bonus, and for Lunalight only the monsters
+	// count in the end. `--target-exact` restores equality.
 	bool goal_subset = false;
 	// Go-Explore archive: number of DISTINCT states (cell = complete board) kept
 	// with their path during the search. 0 = no archive.
@@ -2810,9 +2805,9 @@ struct SearchStats {
 	uint64_t transpositions = 0;    // merges by the table
 	// STATES ALREADY SEEN BUT WITH A SMALLER BUDGET, hence RE-EXPLORED. The table
 	// stores `disc + 1` and only cuts when the existing entry is at least as large;
-	// a state seen again with more budget is therefore re-expanded. Only the CUT
-	// (`transpositions`) used to be counted, never this work, so one could not say
-	// whether the mechanism pays. Counted on the PRIVATE table path; the shared
+	// a state seen again with more budget is therefore re-expanded. Counting only
+	// the CUT (`transpositions`) would not say whether the mechanism pays. Counted
+	// on the PRIVATE table path; the shared
 	// (lossy) table does not tell the two cases apart.
 	uint64_t tt_reexplored = 0;
 	uint64_t dead_ends = 0;         // answers rejected by the core
@@ -2835,12 +2830,12 @@ struct SearchStats {
 	// which message types are concerned, so the report can name the prompt instead
 	// of only saying there are some.
 	//
-	// TWO DISTINCT EVENTS. The single counter used to be incremented BEFORE trying
-	// `DefaultResponse`: when that fails, the branch does not survive and ALSO
-	// counts in `dead_ends`. The printed text said "reduced to THE default answer"
-	// for branches that were in fact DELETED, and the same event was counted twice,
-	// which is what made "90 forced prompts and 90 dead ends" read as two
-	// concordant facts when it was one.
+	// TWO DISTINCT EVENTS, and one counter cannot carry both. Incrementing a single
+	// counter BEFORE trying `DefaultResponse` also counts, in `dead_ends`, the
+	// branches that do not survive: "reduced to THE default answer" would then name
+	// branches that were in fact DELETED, the same event would be counted twice,
+	// and "90 forced prompts and 90 dead ends" would read as two concordant facts
+	// when it is one.
 	//   forced_default: a default answer EXISTS, the branch survives, reduced.
 	//   forced_killed : no default answer, the BRANCH DIES. That is the case of the
 	//                   three ANNOUNCE_*, structurally out of reach.
@@ -2909,10 +2904,9 @@ struct SearchStats {
 	double landmark_h_sum = 0.0;
 	uint64_t landmark_h_count = 0;
 	// --- LIVENESS OF THE FOUR MECHANISMS -------------------------------------
-	// A mechanism whose work and cost are not measured ends up tuned blind, and
-	// that has been paid for: `landmarks: mean h` was only printed by a function
-	// that does NOT cover the rollout phase, i.e. not where the flag acted, so the
-	// A/B started without knowing whether `h` was decreasing.
+	// A mechanism whose work and cost are not measured ends up tuned blind: a
+	// `mean h` printed by a function that does NOT cover the rollout phase, i.e.
+	// not where the flag acts, says nothing about whether `h` is decreasing.
 	//
 	// (3) recipe distance evaluated IN THE ROLLOUTS: sum, count, and the summed
 	// reference d0. `d0_sum / count` against `sum / count` says whether the
@@ -2923,9 +2917,8 @@ struct SearchStats {
 	// products, the three mechanisms are LIVE AND INERT.
 	uint64_t recipe_snaps = 0;
 	uint64_t snap_products = 0, snap_useful = 0, snap_backward = 0;
-	// LIVENESS OF THE OPERATOR BIAS (--op-bias). Without it, an A/B would measure
-	// the control arm twice, which is what happened for two sessions with
-	// `--assign-bias`, inert while printing that it was acting.
+	// LIVENESS OF THE OPERATOR BIAS (--op-bias). Without it, a comparison measures
+	// the same arm twice: a mechanism can be inert while printing that it acts.
 	// `offered`: decisions where at least one designated operator could be offered;
 	// `taken`: those where the move played engaged one.
 	uint64_t op_bias_offered = 0, op_bias_taken = 0;
@@ -3132,7 +3125,7 @@ struct SearchStats {
 	bool hit_time_limit = false;
 	bool hit_node_limit = false;
 	// MEMORY safeguard of the finisher (4 M queued nodes), distinct from the cap on
-	// expanded nodes: a root truncated by memory used to be typographically
+	// expanded nodes: without it a root truncated by memory is typographically
 	// indistinguishable from a normal root.
 	bool hit_memory_limit = false;
 	// The worker's arena overflowed: everything measured AFTER that is wrong
@@ -3144,7 +3137,7 @@ struct SearchStats {
 // End-of-search status, in one word, for the root tables. "EXHAUSTED" is a
 // PROOF OF ABSENCE and is only written when no bound bit: a non-zero
 // `edges_skipped` downgrades it to "EXHAUSTED UNDER BOUND", and the two
-// ceilings that used to appear nowhere are named.
+// ceilings are named.
 inline const char* SearchOutcome(const SearchStats& st) {
 	// First: a poisoned arena invalidates EVERYTHING else, including any
 	// "EXHAUSTED".
@@ -3152,9 +3145,9 @@ inline const char* SearchOutcome(const SearchStats& st) {
 	if(st.hit_time_limit)   return "budget";
 	if(st.hit_memory_limit) return "memoire";
 	if(st.hit_node_limit)   return "noeuds";
-	// One non-exhausted case remains: the search stopped on its solution quota. It
-	// used to display as an EMPTY column, indistinguishable from an unexplained
-	// stop.
+	// One non-exhausted case remains: the search stopped on its solution quota.
+	// Without this word it displays as an EMPTY column, indistinguishable from an
+	// unexplained stop.
 	if(!st.exhausted)       return "quota";
 	// A truncated enumeration removes LEGAL answers from the space: it strips
 	// "EXHAUSTED" of its value as a proof, exactly as a ceiling does.
@@ -3269,8 +3262,8 @@ public:
 	// rollouts, and it then guides the finisher (RunLevin).
 	const NrpaPolicy& LearnedPolicy() const { return final_policy; }
 	// BANDIT PROBE: the statistics of the ROOT (s = {}), i.e. of the rollout's
-	// first decision. It is the instrument required BEFORE any A/B, since the
-	// corpus agreement curve is blind to Q^. Empty when --qhat is off.
+	// first decision. It is the instrument required BEFORE any measurement, since
+	// the corpus agreement curve is blind to Q^. Empty when --qhat is off.
 	std::vector<BanditProbe> RootBandit() const;
 
 private:
@@ -3316,8 +3309,8 @@ private:
 	// armed or the archive is empty. On replay failure: arena.Restore() and a
 	// normal rollout from the root.
 	void ReenterMaybe(uint64_t& rng);
-	// The policy is copied only once per level call (it used to be copied AT EVERY
-	// ROLLOUT: a table of thousands of entries per rollout).
+	// The policy is copied only once per level call (copying at every rollout would
+	// mean a table of thousands of entries per rollout).
 	double Nrpa(int level, const Policy& pol, NrpaRun& best, uint64_t& rng);
 	// Upper level: adapts the PERSISTENT policy (by reference, for persistence
 	// across restarts) and exchanges the best sequence with the other workers
@@ -3420,7 +3413,7 @@ private:
 	}
 	// Best-approach tracking plus the goal test. Returns true when `here` IS the
 	// target AND the resolution minimums are reached. Factors out what each
-	// strategy used to duplicate. In anytime mode, recording goes through
+	// strategy would otherwise duplicate. In anytime mode, recording goes through
 	// replacement of the worst and dedup by path; the cost of the goal stays
 	// readable in goal_burned/goal_actions/goal_depth (the NRPA score reads it).
 	bool GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,

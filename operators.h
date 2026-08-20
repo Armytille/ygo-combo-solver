@@ -384,7 +384,7 @@ struct LPResult {
 	//   bound_dual[j]: value of one extra unit of capacity on operator j
 	//                  (> 0 <=> bound u_j BINDS the plan, i.e. its host is a host
 	//                  with a COMPUTED quota, not a selected one).
-	// Sign convention derived in tools/s22_verify_duals.py: in the normalised
+	// Sign convention: in the normalised
 	// tableau, a row dual is the reduced cost of its surplus/slack, and a bound
 	// dual is the reduced cost of the bound slack.
 	std::vector<double> row_dual;
@@ -401,7 +401,8 @@ struct LPResult {
 	// be that one and the aggregate would be a lie) is fixed by EXTRACTING the
 	// bounds; `overrun` (observations > declared budget, i.e. the model does not
 	// describe this host) is fixed by coverage. A mechanism that does not report
-	// its own liveness has already cost two sessions of measurements on nothing.
+	// its own liveness turns every measurement of it into a measurement of
+	// nothing.
 	uint32_t quota_applied = 0;
 	std::vector<uint32_t> quota_unbounded_hosts;
 	std::vector<uint32_t> quota_overrun_hosts;

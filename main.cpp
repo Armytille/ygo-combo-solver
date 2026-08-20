@@ -53,7 +53,7 @@ double MsSince(Clock::time_point t0) {
 //   subsets    = enumerations truncated by max_subsets
 // A non-zero `bound` or `subsets` strips "EXHAUSTED" of its value as a proof of
 // absence; a non-zero `partition` says the work was SHARED, not REMOVED, and
-// that is the distinction that used to be missing.
+// that is a distinction the report must keep.
 struct CutCounts {
 	uint64_t constraint = 0, guard = 0, turn = 0, bound = 0, claim = 0,
 			 subsets = 0, selfneg = 0;
@@ -104,11 +104,10 @@ struct CutCounts {
 	}
 };
 
-// A worker that failed to initialise used to return SILENTLY. Its pass then
-// displayed "0 solutions, 0 states", exactly what a worker that ran fine and
-// found nothing displays. Under address space pressure (16 workers x
-// --arena-mb) a whole A/B arm could therefore never have run with nothing
-// saying so.
+// A worker that fails to initialise must NOT return silently. Its pass would
+// display "0 solutions, 0 states", exactly what a worker that ran fine and
+// found nothing displays; under address space pressure (16 workers x
+// --arena-mb) a whole run could then never have run with nothing saying so.
 void WorkerAbort(const char* ou, const std::string& err) {
 	static std::mutex abort_mx;
 	std::lock_guard<std::mutex> lk(abort_mx);
@@ -177,10 +176,10 @@ void CheckSaturations(size_t target_size,
 // Depth left for the finisher after replaying a prefix.
 //
 // When the prefix already reaches the ceiling (itself derived from the
-// reference), the rest is zero and the finisher used to receive 64 decisions: a
-// value picked by judgement, WRITTEN FIVE TIMES, and SILENT. On a `--finisher
-// ab` comparison "at equal budget", the two engines could therefore receive
-// different DEPTH budgets with not a word in the log. The fallback is now
+// reference), the rest is zero. A hard-coded fallback of 64 decisions, written
+// in five places and silent, would let a `--finisher ab` comparison "at equal
+// budget" give the two engines different DEPTH budgets with not a word in the
+// log. The fallback is now
 // counted, and the summary says so, as the --max-decisions one already does.
 constexpr uint32_t kFinisherFallbackDepth = 64;
 std::atomic<uint64_t> g_depth_fallbacks{ 0 };
@@ -197,7 +196,7 @@ uint32_t FinisherDepth(uint32_t ceiling, size_t prefix) {
 // The target board alone imposes an ARITHMETIC, with no declarative model:
 // "3x Liger Dancer" means THREE Fusion summons. It is an argument about the
 // target multiset and the decklist, in the spirit of operator counting, and it
-// gives two things the solver used to write by hand: a finer feasibility bound,
+// gives two things otherwise written by hand: a finer feasibility bound,
 // and a DERIVED --summon-min.
 //
 // THE TRAP, and it is explicit: we count summon EVENTS, NEVER their triggers.
@@ -481,9 +480,9 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 // REPETITION PROBE: printed once per PHASE.
 //
 // It is printed separately for the rollouts and for the finisher, and that is
-// not cosmetic: a false reading once cost a session because a judge only
-// covered the rollout phase while the conversion happened in the ROOTED
-// rollouts. A "never" in the first table therefore only holds for that table.
+// not cosmetic: a judge covering only the rollout phase misreads a conversion
+// that happens in the ROOTED rollouts. A "never" in the first table therefore
+// only holds for that table.
 // `card_id` / `yn_id`: is `Choice::card` filled on SELECTION prompts and on
 // YES/NO prompts? They are now ALWAYS true, since the identity is
 // unconditional, but the guards remain, and that is not superstition: WITHOUT
@@ -514,8 +513,8 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 						: "");
 		// OFFER PROBE: THE DECOMPOSITION OF THE ARITY LAW.
 		// Printed BEFORE everything else because it decides which kind of work the
-		// failure belongs to, and because a whole session once concluded "the
-		// solver never goes there" without knowing whether the game offered it.
+		// failure belongs to: "the solver never goes there" means nothing without
+		// knowing whether the game offered it.
 		{
 			const double per = rollouts ? double(r.offer_rollouts) * 100.0 /
 											  double(rollouts)
@@ -1025,8 +1024,8 @@ struct Options {
 	// flow.
 	// SLOW AND LONG ADAPTATION (the Montparnasse recipe, arXiv:2505.02110 /
 	// 2606.07562, which solved Eterna100): the NRPA adaptation step and the number
-	// of iterations per level. They used to be hard-coded (1.0 and 24), hence never
-	// on a dial, hence never measured. The paper's recipe is a SMALL ALPHA
+	// of iterations per level. Hard-coded (1.0 and 24) they would be on no dial and
+	// never measured. The paper's recipe is a SMALL ALPHA
 	// compensated by MANY iterations at the low level: the policy moves slowly and
 	// explores the same basin for a long time instead of locking into it in a few
 	// adaptations. 0 = the engine default (the previous behaviour byte for byte).
@@ -1057,7 +1056,7 @@ struct Options {
 	// without preferring the branches that rip).
 	double levin_h = 1.0;
 	// Finisher replays: full dive stack (WINNER, +92 % expansions at equal time on
-	// benchmark 0, on by default) and LIFO tie-break (refuted on its own, off).
+	// benchmark 0, on by default) and LIFO tie-break (wins nothing alone, off).
 	// See SearchConfig.
 	bool dive_full = true;
 	bool lifo_ties = false;
@@ -1114,7 +1113,7 @@ struct Options {
 	// Sharing of the burned bound BETWEEN workers: a worker that improves the
 	// burned count tightens the B&B cut for everyone, through an atomic (CAS min
 	// on publication, relaxed load at the cut).
-	// --no-burn-share disables it, for the A/B.
+	// --no-burn-share disables it.
 	bool burn_share = true;
 	// PRIOR BY SOLUTION REPLAY (arXiv:2401.10431): corpus lines (--prior, a file or
 	// a directory, repeatable) whose plan_keys are recorded EACH ON ITS OWN DUEL (a
@@ -1124,11 +1123,11 @@ struct Options {
 	std::vector<std::string> prior_files;
 	// Weight of a move present in the WHOLE corpus (proportional otherwise).
 	double prior_weight = 2.0;
-	// ADAPTATION REPLAY OF THE CORPUS (the remaining route of 2401.10431 after the
-	// refutation of the WEIGHT prior): the same lines, recorded no longer as
+	// ADAPTATION REPLAY OF THE CORPUS (the remaining route of 2401.10431 once the
+	// WEIGHT prior is set aside): the same lines, recorded no longer as
 	// isolated moves but as SEQUENCES OF DECISIONS (legal choices + the chosen
 	// one), adapted into the policy by the NRPA gradient before the first rollout.
-	// --adapt-passes 0 disables the mechanism (A/B).
+	// --adapt-passes 0 disables the mechanism.
 	std::vector<std::string> adapt_files;
 	uint32_t adapt_passes = 4;
 	// OPTIONS: size of the catalogue of macros mined from the --adapt corpus and
@@ -1139,8 +1138,7 @@ struct Options {
 	uint32_t options_support = 2;
 	uint32_t options_len = 8;
 	// Offer window: a macro is only offered within +/- window recorded decisions of
-	// its original position in the corpus. 0 = no guard. REFUTED: kept for the
-	// A/B.
+	// its original position in the corpus. 0 = no guard. Wins nothing on its own.
 	uint32_t options_window = 0;
 	// SEMANTIC guard (the form the measurement pointed at): a macro is only offered
 	// when the current context (target cards placed, hand) is compatible with a
@@ -1207,8 +1205,8 @@ struct Options {
 	// The flag existed in EnumOptions with no dial at all, and it was only read at
 	// the idle prompt; at the battle prompt the two exits were emitted
 	// unconditionally.
-	// One representative free zone per zone type: declared and documented for
-	// sessions, ENABLED NOWHERE.
+	// One representative free zone per zone type: declared and documented, ENABLED
+	// NOWHERE.
 	bool canonical_zones = false;
 	// QUOTA PER PROGRESS LEVEL in the Go-Explore archive: gives the archive back
 	// its nature as a COVERING when its sort key saturates.
@@ -1228,9 +1226,7 @@ struct Options {
 	double nrpa_temp = 1.0;
 	// NRPA nesting level. 0 = the historical default, chosen by a 180 s threshold
 	// on the rollout budget, a threshold that changes the ALGORITHM (iters^2
-	// against iters^3) with no measurement behind it, and that separates exactly
-	// the two commands compared in several early A/Bs.
-	// 5-7 (C15).
+	// against iters^3) with no measurement behind it.
 	int nrpa_level = 0;
 	// Weight of the channel through which the PLAYER'S KNOWLEDGE enters the
 	// sampling: the --resolve/--summon-min cards receive it automatically. Its
@@ -1240,8 +1236,7 @@ struct Options {
 	double hint_bias = -1.0;
 	// DETERMINISTIC MODE: budget in ROLLOUTS per worker, instead of wall time.
 	// Combined with `--threads 1`, two executions do exactly the same work, and it
-	// is the only mode in which a fine A/B means anything. 0 = unlimited (the
-	// previous behaviour byte for byte).
+	// is the only mode in which a fine comparison means anything. 0 = unlimited.
 	uint64_t max_rollouts = 0;
 	uint64_t max_nodes = 0;
 	// GRADIENT TRUNCATION AT THE SCORE PEAK. See NrpaRun::peak_steps.
@@ -1249,13 +1244,11 @@ struct Options {
 	// ON BY DEFAULT. Measured on BOTH benchmarks: x2.6 on arity 3 in two
 	// independent pairs of benchmark A, and on benchmark B in PROPORTION over ten
 	// runs per arm, where the stack carries `>=2` from 3/10 to 9/10. The flag is
-	// NEGATIVE (`--no-adapt-to-peak`) so the A/B stays possible.
+	// NEGATIVE (`--no-adapt-to-peak`) so that it can be turned off.
 	bool adapt_to_peak = true;
 	// Maximum number of subsets emitted per selection prompt. It is what caps the
-	// branching factor of EVERY selection prompt; it used to be hard-coded (24) in
-	// twelve places, with no flag and no measurement, and the structure's default
-	// (64) was never used. Its effect is read in the "subsets" column of the
-	// pruning line.
+	// branching factor of EVERY selection prompt. Its effect is read in the
+	// "subsets" column of the pruning line.
 	uint32_t max_subsets = 24;
 	// Derive --summon-min from the TARGET BOARD instead of writing it by hand.
 	// Opt-in: a derived constraint changes the search's behaviour and must not
@@ -1274,8 +1267,8 @@ struct Options {
 	// succeeds.
 	bool seed_recipes = true;
 	// ALSO seed the CARDINAL requirements ("3 \"Lunalight\" monsters", "2 Level 4
-	// monsters"). Separate from seed_recipes so the A/B can isolate what they
-	// bring: without them the seeding posts a single recipe on benchmark A (eight
+	// monsters"). Separate from seed_recipes so that what they bring can be
+	// isolated: without them the seeding posts a single recipe on benchmark A (eight
 	// of the ten extra deck cards name no card at all).
 	bool seed_cardinal = true;
 	// LEARNED LANDMARK GRAPH. The corpus of RESOLVED plans the landmarks are
@@ -1305,10 +1298,10 @@ struct Options {
 	// plan. Does every activation correspond to a declared operator, and is the
 	// sequence valid under the extracted preconditions?
 	//
-	// WHY IT COMES BEFORE EVERYTHING ELSE. Three sessions built on a graph nobody
-	// had checked described the game: recipes, landmarks and `--backward`, all fed
-	// by OBSERVATION (what the solver has already managed) instead of by
-	// DECLARATION. The harness is falsifiable and costs one run; if it fails, the
+	// WHY IT COMES BEFORE EVERYTHING ELSE. Recipes, landmarks and `--backward` are
+	// all fed by OBSERVATION (what the solver has already managed) instead of by
+	// DECLARATION, so they rest on a graph nobody has checked describes the game.
+	// The harness is falsifiable and costs one run; if it fails, the
 	// planner is pointless, and that is what one wants to know first.
 	bool operators = false;
 	// SEEDING THE RECIPE GRAPH FROM THE DECLARED OPERATORS, instead of from card
@@ -1333,16 +1326,14 @@ struct Options {
 	// RETURN TO THE RUNG: probability that an NRPA rollout restarts from an archive
 	// cell instead of the root. The half of SIW_R the rollouts were missing; the
 	// closed form says `Sigma b^(l_i)` only exists when each block is searched from
-	// the previous rung. Only bites under armed serialisation. 0 = the A/B control.
+	// the previous rung. Only bites under armed serialisation. 0 = off.
 	double reenter = 0.5;
-	// CONTROL of the quota A/B: replays the earlier derivation by effect classes in
-	// place of the derivation from the LP's duals. A flag for the duration of one
-	// measurement; both derivations are printed in every case.
+	// Replays the earlier derivation by effect classes in place of the derivation
+	// from the LP's duals. Both derivations are printed in every case.
 	bool quota_legacy = false;
-	// CONTROL of the transient-demand A/B: do NOT compile the --resolve /
-	// --summon-min requirements into the material balance (the earlier behaviour:
-	// post-resolution credit only). A flag for the duration of one measurement; the
-	// active wiring is printed in every case.
+	// Do NOT compile the --resolve / --summon-min requirements into the material
+	// balance (the earlier behaviour: post-resolution credit only). The active
+	// wiring is printed in every case.
 	bool resolve_legacy = false;
 	// THE PATH QUOTAS IN THE LP (red-black partial relaxation,
 	// Katz-Hoffmann-Domshlak): at refinement time, the observed uses of the quota
@@ -1357,8 +1348,7 @@ struct Options {
 	// canonical MAP-Elites/Pareto-MCTS gesture, and the only key under which the
 	// cost of interleaving the conjunction is additive (the scalar loses
 	// ~2*b^(l_t-1)/L = 4e7 at the measured values). The regime without
-	// serialisation, and it requires --resolve. False by default while the A/B
-	// runs.
+	// serialisation, and it requires --resolve. False by default.
 	bool grid = false;
 	// FULL GO-EXPLORE, first half: the archives of the FINISHER's searches
 	// (A1/A2/phase 2) enter the global archive, with their paths re-rooted at the
@@ -1424,7 +1414,7 @@ struct Options {
 	// This is NOT domain knowledge: it is reading the statement of the problem.
 	// That is the difference with `--hint`, which is a crutch.
 	// --- FOUR LEVERS AGAINST THE ARITY LAW ----------------------------------
-	// All off by default, all separable, all A/B-able on their own. See
+	// All off by default, all separable, all judgeable on their own. See
 	// SearchConfig for the full reasoning behind each.
 	//
 	// (1) --assign: subset prompts ALSO emit the two extreme subsets in the sense
@@ -2099,8 +2089,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				continue;
 			// NEGATIVE FLAGS OF THE MECHANISMS PROMOTED TO DEFAULTS. Once it passes
 			// on BOTH benchmarks a mechanism becomes the default, and the flag
-			// becomes negative: it then only serves to replay the A/B that promoted
-			// it.
+			// becomes negative: it then only serves to turn the mechanism off.
 			{
 				static const struct { const char* name; bool Options::* member; }
 				kNoFlags[] = {
@@ -2512,12 +2501,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			return false;
 		}
 	}
-	// A path conditioning of the LOGIT lived here. Removed: REFUTED TWICE, with 0
-	// comparisons won out of 4 against `--ctx-shrink` alone, a total collapse at
-	// k = 6, and the same agreement plateau. And the refutation carried a
-	// substantive lesson: it grafted MCPS's conditioning onto an NRPA LOGIT, where
-	// the paper conditions a REWARD AVERAGE. `--qhat` is what implements the
-	// mechanism.
+	// NO path conditioning of the LOGIT belongs here: it wins 0 comparisons out of
+	// 4 against `--ctx-shrink` alone, collapses at k = 6, and reaches the same
+	// agreement plateau. The substantive reason: it grafts MCPS's conditioning onto
+	// an NRPA LOGIT, where the paper conditions a REWARD AVERAGE. `--qhat` is what
+	// implements the mechanism.
 	if(o.workdir.empty()) {
 		if(const char* env = std::getenv("COMBOSOLVER_WORKDIR"))
 			o.workdir = env;
@@ -3123,7 +3111,6 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 	// requiring it to pass its turn was an assumption of this tool, not a property
 	// of replays. Without that fallback, such a replay returned no target, hence no
 	// plan, and the transplantation flow refused to start.
-	// de transplantation refusait de demarrer.
 	auto capture_target = [&] {
 		r.target_self = Snapshot(duel, uint8_t(opt.target_player));
 		r.target_oppo = Snapshot(duel, uint8_t(1 - opt.target_player));
@@ -3621,8 +3608,7 @@ uint32_t MeasureWidth(Duel& duel, const Replay& yrp, const Options& opt,
 // legitimately differ from one mode to the next), it is that the MECHANISMS
 // chosen on the command line were only applied on ONE path:
 //
-//   * `--elide-forced` spent THREE sessions of benches on the search path where
-//     it did nothing, provably byte for byte;
+//   * `--elide-forced` did nothing on the search path, provably byte for byte;
 //   * the `--solve` mode, the HEALTH CHECK, never saw `--hindsight` or
 //     `--adapt-to-peak`, which explains why the health figures stayed identical
 //     across their promotion;
@@ -3772,7 +3758,7 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 	// The return to the rung requires a STRUCTURE of cells: the ladder
 	// (serial_reqs) or the grid. Without one of the two, an archive cell is a
 	// cache, not a frontier, and the mechanism is deliberately inert. Saying so
-	// here avoids a stillborn A/B arm.
+	// here avoids a stillborn measurement.
 	if(cfg.reenter > 0.0f)
 		dep(!cfg.serial_reqs.empty() ||
 				(cfg.grid && !cfg.resolve_min.empty()),
@@ -4034,7 +4020,7 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 	// arena makes that test affordable.
 	// Returns the EXACT fingerprint of the state, and along the way the hash of the
 	// BOARD in the sense of the search's equivalence criterion. Both, because they
-	// separate three causes the discrepancy message used to conflate:
+	// separate three causes the discrepancy message would otherwise conflate:
 	//   want == 0            : the RECORDED answer is rejected here, a defect of
 	//                          the harness rather than of the enumerator;
 	//   board equal, state not: a proposal carries out the SAME INTENT but
@@ -4299,8 +4285,8 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	cfg.max_solutions = 16;
 	// Anytime optimisation: a pass no longer stops at 16 solutions of equal cost,
 	// it EXHAUSTS the space of k deviations. That is what makes the "resistance of
-	// the reference" a proof rather than a premature stop (measured: every pass
-	// used to stop at 16 variants in 0.2 s / 330 states).
+	// the reference" a proof rather than a premature stop (measured: stopping at 16
+	// variants takes 0.2 s / 330 states).
 	// The action/decision bounds are relaxed: a line that RECOVERS burned cards
 	// pays extra actions, and bounds of <= reference would forbid exactly the lines
 	// that are cheaper in tier 1.
@@ -4511,7 +4497,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		double ms = 0;
 	};
 	// One pass at k deviations, with or without novelty pruning. Factored out so
-	// the A/B control compares EXACTLY the same engine.
+	// the control compares EXACTLY the same engine.
 	auto run_pass = [&](uint32_t k, uint32_t pat, double budget) {
 		PassOut out;
 		auto t0 = Clock::now();
@@ -4634,7 +4620,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 
 	uint32_t k_start = 1;
 	if(patience && spent < opt.solve_ms) {
-		// A/B CONTROL, required by the verification discipline: a pruning that gains
+		// CONTROL, required by the verification discipline: a pruning that gains
 		// 10x in states but loses solutions must SAY SO ITSELF. Same engine, same
 		// budget, k = 1, with then without novelty.
 		reached = 1;
@@ -5308,7 +5294,7 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 }
 
 // ADAPTATION REPLAY OF THE CORPUS (--adapt), the remaining route of
-// arXiv:2401.10431 after the refutation of the WEIGHT prior. Same corpus, same
+// arXiv:2401.10431 once the WEIGHT prior is set aside. Same corpus, same
 // recording on the duel of ITS OWN header, same injection point (initial policy
 // of the rollouts): what changes is the FORM of the signal. The prior said
 // "this move exists in the solutions" and rewarded it everywhere; the
@@ -5316,8 +5302,9 @@ void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
 // which is the NRPA gradient itself, applied to already solved sequences
 // instead of to the run's rollouts.
 //
-// So the A/B is clean: --prior and --adapt inject at the same place, and the
-// only measurable difference is per-move bonus against discriminative gradient.
+// So the comparison is clean: --prior and --adapt inject at the same place, and
+// the only measurable difference is per-move bonus against discriminative
+// gradient.
 // --- LANDMARK LEARNING ------------------------------------------------------
 //
 // Replays each RESOLVED plan of the corpus and records, at every decision, the
@@ -5424,8 +5411,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	std::printf("  %zu plan(s) verses, %.0f ms\n", graph.Plans(), MsSince(t0));
 	// THE HONESTY CAVEAT, printed rather than buried. With a single plan, the
 	// intersection IS that plan: those are not generalised landmarks, they are the
-	// trace of one line. Saying it here keeps a positive A/B from being read as a
-	// generalisation when it would only be a repertoire of states.
+	// trace of one line. Saying it here keeps a positive result from being read as
+	// a generalisation when it would only be a repertoire of states.
 	if(graph.Plans() < 2)
 		std::printf("  !! UN SEUL plan : l'intersection est ce plan. Les "
 					"landmarks ne sont PAS generalises —\n     ils decrivent une "
@@ -6720,9 +6707,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// cards CAPTURED on the reference board (positions, materials and counters
 	// included) and recompose the key; never a hand-made key.
 	// The target ACTUALLY used, kept for the report. The "all the codes are there"
-	// diagnostic block used to print `ref.target_self`, the TEMPLATE's board, under
-	// the label "target:". Under --no-ref that is NOT the target, and it is exactly
-	// the instrument that should have shown that a posted target has an EMPTY S/T
+	// diagnostic block must NOT print `ref.target_self`, the TEMPLATE's board,
+	// under the label "target:": under --no-ref that is not the target, and this is
+	// exactly the instrument that has to show that a posted target has an EMPTY S/T
 	// zone.
 	std::vector<QueriedCard> posed_mz, posed_sz;
 	bool posed = false;
@@ -6925,7 +6912,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	}
 	// GOAL-ONLY MODE: the repertoire is discarded AFTER being recorded and
 	// printed. The recording stays, so the measurement says exactly WHAT IS BEING
-	// REMOVED; a mechanism neutralised in silence is not a control arm.
+	// REMOVED; a mechanism neutralised in silence cannot be judged.
 	if(opt.no_plan) {
 		std::printf("\n  --no-plan : les %zu etapes ci-dessus sont ECARTEES.\n"
 					"  La politique NRPA demarre uniforme : plus de biais "
@@ -7079,7 +7066,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							nrec, dead, acq.size(), recipe_graph.Products());
 				// The mechanism's LIVENESS, and it is by name: without it, a seeding
 				// with zero edges would read as an active seeding.
-				// (piege 42, deux sessions payees pour --assign-bias).
 				for(const AcquirableCode& a : acq)
 					std::printf("      %s peut ACQUERIR le code de %s  (%s, hote "
 								"@%s, source @%s)\n", db.Name(a.host).c_str(),
@@ -7204,8 +7190,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						}
 						// THE ENABLERS AND THE QUOTAS: TWO DERIVATIONS, one COMPUTED
 						// (from the duals, the default), the other by effect CLASSES
-						// (the control, kept for the duration of one measurement:
-						// --quota-legacy).
+						// (the alternative, behind --quota-legacy).
 						std::vector<uint32_t> quota_legacy;
 						std::vector<SearchConfig::SerialReq> presence_legacy;
 						std::unordered_map<uint32_t, uint32_t> dcop;
@@ -7463,9 +7448,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			}
 		}
 		// THE BACKWARD DECOMPOSITION, PRINTED. It is the judge of the operator
-		// seeding, and it is STRUCTURAL: no seed, no budget, no rollout. Only the
-		// NUMBER of subproducts (`snap_backward`) used to be read, and a number does
-		// not say whether the operator being sought is in there.
+		// seeding, and it is STRUCTURAL: no seed, no budget, no rollout. The NUMBER of
+		// subproducts (`snap_backward`) alone says nothing about whether the operator
+		// being sought is in there.
 		{
 			std::vector<uint32_t> roots = target.codes;
 			std::sort(roots.begin(), roots.end());
@@ -7571,8 +7556,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// board.
 	//
 	// UNDER --no-ref the ceiling CANNOT come from the reference: the mode promises
-	// to take nothing from it, and it used to take its most structuring depth
-	// bound from it. It is then derived from the DECKLIST (at most twelve
+	// to take nothing from it, and the depth bound is the most structuring thing it
+	// could take. It is then derived from the DECKLIST (at most twelve
 	// decisions per playable card, which covers summon, targeting, materials and
 	// chain windows) and it is printed in every case, because a ceiling that cuts
 	// without naming itself produces false "EXHAUSTED" verdicts.
@@ -7678,16 +7663,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	}
 	if(opt.adapt_to_peak)
 		std::printf("  gradient TRONQUE AU PIC du score (--adapt-to-peak)\n");
-	// FIX: `--elide-forced` WAS WIRED NOWHERE EXCEPT IN `--growth`. Three sessions
-	// of benches passed the flag on the SEARCH path, where it did nothing. Proof
-	// in deterministic mode: `--no-elide-forced` returns "3000 rollouts, 149334
-	// states, 3002 adaptations" byte for byte. It is the THIRD occurrence of the
-	// "live but inert" trap and the most expensive: a flag that declares itself on
-	// while being off.
+	// `--elide-forced` must be wired on the SEARCH path, not only in `--growth`.
+	// Wired only there it does nothing here, provably: in deterministic mode
+	// `--no-elide-forced` returns "3000 rollouts, 149334 states, 3002 adaptations"
+	// byte for byte. That is the "live but inert" trap: a flag that declares itself
+	// on while being off.
 	//
-	// This is not a flag, it is a FIX: the flag existed and claimed to act. What
-	// becomes debatable is its DEFAULT VALUE, and that goes back to "off", because
-	// the +61 % throughput was measured on the `--growth` path, never on this one.
+	// What is debatable is its DEFAULT VALUE, and that stays "off", because the
+	// +61 % throughput was measured on the `--growth` path, never on this one.
 	if(opt.elide_forced)
 		std::printf("  coups FORCES joues en ligne (--elide-forced) — NON JUGE "
 					"sur ce chemin : il y etait inerte jusqu'a la s19\n");
@@ -7701,9 +7684,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// live and inert. The implication is applied HIGHER UP (with --probe-repeat's)
 	// and restated here for each flag that triggered it.
 	if(opt.op_bias > 0.0) {
-		// THE TWO WAYS THIS MECHANISM CAN BE INERT, STATED BEFORE THE RUN. It is
-		// the lesson that cost two sessions: a mechanism that is off while
-		// declaring itself on makes one measure the control arm twice.
+		// THE TWO WAYS THIS MECHANISM CAN BE INERT, STATED BEFORE THE RUN: a
+		// mechanism that is off while declaring itself on makes one measure the
+		// same arm twice.
 		if(opt.recipes < 0.0)
 			std::printf("!! --op-bias sans --recipes : le mecanisme lit "
 						"`snap_operators`, que seul l'instantane du graphe "
@@ -7733,34 +7716,32 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						"   Ajouter --recipes 0 — le graphe est alors alimente "
 						"et lu sans entrer dans aucun cout.\n");
 	}
-	// A "conflate the COLUMNS in the transposition key" flag lived here, with an
-	// automatic warning about LINK monsters. Removed: REFUTED on benchmark A
-	// (placements divided by 2 and by 12), and the cause is NAMED: that deck
-	// carries three Link monsters, whose ARROWS point at columns, and a pointed
-	// zone allows a summon from the extra deck. The gain on the exhaustive search
-	// was real (x1.67, +4 depths) and it does not convert.
+	// The transposition key does NOT conflate the COLUMNS. On benchmark A that
+	// divides placements by 2 and by 12, and the cause is NAMED: that deck carries
+	// three Link monsters, whose ARROWS point at columns, and a pointed zone allows
+	// a summon from the extra deck. The gain on the exhaustive search is real
+	// (x1.67, +4 depths) and it does not convert.
 	if(opt.assign || opt.backward) {
 		if(!cfg.recipes)
 			std::printf("!! --assign / --backward sans graphe de "
 						"recettes : les mecanismes sont INERTES.\n");
 		else
-			std::printf("  session 17 : assign %s, backward %s "
+			std::printf("  assign %s, backward %s "
 						"(instantane du graphe tous les %llu tirages)\n",
 						opt.assign ? "OUI" : "non",
 						opt.backward ? "OUI" : "non",
 						(unsigned long long)cfg.recipe_snap_period);
 	}
 	if(opt.hindsight > 0.0)
-		std::printf("  session 17 : hindsight %.2f x alpha, au plus %zu but(s) de "
+		std::printf("  hindsight %.2f x alpha, au plus %zu but(s) de "
 					"substitution par worker\n",
 					opt.hindsight, opt.hindsight_k);
 	// THE "OFFER -> CHOICE CONVERSION" JUDGE needs to know which card the move
-	// kept engages. There is nothing left to turn on: `Choice::card` is filled
-	// UNCONDITIONALLY, selection prompts included. This block used to arbitrate
-	// between "a mute probe" and "a run modified under it"; the arbitration
-	// disappeared with its cause, because it was never the identity that changed
-	// the run but the HINT BIAS applied to it, and that one is now guarded by
-	// `IsSubsetPrompt`.
+	// kept engages. There is nothing to turn on: `Choice::card` is filled
+	// UNCONDITIONALLY, selection prompts included. No arbitration between "a mute
+	// probe" and "a run modified under it" is needed, because it is never the
+	// identity that changes the run but the HINT BIAS applied to it, and that one
+	// is guarded by `IsSubsetPrompt`.
 	// `--watch`: PURE observation. No entry in `cons.resolve_min`, no
 	// `cfg.hint_cards`, no gradient; that is the whole point of the flag. Resolved
 	// by name or by code, like the others.
@@ -7874,7 +7855,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	std::vector<QueriedCard> best_mzone, best_szone;
 	// The best JOINT line: lexicographic max (rips, board), across all passes.
 	// Written at the end of the run (best_joint_*.yrp) to be re-injected through
-	// --approach; the lines with complete rips used to die with the run (47
+	// --approach; without it the lines with complete rips die with the run (47
 	// rollouts at 3 rips in one run, none kept).
 	uint32_t best_joint_rp = 0, best_joint_overlap = 0;
 	std::vector<std::vector<uint8_t>> best_joint_path;
@@ -7916,9 +7897,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 
 	// GLOBAL Go-Explore archive (merge of the passes' archives, one entry per cell
 	// = complete board) and merged NRPA policy (mean of the workers' weights): the
-	// finisher's raw material. The policy used to die with the run although it is
-	// exactly the guide the conversion needs; that is the lock measured three times
-	// (a finisher exhausted at ~6 states from the single best state).
+	// finisher's raw material. A policy dying with the run throws away exactly the
+	// guide the conversion needs; that is the lock measured three times (a finisher
+	// exhausted at ~6 states from the single best state).
 	std::unordered_map<uint64_t, ArchiveEntry> global_archive;
 	NrpaPolicy merged_policy;
 	unsigned policy_workers = 0;
@@ -7948,8 +7929,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			carry_seed.push_back(e_);
 	// Burned bound SHARED between workers: seeded by --burn-limit, tightened by
 	// every improvement of every phase, so a worker that finds 19 cuts for the
-	// other fifteen from the next decision on. --no-burn-share disconnects it
-	// (A/B).
+	// other fifteen from the next decision on. --no-burn-share disconnects it.
 	std::atomic<uint32_t> shared_burn{ opt.burn_limit ? opt.burn_limit
 													  : UINT32_MAX };
 	auto merge_archive = [&](const std::vector<ArchiveEntry>& a) {
@@ -8118,15 +8098,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			double qhat_reward_sum = 0;
 			size_t qhat_nodes = 0, qhat_codes = 0, qhat_bytes = 0;
 			// LANDMARKS: the mechanism's liveness WHERE IT ACTS. The counter
-			// already existed, but it was only printed by `PrintCuts`, which does
-			// not cover the rollout phase, i.e. precisely not the phase where the
-			// `--landmark-w` weight works. The "live but inert" trap on our own
-			// mechanism, found by re-reading an A/B where the column was empty.
+			// already exists, but printing it only from `PrintCuts` would miss the
+			// rollout phase, i.e. precisely the phase where the `--landmark-w` weight
+			// works. The "live but inert" trap, on this very mechanism.
 			double lm_h_sum = 0.0;
 			uint64_t lm_h_count = 0;
-			// The liveness of the four mechanisms. Same reason as above, and the
-			// lesson is fresh: the landmark A/B started without knowing whether `h`
-			// was decreasing.
+			// The liveness of the four mechanisms. Same reason as above: without it
+			// one weights landmarks without knowing whether `h` decreases.
 			double rec_roll_sum = 0.0, rec_roll_d0_sum = 0.0;
 			uint64_t rec_roll_count = 0;
 			double backward_sum = 0.0;
@@ -8189,7 +8167,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		};
 		ModeStats greedy, nrpa;
 		// PROBE OF THE FIRST DECISION, aggregated across workers: the instrument
-		// required BEFORE any A/B, i.e. n^ and Q^ per opening. The sample sizes
+		// required BEFORE any measurement, i.e. n^ and Q^ per opening. The sample sizes
 		// and the reward sums are additive, so the aggregation is exact and not a
 		// mean of means.
 		std::map<uint64_t, BanditProbe> qhat_root;
@@ -8211,9 +8189,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		{
 			const int lvl = opt.nrpa_level > 0 ? opt.nrpa_level
 											  : ((budget > 180000.0) ? 3 : 2);
-			// The number of rollouts per level call is iters^L: it used to be printed
-			// hard-coded (576/13824), which would have lied as soon as --nrpa-iters
-			// moved, exactly the hidden-variable problem.
+			// The number of rollouts per level call is iters^L: printing it
+			// hard-coded (576/13824) would lie as soon as --nrpa-iters moved,
+			// exactly the hidden-variable problem.
 			const uint32_t it = opt.nrpa_iters ? opt.nrpa_iters
 											   : SearchConfig{}.nrpa_iters;
 			double rollouts = 1;
@@ -8270,12 +8248,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					wcfg.novelty_patience = patience;
 					// NRPA nesting level. This is NOT a fine setting: it changes the
 					// cost of a level call from iters^2 (~576 rollouts) to iters^3
-					// (~13 824), i.e. the sampling algorithm itself. The 180 s
-					// threshold that used to choose it by itself fell exactly on the
-					// dividing line between the commands compared in several A/Bs: a
-					// 600 s run without --finisher-min leaves 420 s to the rollouts
-					// (level 3), and the SAME run with --finisher-min 420000 leaves
-					// ~180 (level 2), a hidden variable in several published A/Bs. It
+					// (~13 824), i.e. the sampling algorithm itself. A 180 s threshold
+					// choosing it by itself falls exactly on the dividing line between
+					// otherwise comparable commands: a 600 s run without --finisher-min
+					// leaves 420 s to the rollouts (level 3), and the SAME run with
+					// --finisher-min 420000 leaves ~180 (level 2), a hidden variable. It
 					// is now explicit, and its value is printed below.
 					wcfg.nrpa_level = opt.nrpa_level > 0
 										  ? opt.nrpa_level
@@ -8507,7 +8484,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											 nrpa.macro_aborted));
 		// The liveness of the CONTEXTUAL LEVEL. Under path conditioning it is the
 		// reading that says whether it had room to learn: at the cap it degrades
-		// towards the global weight and the A/B no longer measures the paper's
+		// towards the global weight, and what is then measured is not the paper's
 		// mechanism but a truncated version of it.
 		if(opt.ctx_shrink >= 0 && nrpa.ctx_entries)
 			std::printf("      niveau contextuel : %zu case(s) au plus grand "
@@ -8546,7 +8523,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// reproduction of a corpus containing ONLY good lines, whereas Q^ draws
 		// its signal from the FAILURES. So this is the only free instrument that
 		// answers "does the solver concentrate on the right opening?". If the
-		// right target does not stand out clearly there, no A/B is useful.
+		// right target does not stand out clearly there, no measurement is useful.
 		if(opt.qhat_depth && opt.qhat_probe && !qhat_root.empty()) {
 			std::vector<BanditProbe> rows;
 			rows.reserve(qhat_root.size());
@@ -8590,7 +8567,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// AVERAGED OVER ALL ROLLOUTS, the bad ones included. It is THE
 			// reading: if a searcher's right target (Tenki) does not stand out
 			// clearly after a few thousand rollouts, the mechanism separates
-			// nothing and no A/B is useful. Moves with a starved sample size are
+			// nothing and no measurement is useful. Moves with a starved sample size are
 			// set aside: a mean over three rollouts is not a mean.
 			uint32_t seuil = 0;
 			for(const BanditProbe& b : rows)
@@ -8787,8 +8764,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)(nrpa.peak_trunc +
 											 greedy.peak_trunc));
 		// WORK REDONE BY THE TRANSPOSITION: states already seen but with a smaller
-		// budget, hence RE-EXPANDED. Only the cut used to be counted, so one could
-		// not say whether the mechanism pays.
+		// budget, hence RE-EXPANDED. Counting only the cut would not say whether the
+		// mechanism pays.
 		if(nrpa.tt_reexplored + greedy.tt_reexplored)
 			std::printf("  transposition : %llu etat(s) RE-EXPLORES faute de "
 						"budget a la premiere visite\n",
@@ -8832,8 +8809,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// THE LIVENESS OF THE FOUR MECHANISMS, in the phase where they work. The
 		// question is not "was the flag on" but "did the distance REALLY decrease"
 		// and "is the decomposition advancing": a mechanism that is live and inert
-		// is the mistake that was made twice.
-		// session 16 a commise deux fois.
+		// is the mistake to avoid.
 		if(nrpa.recipe_snaps + greedy.recipe_snaps) {
 			std::printf("  recettes : instantane %llu fois — %llu produit(s), "
 						"%llu code(s) utile(s), %llu sous-produit(s) a rebours\n",
@@ -8847,8 +8823,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													   greedy.snap_backward));
 		}
 		// THE LIVENESS OF THE OPERATOR BIAS (--op-bias). Printed BEFORE any search
-		// judge: at `offered = 0` the mechanism is INERT and an A/B would measure
-		// the control arm twice.
+		// judge: at `offered = 0` the mechanism is INERT and one would measure the
+		// same arm twice.
 		if(opt.op_bias > 0.0) {
 			const uint64_t off = nrpa.op_offered + greedy.op_offered;
 			const uint64_t tak = nrpa.op_taken + greedy.op_taken;
@@ -9064,7 +9040,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	};
 	std::vector<ApproachSols> approach_runs;
 
-	// The old finisher, kept as is for the A/B (--finisher mono|ab).
+	// The mono finisher, kept behind --finisher mono|ab.
 	auto run_mono = [&](double budget) {
 		std::printf("\n--- finisseur mono : fouille guidee depuis le meilleur "
 					"etat (%u/%zu, %zu decisions) ---\n", best_overlap,
@@ -9354,8 +9330,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								std::lock_guard<std::mutex> lk(fmx);
 								// The re-rooting counter is PRINTED: without it, a
 								// rerooter that never bites is indistinguishable from
-								// a rerooter that is useless, and one A/B was read
-								// without that column.
+								// a rerooter that is useless.
 								char rr[64] = "";
 								if((cfg.levin_reroot || cfg.reroot_h > 0) &&
 								   st.nodes)
@@ -9597,9 +9572,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				// serves roots {0..min(W,N)-1}: on a closing run, 16 rip roots
 				// occupied the 16 workers and the approach's 6 deep backtracks,
 				// i.e. the MEASURED closing window (backtrack 70-80), received NO
-				// budget. That is the starvation lemma, checked in
-				// tools/s24_forme_close_conjonction.py (II): a combinatorial fact,
-				// not a setting. A worker stays bound to ONE duel source (the same
+				// budget. That is the starvation lemma: a combinatorial fact, not a
+				// setting. A worker stays bound to ONE duel source (the same
 				// pattern as phase A1: one duel per arena, Push once, Restore per
 				// root) but DRAWS its roots from its group's shared queue, so every
 				// root is served, budget is returned as in phase 2, and there are at
@@ -10370,7 +10344,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			dump("SZONE", posed ? posed_sz : ref.target_self.szone);
 		}
 		// The best approach is worth KEEPING: replayable in EDOPro, judgeable, and
-		// reusable as a repertoire for a later session. It is NOT a solution, and
+		// reusable as a repertoire for a later run. It is NOT a solution, and
 		// the name says so.
 		if(!best_path.empty()) {
 			std::error_code ec;
@@ -10507,11 +10481,10 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		cfg.enumeration.max_subsets = opt.max_subsets;
 		// The operator's question: how many BOARDS, not how many states.
 		cfg.count_boards = true;
-		// `--elide-forced` was wired HERE and only here, which is what made three
-		// sessions of benches measure a search path where it did nothing. It now
-		// comes from `ApplyMechanisms`, like everywhere else. `--growth` is still
-		// the best place to MEASURE it (it returns the depth reached at equal
-		// budget), not to wire it.
+		// `--elide-forced` comes from `ApplyMechanisms`, like everywhere else, and
+		// not from here: wired here and only here it would leave the search path
+		// untouched. `--growth` is still the best place to MEASURE it (it returns
+		// the depth reached at equal budget), not to wire it.
 		// cabler.
 		if(depth == 2)   // once, at the first depth step
 			ReportMechanisms(cfg, "growth");
@@ -10647,8 +10620,8 @@ int main(int argc, char** argv) {
 					"distances sur le graphe de recettes\n");
 	}
 	// SAME REASON for the levers that read the graph: without it they run, cost
-	// nothing and do NOTHING, giving an A/B arm indistinguishable from its control
-	// and a false conclusion at the end.
+	// nothing and do NOTHING, giving a result indistinguishable from doing
+	// nothing and a false conclusion at the end.
 	// `--recipes 0` feeds and measures the graph WITHOUT introducing it into the
 	// finisher's `h`, so the levers stay the only factors changed.
 	// facteurs modifies.
@@ -11824,7 +11797,7 @@ int main(int argc, char** argv) {
 					// (BuildAdaptRuns). Accepting it here without reading it would be a
 					// mechanism silently absent from the path, the exact family of "check
 					// that it COULD have produced the effect". That is how the options
-					// forecast waited two sessions: its script ran in repair mode, where
+					// forecast goes unseen: its script runs in repair mode, where
 					// the table is never printed.
 					if(!opt.adapt_files.empty())
 						std::printf("\n!! --adapt est IGNORE en mode reparation "
@@ -11894,7 +11867,7 @@ int main(int argc, char** argv) {
 		// Codes absent from cards.cdb: the DATABASE twin of a script-set mismatch,
 		// and quieter than it. The core gives the unknown card a vanilla body with
 		// no effect, the deck loads, the duel starts, the line diverges, and
-		// nothing used to report it.
+		// nothing would report it.
 		if(!db.UnknownCodes().empty()) {
 			std::printf("\n  !! codes absents de cards.cdb (%zu) : ",
 						db.UnknownCodes().size());

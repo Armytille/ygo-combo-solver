@@ -191,8 +191,8 @@ void EmitAssignExtremes(uint8_t message, const EnumOptions& opt,
 		return std::find(useful.begin(), useful.end(), code) != useful.end();
 	};
 	// Positions in `pool` sorted by decreasing usefulness. STABLE sort: two runs
-	// with the same seed must emit exactly the same subsets, otherwise an A/B
-	// compares two different action spaces.
+	// with the same seed must emit exactly the same subsets, otherwise they do
+	// not explore the same action space.
 	static thread_local std::vector<uint8_t> rank, sel;
 	rank.resize(pool.size());
 	for(size_t i = 0; i < pool.size(); ++i)

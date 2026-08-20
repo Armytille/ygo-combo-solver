@@ -95,7 +95,7 @@ public:
 	//
 	// IN-MEMORY CACHE. A script loaded AFTER an arena's root Push is undone by
 	// every Restore: the core asks for it again on the next rollout, and each
-	// request used to cost a directory sweep plus fopen/fread. Script contents
+	// request would otherwise cost a directory sweep plus fopen/fread. Script contents
 	// are IMMUTABLE for the duration of a run (repositories do not move under our
 	// feet), so the first read comes from disk and every later one from memory.
 	// Lua recompilation still happens; only the I/O disappears. `CacheHits()` is
@@ -116,10 +116,10 @@ public:
 		return misses;
 	}
 	// Files that are PRESENT but that the read did not return (short I/O, zero
-	// size). Distinct from misses: a short read used to pass for "absent" and
-	// made the loader take the SAME script from a lower-ranked repository, hence
-	// another version. That is a script-set mismatch manufactured out of an I/O
-	// error, and invisible because it never reached `misses`.
+	// size). Distinct from misses: a short read passing for "absent" makes the
+	// loader take the SAME script from a lower-ranked repository, hence another
+	// version. That is a script-set mismatch manufactured out of an I/O error,
+	// and invisible because it never reaches `misses`.
 	std::unordered_set<std::string> Unreadable() const {
 		std::lock_guard<std::mutex> lock(misses_mutex);
 		return unreadable;

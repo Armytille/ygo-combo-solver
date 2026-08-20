@@ -51,8 +51,8 @@ static inline unsigned long long r2v_tsc_ns() {
 #if defined(R2V_WASM)
 // --- WRITE BARRIER ---------------------------------------------------------
 //
-// Replaces hardware dirty-page tracking. Two simpler fallbacks were REFUTED
-// before this was written, and by BANDWIDTH, not by CPU:
+// Replaces hardware dirty-page tracking. Two simpler fallbacks fail, and by
+// BANDWIDTH, not by CPU:
 //   - full copy of the served region: x21.4 on bytes, 4.63 TB in 26 s;
 //   - detection by comparison against the mirror: 10.8 TB read, same wall.
 // Here the traffic stays what the native build pays; we only spend
@@ -130,8 +130,8 @@ R2V_NOCOV void MarkRange(const void* p, size_t n) {
 // `__wasm_init_tls`, which copies the TLS block of a newborn thread... with
 // memcpy. And `bits` LIVES in that TLS block. Marking from the hook at that
 // moment writes through a TLS block that is not in place yet, and that is
-// exactly what used to crash the search (replay creates no thread, so the bug
-// was invisible to the fidelity test).
+// exactly what crashes the search (replay creates no thread, so the bug is
+// invisible to the fidelity test).
 //
 // So the hook touches TLS ONLY when the destination falls inside an arena.
 // Two-stage filter: the envelope of all live arenas (two comparisons, never any

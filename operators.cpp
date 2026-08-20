@@ -2135,8 +2135,7 @@ LPResult SolveOperatorLP(const OperatorLP& lp) {
 	// its surplus/slack (the sign of the normalisation and that of the negation of
 	// rows with a negative right-hand side cancel out: y_i = red[N+i] uniformly,
 	// >= 0 at the optimum). A bound's dual is the reduced cost of the bound slack:
-	// the value of ONE extra unit of capacity. Derivation and numerical check:
-	// tools/s22_verify_duals.py.
+	// the value of ONE extra unit of capacity.
 	res.row_dual.assign(R, 0.0);
 	for(size_t i = 0; i < R; ++i)
 		res.row_dual[i] = red[N + i];
@@ -2330,11 +2329,10 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 	};
 	// (1) THE DECLARED EFFECTS, AND NOTHING ELSE.
 	//
-	// THE FIX THAT COST A ROUND TRIP. The first version carried an INVENTED
-	// transition, `mobilise`: "every card in the deck is one action away from the
-	// available zone". It bought admissibility with optimism, and the bench
-	// measured what it cost: 5 % of descents against 15 % for novelty, i.e. a
-	// gradient WORSE than the one it was meant to replace. The answer is not to
+	// NO INVENTED TRANSITION. A `mobilise` transition -- "every card in the deck
+	// is one action away from the available zone" -- buys admissibility with
+	// optimism, and measures 5 % of descents against 15 % for novelty, i.e. a
+	// gradient WORSE than the one it is meant to replace. Nor is the answer to
 	// bound it with rules ("one Normal Summon per turn"): those rules do not bear
 	// on it, and "a card only leaves the deck through an effect that names it" is
 	// FALSE, since a search by level names nothing, so the constraint would forbid
@@ -3152,7 +3150,7 @@ size_t SelfTestOperatorLP(size_t* total) {
 		c.feas = true; c.val = 1.0; cs.push_back(c);
 	}
 	// THE FUZZ: 60 random instances of the same shape, solved in EXACT rationals
-	// by sympy.lpmin (tools/s21_verify_formulas.py), 20 of them infeasible. Five
+	// by sympy.lpmin, 20 of them infeasible. Five
 	// hand cases prove the theorems are covered; sixty random cases prove the
 	// SOLVER, negative right-hand sides, active bounds and degeneracy included.
 	// The expected value is ceil(exact optimum), which is what SolveOperatorLP
