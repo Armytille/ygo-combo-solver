@@ -23,6 +23,7 @@ Windows x64. One executable, no dependencies. Requires an EDOPro installation.
 - [Setup](#setup)
 - [Quick start](#quick-start)
 - [Usage by task](#usage-by-task)
+- [Naming a card](#naming-a-card)
 - [Constraints](#constraints)
 - [Flags](#flags)
 - [Reading the output](#reading-the-output)
@@ -139,9 +140,10 @@ Recorded answers are prompt indices, and in another duel they designate
 different cards. The solver re-reads the reference line by the cards each
 decision engages, which carries the combo's intent across.
 
-`--hand` accepts card codes or name fragments separated by `|`. The hand is
-verified in a throwaway duel before the search starts. `--board-add` and
-`--board-remove` modify the captured board.
+`--hand` takes cards separated by `|`, named as described in
+[Naming a card](#naming-a-card). The hand is verified in a throwaway duel
+before the search starts. `--board-add` and `--board-remove` modify the
+captured board.
 
 ### 4. Build a board described by hand
 
@@ -158,7 +160,9 @@ combosolver.exe template.yrpX --scriptdir <card-scripts> `
 ```
 
 `--target` is repeatable and repeats count: three identical entries require
-three copies. `@DEF` sets defence position. The described board is a minimum, so
+three copies. Each entry is a passcode or a name fragment, see
+[Naming a card](#naming-a-card). `@DEF` sets defence position. The described
+board is a minimum, so
 a line that also produces something else satisfies it. `--max-decisions` has no
 reference line to derive its default from in this mode and should be set
 generously.
@@ -228,6 +232,41 @@ sequentially.
 
 ---
 
+## Naming a card
+
+`--hand`, `--target`, `--board-add`, `--summon`, `--guard`, `--resolve`,
+`--material`, `--hint` and the other card-taking flags accept either the
+numeric passcode or a fragment of the card name.
+
+```powershell
+--target 54701958
+--target "Liger Dancer"
+```
+
+A fragment must match exactly one card. When it matches several, the run stops
+and lists the candidates with their codes:
+
+```
+!! --target : "Liger Dancer" est ambigu (2 cartes) :
+      54701958  Lunalight Liger Dancer
+     101301030  Lunalight Liger Dancer
+```
+
+Copy the code of the printing wanted. Name collisions are common: alternate
+artworks, anime versions and Rush Duel cards carry the name of the card they
+are based on. A passcode designates one printing.
+
+Three other places give the same numbers:
+
+- **EDOPro's deck editor.** The card information panel shows the passcode.
+- **A `.ydk` file.** After the `#main` line it is one passcode per line, one
+  line per copy. Opening the decklist in a text editor is the quickest way to
+  read the codes of a deck already built.
+- **The card itself.** The passcode is printed at the bottom left of the
+  physical card.
+
+---
+
 ## Constraints
 
 Constraints act during the search: a move that violates one is removed from the
@@ -283,8 +322,8 @@ these:
 | `--player <0\|1>` | whose turn is optimised |
 | `--solve` | search for a line to the target board |
 | `--start <replay>` | start from another duel |
-| `--deck <file.ydk>` / `--hand <cards>` | start from a decklist and a chosen hand |
-| `--target <card[@DEF]>` | describe the board; repeatable, repeats count |
+| `--deck <file.ydk>` / `--hand <cards>` | start from a decklist and a chosen hand; cards by passcode or name |
+| `--target <card[@DEF]>` | describe the board; passcode or name, repeatable, repeats count |
 | `--board-add` / `--board-remove` | modify the captured board |
 | `--no-ref` | ignore the recorded line |
 | `--optimize` | keep improving after the first line |
