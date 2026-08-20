@@ -90,7 +90,7 @@ A replay reproduces only with the card scripts contemporary with its recording.
 Under a different script set the engine issues different prompts, the recorded
 answers stop applying, and the run continues on a different duel with no error
 message. Verify every new replay with
-[task 1](#1-verify-a-replay-and-measure-its-line) before anything else:
+task 1 before anything else:
 `MSG_RETRY` must read 0.
 
 `--scriptdir` is repeatable, highest priority first. It also disables the
@@ -101,26 +101,8 @@ explicitly when the deck requires them.
 
 ## Tasks
 
-| # | Task | Key flags |
-|---|---|---|
-| [1](#1-verify-a-replay-and-measure-its-line) | Verify a replay and measure its line | none |
-| [2](#2-find-a-cheaper-line-to-the-same-board) | Find a cheaper line to the same board | `--solve --optimize` |
-| [3](#3-reach-the-same-board-from-another-decklist) | Reach the same board from another decklist | `--deck --hand` |
-| [4](#4-reach-the-same-board-from-another-recorded-duel) | Reach the same board from another recorded duel | `--start` |
-| [5](#5-edit-the-captured-board) | Edit the captured board | `--board-add --board-remove` |
-| [6](#6-build-a-board-described-by-hand) | Build a board described by hand | `--no-ref --target` |
-| [7](#7-steer-a-described-board) | Steer a described board | `--summon-min --resolve --hint --recipes` |
-| [8](#8-require-the-line-to-hold-an-answer) | Require the line to hold an answer | `--guard --guard-off --opp-hand` |
-| [9](#9-prove-the-line-against-a-card-actually-played) | Prove the line against a card actually played | `--fire` |
-| [10](#10-check-an-existing-line-against-rules) | Check an existing line against rules | constraints, no `--solve` |
-| [11](#11-compare-two-configurations) | Compare two configurations | `--max-rollouts --threads 1 --seed` |
-| [12](#12-run-a-long-search) | Run a long search | `--rounds --carry --archive-fin` |
-| [13](#13-reuse-work-from-earlier-runs) | Reuse work from earlier runs | `--prior --adapt --options-online --approach` |
-| [14](#14-measure-and-diagnose) | Measure and diagnose | `--operators --width --growth --probe-repeat --profile` |
-
----
-
-### 1. Verify a replay and measure its line
+<details>
+<summary><b>1. Verify a replay and measure its line</b> — no flags</summary>
 
 No search. Establishes that the replay reproduces, and prints the cost of the
 recorded line, which is the baseline every later run is compared against.
@@ -136,9 +118,10 @@ The report gives, in this order:
 3. The cost of the line, with an itemised list of the cards it consumes. That
    list determines whether another deck holds the resources for the same combo.
 
----
+</details>
 
-### 2. Find a cheaper line to the same board
+<details>
+<summary><b>2. Find a cheaper line to the same board</b> — <code>--solve --optimize</code></summary>
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
@@ -161,9 +144,10 @@ line's own burn count comes from task 1.
 Add `--burn-limit <n>` to declare a burn count already achieved, so the search
 only looks below it.
 
----
+</details>
 
-### 3. Reach the same board from another decklist
+<details>
+<summary><b>3. Reach the same board from another decklist</b> — <code>--deck --hand</code></summary>
 
 The board comes from the reference replay; the duel is rebuilt from a decklist
 and a chosen opening hand.
@@ -189,9 +173,10 @@ decision engages, which carries the combo's intent across. `--no-plan` discards
 that repertoire and starts the policy uniform, which measures what the reference
 was worth.
 
----
+</details>
 
-### 4. Reach the same board from another recorded duel
+<details>
+<summary><b>4. Reach the same board from another recorded duel</b> — <code>--start</code></summary>
 
 Same target board, with the deck, hand and shuffle of a second replay.
 
@@ -204,9 +189,10 @@ combosolver.exe ref.yrpX --scriptdir <card-scripts> `
 
 `--start` implies `--solve`.
 
----
+</details>
 
-### 5. Edit the captured board
+<details>
+<summary><b>5. Edit the captured board</b> — <code>--board-add --board-remove</code></summary>
 
 `--board-add` and `--board-remove` modify the board captured from the reference
 instead of describing one from scratch. Both require `--deck` or `--start`, and
@@ -221,9 +207,10 @@ combosolver.exe ref.yrpX --scriptdir <card-scripts> `
     --outdir solutions
 ```
 
----
+</details>
 
-### 6. Build a board described by hand
+<details>
+<summary><b>6. Build a board described by hand</b> — <code>--no-ref --target</code></summary>
 
 For combos with no recording. The replay is demoted to a duel template.
 
@@ -251,9 +238,10 @@ is posted with `--target`. `--target-exact` restores equality and is kept for
 A/B comparisons: it requires an empty spell/trap zone, which is unsatisfiable as
 soon as the hand holds a continuous spell.
 
----
+</details>
 
-### 7. Steer a described board
+<details>
+<summary><b>7. Steer a described board</b> — <code>--summon-min --resolve --hint --recipes</code></summary>
 
 A described board gives the search no line to imitate. These flags supply the
 missing structure.
@@ -286,9 +274,10 @@ automatically. `--watch` names a card for observation with no constraint, no
 gradient and no bias, which is the flag to use when measuring whether the solver
 finds something on its own.
 
----
+</details>
 
-### 8. Require the line to hold an answer
+<details>
+<summary><b>8. Require the line to hold an answer</b> — <code>--guard --guard-off --opp-hand</code></summary>
 
 `--guard` requires that from the n-th summon onward, at every point where the
 opponent could respond, at least one listed clause holds.
@@ -322,9 +311,10 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --outdir solutions
 ```
 
----
+</details>
 
-### 9. Prove the line against a card actually played
+<details>
+<summary><b>9. Prove the line against a card actually played</b> — <code>--fire</code></summary>
 
 `--fire` adds a card to the opponent's hand and makes the opponent play it at
 every window where that is legal, one attempt per window. The search must then
@@ -354,9 +344,10 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
 Without `--fire-bake`, the replays produced only play back with
 `--opp-hand <card>` in judge mode.
 
----
+</details>
 
-### 10. Check an existing line against rules
+<details>
+<summary><b>10. Check an existing line against rules</b> — constraints, no <code>--solve</code></summary>
 
 Constraint flags without `--solve` run the tool as a checker, on solver output
 and on hand-played replays alike.
@@ -369,9 +360,10 @@ combosolver.exe solutions\solution_00_b1_a9.yrp --scriptdir <card-scripts> `
     --mp1-only
 ```
 
----
+</details>
 
-### 11. Compare two configurations
+<details>
+<summary><b>11. Compare two configurations</b> — <code>--max-rollouts --threads 1 --seed</code></summary>
 
 The default budget is wall time, so two runs of one command perform different
 amounts of work. `--max-rollouts` and `--max-nodes` replace it with a fixed
@@ -391,9 +383,10 @@ be run sequentially.
 `--seed` is otherwise derived from the clock and printed; passing it back
 replays the same rollouts.
 
----
+</details>
 
-### 12. Run a long search
+<details>
+<summary><b>12. Run a long search</b> — <code>--rounds --carry --archive-fin</code></summary>
 
 `--rounds` splits `--solve-ms` into n rounds and re-injects the best joint line
 of each round into the next. `--carry` keeps the archive and the merged policy
@@ -408,9 +401,10 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --outdir solutions
 ```
 
----
+</details>
 
-### 13. Reuse work from earlier runs
+<details>
+<summary><b>13. Reuse work from earlier runs</b> — <code>--prior --adapt --options-online --approach</code></summary>
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
@@ -430,9 +424,10 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
 | `--options-online <s>` | re-mine a macro catalogue every s seconds from the run's own best lines; no external corpus needed |
 | `--approach <f.yrp>` | an approach written by an earlier run, `best_approach_*.yrp`, served to the finisher as an extra root. Must come from the same starting duel and the same `--opp-hand` |
 
----
+</details>
 
-### 14. Measure and diagnose
+<details>
+<summary><b>14. Measure and diagnose</b> — <code>--operators --width --growth --probe-repeat --profile</code></summary>
 
 Each of these instruments or replaces the run rather than searching.
 
@@ -455,6 +450,8 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> --solve `
 combosolver.exe duel.yrpX --scriptdir <card-scripts> --solve `
     --profile --solve-ms 300000
 ```
+
+</details>
 
 ---
 
