@@ -1,18 +1,20 @@
 # ygo-combo-solver
 
-Takes a Yu-Gi-Oh! replay and finds better ways to play the same turn.
+Searches for Yu-Gi-Oh! combo lines inside a recorded duel.
 
-Point it at a duel you recorded. It works out the board you ended on, then looks
-for other lines that reach it: spending fewer cards, starting from a different
-hand or deck, or holding up against an interruption. It answers the reverse
-question too — describe a board, and it tells you whether your deck can build
-it, and how. Everything it finds comes back as a replay you can watch in EDOPro.
+Given a replay, the solver determines the board the player ended their turn on
+and searches for other move sequences that reach it: lines that spend fewer
+cards, lines that start from a different opening hand or a different deck, and
+lines that still work when the opponent interrupts. It also accepts a board
+description and a decklist with no replay, and searches for a way to build that
+board. Results are written as replay files that open in EDOPro.
 
-It plays through the same engine EDOPro runs, so every line it hands you is
-legal and playable.
+The solver runs the same engine EDOPro runs, so every line it produces is legal
+and playable.
 
 **[Download the latest release](https://github.com/Armytille/ygo-combo-solver/releases/latest)**
-— Windows x64, one executable, no dependencies. Needs an EDOPro installation.
+
+Windows x64. One executable, no dependencies. Requires an EDOPro installation.
 
 ---
 
@@ -34,112 +36,116 @@ legal and playable.
 
 ## Setup
 
-Unpack the release anywhere: `combosolver.exe`, a sample replay in `gabarits/`,
-and this document. The executable runs from any directory and writes its results
-wherever `--outdir` points, relative to where you launched it.
+The release archive contains `combosolver.exe`, a sample replay under
+`gabarits/`, this document, and the licence files. The executable runs from any
+directory. Output goes to `--outdir`, resolved against the current directory.
 
-It reads cards and scripts from your EDOPro installation, and never writes to
-it. Point it there once:
+Cards and card scripts are read from an EDOPro installation. The solver only
+reads that directory. Set its location once:
 
 ```powershell
 setx COMBOSOLVER_WORKDIR "C:\Games\ProjectIgnis"
 ```
 
-Or pass `--workdir <dir>` every run. With neither, it stops with an error rather
-than guessing.
+`--workdir <dir>` overrides the variable. Without either, the solver exits with
+an error.
 
 ---
 
 ## Quick start
 
 ```powershell
-# 1. check that the replay reproduces
+# 1. verify that the replay reproduces
 combosolver.exe duel.yrpX --scriptdir <card-scripts>
 
-# 2. look for a cheaper line to the same board, five minutes
+# 2. search for a cheaper line to the same board, five minutes
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --solve --optimize --solve-ms 300000 --outdir solutions
 ```
 
-**Never skip step 1.** A replay only reproduces with the card scripts that
-existed when it was recorded. With a different set the engine asks different
-questions, the recorded answers stop matching, and the run silently describes a
-different duel. The report's `MSG_RETRY` counter must read **0**.
+Step 1 comes first on every new replay. A replay reproduces only with the card
+scripts contemporary with its recording. Under a different script set the engine
+issues different prompts, the recorded answers stop applying, and the run
+continues on a different duel with no error message. The `MSG_RETRY` counter in
+the report must read 0.
 
-`--scriptdir` is repeatable, highest priority first. It also switches off the
-automatic scan of EDOPro's `repositories/`, so pass those folders too if the
-deck needs them.
+`--scriptdir` is repeatable, highest priority first. It also disables the
+automatic scan of EDOPro's `repositories/` directory, so pass those directories
+explicitly when the deck requires them.
 
 ---
 
 ## Usage by task
 
-The first argument is always a replay. What the solver takes from it depends on
-the flags:
+The first argument is always a replay. Its role depends on the flags:
 
 | Flags | The replay provides | The duel played is |
 |---|---|---|
 | none | the line to replay and measure | its own |
 | `--solve` | the line, and the target board | its own |
 | `--start other.yrpX` | the line, and the target board | the one in `other.yrpX` |
-| `--deck d.ydk --hand …` | the line, and the target board | built from your decklist |
-| `--no-ref --target …` | only the duel setup | built from your decklist |
+| `--deck d.ydk --hand …` | the line, and the target board | built from the decklist |
+| `--no-ref --target …` | the duel setup only | built from the decklist |
 
-`--start`, `--deck` and `--fire` turn the search on by themselves.
+`--start`, `--deck` and `--fire` enable the search on their own.
 
-### 1. Check a replay and measure the line
+### 1. Verify a replay and measure the line
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts>
 ```
 
-No search. Read `MSG_RETRY` (must be 0), then answers consumed against answers
-recorded, then the cost of the line and the list of cards it spends — that list
-tells you whether another deck could run the same combo.
+No search is performed. The report gives, in this order:
 
-### 2. Find a cheaper line to the same board
+1. `MSG_RETRY`, which must be 0.
+2. answers consumed against answers recorded.
+3. the cost of the line, with an itemised list of the cards it consumes. That
+   list determines whether another deck holds the resources for the same combo.
+
+### 2. Search for a cheaper line to the same board
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --solve --optimize --solve-ms 300000 --outdir solutions
 ```
 
-`--solve` stops at the first line. `--optimize` keeps going: it ranks by burned
-cards, searches on after each solution, and lets a line continue past the board
-to recover cards it spent.
+`--solve` stops at the first line found. `--optimize` continues: it ranks lines
+by burned cards, keeps searching after each solution, and allows a line to run
+past the board so that spent cards can be recovered.
 
-Solutions land in `solutions/`, best first, with the cost in the filename —
-`solution_00_b1_a9.yrp` burned one card and took nine actions. Compare against
-the reference line's burn count from task 1.
+Solutions are written to `--outdir`, sorted, best first. The cost appears in the
+filename: `solution_00_b1_a9.yrp` burned one card and used nine actions. The
+reference line's own burn count comes from task 1.
 
-Add `--burn-limit <n>` if you already achieve a given count, so it only looks
-for better. Time is a budget, not a completion criterion.
+`--burn-limit <n>` declares a burn count already achieved, so the search only
+looks below it. `--solve-ms` is a budget; the run reports the best line found
+when it expires.
 
 ### 3. Reach the same board from a different hand or deck
 
 ```powershell
-# from a decklist and an opening hand you choose
+# from a decklist and a chosen opening hand
 combosolver.exe ref.yrpX --scriptdir <card-scripts> `
     --deck "C:\Games\ProjectIgnis\deck\Lunalight.ydk" `
     --hand "Assault Zone|Ash Blossom|Ash Blossom|Ash Blossom" `
     --solve-ms 600000 --outdir solutions
 
-# or from another recorded duel, with its deck, hand and shuffle
+# from another recorded duel, with its deck, hand and shuffle
 combosolver.exe ref.yrpX --scriptdir <card-scripts> `
     --start other.yrpX --solve-ms 600000 --outdir solutions
 ```
 
-Recorded answers are positions in a menu and mean nothing in another duel. The
-solver re-reads the reference in terms of which cards each decision engages, so
-the intent of the combo transfers.
+Recorded answers are prompt indices, and in another duel they designate
+different cards. The solver re-reads the reference line by the cards each
+decision engages, which carries the combo's intent across.
 
-`--hand` takes card codes or name fragments separated by `|`, and is verified in
-a throwaway duel before the search starts. `--board-add` and `--board-remove`
-adjust the captured board if you also want to change the objective.
+`--hand` accepts card codes or name fragments separated by `|`. The hand is
+verified in a throwaway duel before the search starts. `--board-add` and
+`--board-remove` modify the captured board.
 
-### 4. Ask whether a deck can reach a board you describe
+### 4. Build a board described by hand
 
-For combos nobody has recorded. The replay is only there to set up the duel.
+For combos with no recording. The replay supplies the duel setup only.
 
 ```powershell
 combosolver.exe template.yrpX --scriptdir <card-scripts> `
@@ -151,24 +157,25 @@ combosolver.exe template.yrpX --scriptdir <card-scripts> `
     --max-decisions 700 --solve-ms 900000 --outdir solutions
 ```
 
-`--target` is repeatable and repeats count: three identical entries ask for
-three copies. Add `@DEF` for defence position. The board you describe is a
-minimum — a line producing something extra still counts. Set `--max-decisions`
-generously; with no reference line there is nothing to size it from.
+`--target` is repeatable and repeats count: three identical entries require
+three copies. `@DEF` sets defence position. The described board is a minimum, so
+a line that also produces something else satisfies it. `--max-decisions` has no
+reference line to derive its default from in this mode and should be set
+generously.
 
-This is the hardest mode, and the one where guidance pays off:
+Guidance flags for this mode:
 
-| Flag | Use |
+| Flag | Effect |
 |---|---|
-| `--summon-min "card:3"` | require three summons of a card, and steer towards them |
+| `--summon-min "card:3"` | require three summons of a card, and steer the search towards them |
 | `--resolve "card@field:2"` | require an effect to resolve twice, activated from the field |
-| `--hint "card"` | nudge sampling towards lines using a card you know matters |
-| `--recipes 1` | reason in summons still to be made rather than cards still missing |
+| `--hint "card"` | bias sampling towards lines that engage a card |
+| `--recipes 1` | measure distance in summons still required |
 
 ### 5. Require the line to survive interaction
 
-`--guard` requires that, from the n-th summon onward, you hold an answer at
-every point where the opponent could act.
+`--guard` requires that from the n-th summon onward, at every point where the
+opponent can act, at least one listed answer is held.
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
@@ -177,8 +184,8 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --guard-off "opphand<=2" --outdir solutions
 ```
 
-`--fire` goes further: it hands the opponent a card and makes them play it
-wherever legal, and the solver must rebuild the board from what is left.
+`--fire` adds a card to the opponent's hand and plays it at every point where
+that is legal. The search then rebuilds the board from the resulting state.
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
@@ -186,20 +193,19 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --outdir solutions
 ```
 
-`--fire-spare` may be spent answering; the board without it still counts.
-`--fire-open` only interrupts on an empty chain, so the threat goes first.
-`--fire-bake` writes the card into the replay header so the output plays in
-EDOPro unaided.
+`--fire-spare` names a card that may be spent answering; a board missing it
+satisfies the goal. `--fire-open` restricts injection to points where the chain
+is empty. `--fire-bake` writes the card into the replay header so the output
+plays back in EDOPro without extra flags.
 
-If you start from a solo hand test the opponent holds nothing, no interruption
-is possible, and `--guard` passes without proving anything. Give them cards with
-`--opp-hand` first; replays produced that way need the same `--opp-hand` to play
-back.
+A solo hand test gives the opponent no cards. No response window opens, and
+`--guard` is satisfied vacuously. `--opp-hand` supplies the opponent with cards.
+Replays produced under `--opp-hand` require the same value to play back.
 
-### 6. Check a line against your rules
+### 6. Check a line against a set of rules
 
-Constraint flags with no `--solve` turn the tool into a checker, on lines it
-produced or on replays played by hand.
+Constraint flags without `--solve` run the tool as a checker, on solver output
+and on hand-played replays alike.
 
 ```powershell
 combosolver.exe solutions\solution_00_b1_a9.yrp --scriptdir <card-scripts> `
@@ -207,27 +213,27 @@ combosolver.exe solutions\solution_00_b1_a9.yrp --scriptdir <card-scripts> `
     --resolve "PSY-Framelord Omega@field:2"
 ```
 
-### 7. Compare two settings fairly
+### 7. Compare two configurations
 
-The budget is wall time, so two runs of one command do different work. Replace
-the clock with fixed work:
+The default budget is wall time, so two runs of one command perform different
+amounts of work. `--max-rollouts` replaces it with a fixed amount of work.
 
 ```powershell
 combosolver.exe ... --threads 1 --seed 888 `
     --max-rollouts 20000 --max-nodes 500000 --solve-ms 900000
 ```
 
-One worker is much slower, so use this to measure, not to produce results. Run
-the two settings one after the other.
+`--threads 1` divides throughput by five to six. Run the two configurations
+sequentially.
 
 ---
 
 ## Constraints
 
-Constraints are not filters applied at the end; most of them remove the move
-from the search entirely.
+Constraints act during the search: a move that violates one is removed from the
+enumeration.
 
-Zones: `hand`, `field`, `grave`, `banished`, `extra` (default `field`).
+Zones: `hand`, `field`, `grave`, `banished`, `extra`, default `field`.
 Attributes for `--material`: `light`, `dark`, `earth`, `water`, `fire`, `wind`,
 `divine`.
 
@@ -235,10 +241,10 @@ Attributes for `--material`: `light`, `dark`, `earth`, `water`, `fire`, `wind`,
 --summon "5:Zalen|Crystal Wing"      # the 5th summon must be one of these
 
 # from the 5th summon on, hold one of these at every opponent window.
-# '+' means all of them at once, '|' separates alternatives.
+# '+' requires all of them at once, '|' separates alternatives.
 --guard "5:Crystal Wing|Zalen@field+Junk Signal@hand"
---guard-off "opphand<=2"             # stop requiring it once they are down to 2
---guard "5:Dis Pater@field+oppbanished>=1"   # a state condition, not a card
+--guard-off "opphand<=2"             # drop the requirement below 2 cards in hand
+--guard "5:Dis Pater@field+oppbanished>=1"   # a condition on the game state
 
 --resolve "PSY-Framelord Omega@field:2"      # resolve this twice, from the field
 --summon-min "Liger Dancer:3"                # summon this three times
@@ -249,41 +255,40 @@ Attributes for `--material`: `light`, `dark`, `earth`, `water`, `fire`, `wind`,
 --mp1-only                                     # keep the combo in Main Phase 1
 ```
 
-Three things that are easy to get wrong:
+Points of detail:
 
-- `--guard` asks that an answer be *available*, not that the guard be the n-th
-  summon; it may already be on the field.
-- `--resolve` and `--summon-min` are checked at the end, so a board matching the
-  target without them is rejected and the search carries on. Four of them at
-  most, in total.
-- `@zone` on `--resolve` pins where the effect is *activated from*. Leave it out
-  and a card with effects in two zones satisfies the rule from the wrong one.
+- `--guard` requires an answer to be available when the window opens. The guard
+  card may already be on the field before the n-th summon.
+- `--resolve` and `--summon-min` are verified at the goal. A board matching the
+  target without them is rejected and the search continues. At most four entries
+  in total.
+- `@zone` on `--resolve` fixes the activation zone. Omitted, a card with effects
+  in two zones satisfies the requirement from either one.
 
-Cards named in `--resolve` and `--summon-min` also get a sampling nudge. To find
-out whether the solver gets there on its own, name the card with `--watch`,
-which observes without steering.
+Cards named in `--resolve` and `--summon-min` receive a sampling bias. `--watch`
+names a card for observation, with no constraint and no bias.
 
 ---
 
 ## Flags
 
-`combosolver.exe --help` lists all 133 with their defaults. The ones the tasks
-above use:
+`combosolver.exe --help` lists all 133 with their defaults. The tasks above use
+these:
 
 | Flag | Meaning |
 |---|---|
 | `--workdir <dir>` | EDOPro installation, or set `COMBOSOLVER_WORKDIR` |
-| `--scriptdir <dir>` | card script folder, highest priority first; repeatable |
-| `--outdir <dir>` | where to write the replays found |
-| `--player <0\|1>` | whose turn to optimise |
+| `--scriptdir <dir>` | card script directory, highest priority first; repeatable |
+| `--outdir <dir>` | destination of the replays found |
+| `--player <0\|1>` | whose turn is optimised |
 | `--solve` | search for a line to the target board |
 | `--start <replay>` | start from another duel |
 | `--deck <file.ydk>` / `--hand <cards>` | start from a decklist and a chosen hand |
-| `--target <card[@DEF]>` | describe the board yourself; repeatable, repeats count |
-| `--board-add` / `--board-remove` | adjust the captured board |
-| `--no-ref` | ignore the recorded line entirely |
-| `--optimize` | keep improving instead of stopping at the first line |
-| `--burn-limit <n>` | a burn count you already achieve |
+| `--target <card[@DEF]>` | describe the board; repeatable, repeats count |
+| `--board-add` / `--board-remove` | modify the captured board |
+| `--no-ref` | ignore the recorded line |
+| `--optimize` | keep improving after the first line |
+| `--burn-limit <n>` | a burn count already achieved |
 | `--solve-ms <ms>` | search time, default two minutes |
 | `--threads <n>` | workers, default every core |
 | `--max-decisions <n>` | longest line allowed |
@@ -294,73 +299,70 @@ above use:
 
 ## Reading the output
 
-Every run ends with a self-check, whether or not it searched. If the replay does
-not reproduce, nothing measured afterwards is worth reading.
+Every run ends with self-checks, search or no search. The measurements are valid
+only when the replay reproduces and the self-checks pass.
 
-| Section | What it tells you | What you want |
+| Section | Contents | Expected |
 |---|---|---|
-| Loading | cards and script folders found | non-zero, and the scripts you meant |
+| Loading | cards and script directories found | non-zero, and the scripts intended |
 | Replay result | answers consumed, `MSG_RETRY` | all consumed, `MSG_RETRY` 0 |
-| Decision points | options the engine offered, by prompt type | how hard the search will be |
-| Cost of the line | cards consumed, burned, actions, decisions | your baseline for task 2 |
-| Target board | the board captured, card by card | the board you expected |
-| Self-checks | save/restore fidelity and stress cycles | all pass |
+| Decision points | options the engine offered, by prompt type | sizes the search space |
+| Cost of the line | cards consumed, burned, actions, decisions | the baseline for task 2 |
+| Target board | the board captured, card by card | the board expected |
+| Self-checks | save and restore fidelity, stress cycles | all pass |
 
-A line's cost is three numbers, compared in this order: **burned** cards (in the
-graveyard or banished), **actions** (summons and activations), **decisions**
-(prompts answered). Cards on the final board are fixed by the target, so burned
-cards are what one line can spend less of than another.
+A line's cost is three numbers, compared in this order: burned cards, in the
+graveyard or banished; actions, meaning summons and activations; decisions,
+meaning prompts answered. The cards on the final board are fixed by the target,
+so burned cards are the variable part.
 
-After a search you also get the ranking of the lines found and how many were
-examined and written. A flag that could not apply is reported as `!! INERT`.
+After a search the report adds the ranking of the lines found, the number
+examined and the number written. A flag with no effect on the run is marked
+`!! INERT`.
 
-The report is written in French; the command line, help text and documentation
-are English.
+The report is in French. The command line, the help text and this document are
+in English.
 
 ---
 
 ## How it works
 
-**It plays the game for real.** There is no model of Yu-Gi-Oh! in the solver: it
-runs the engine, and at each prompt enumerates the answers the engine says are
-legal. Every line is replayed from scratch and re-checked before being written.
+**Rules.** The solver contains no implementation of the game. It runs the engine
+and, at each prompt, enumerates the answers the engine reports as legal. Each
+candidate line is replayed in a fresh duel and re-checked before being written.
 
-**It searches positions, not sequences.** The number of ways to order a turn's
-moves is astronomically large, but many orderings arrive at the same position.
-The solver recognises those and explores each position once.
+**Search space.** A turn's moves can be ordered in a very large number of ways,
+and many orderings reach the same position. The solver identifies equal
+positions and expands each one once.
 
-**It can rewind.** Trying a different move means going back to an earlier point
-in the duel. Replaying the turn from the start would be far too slow, so the
-solver snapshots the engine's memory and restores it, which is orders of
-magnitude cheaper.
+**Snapshots.** Trying an alternative move requires returning to an earlier point
+in the duel. The solver snapshots the engine's memory and restores it, which
+costs orders of magnitude less than replaying the turn from the start.
 
-**It learns as it goes.** It samples lines, keeps a policy weighted by what
-worked, and adapts it towards the best line so far. Moves are identified by the
-cards they engage rather than by menu position, so what it learns on one deck
-still means something on another.
+**Policy.** The search samples lines, maintains a policy weighted by the
+results, and adapts it towards the best line found. A move is identified by the
+cards it engages, so a policy learned on one deck applies to another.
 
-**It finishes deliberately.** Sampling gets close to the board but rarely lands
-the last few decisions, so the solver switches to a complete search from the
-best positions it has stored, guided by the policy it learned.
+**Finisher.** Sampling reaches the neighbourhood of the target board and seldom
+completes the last decisions. The solver stores its best positions and runs a
+complete search from them, ordered by the learned policy.
 
-**It knows what "closer" means.** Counting target cards on the field says
-nothing for most of a combo, because the board only fills at the end. The solver
-works out what each summon needs and produces, and measures distance in summons
-still missing.
+**Heuristic.** The number of target cards on the field stays flat for most of a
+combo, since the board fills at the end. The solver derives what each summon
+consumes and produces, and measures distance as the number of summons still
+required.
 
 ---
 
 ## Limitations
 
-- **Hard targets are not guaranteed.** On difficult boards the search converts
-  on some runs and not others. Give it a real budget and try more than once
-  before concluding a board is unreachable.
-- **One turn at a time.** Lines crossing into the opponent's turn need
-  `--turns 2` and are less well covered.
-- **The replay must match its scripts.** Nothing can repair a replay recorded
-  against a card script set you no longer have.
-- **The flag list is long.** 133 of them; the tasks above use about fifteen.
-- **The report is in French.**
+- Difficult boards do not convert on every run. Allow a full budget and repeat
+  the run before concluding that a board is unreachable.
+- The default domain is a single turn. `--turns 2` covers lines that cross into
+  the opponent's turn, with less coverage.
+- A replay whose card script set is unavailable cannot be reproduced.
+- 133 flags exist. The tasks above use about fifteen.
+- The report is in French.
 
 ---
 
@@ -374,44 +376,44 @@ Windows x64, Visual Studio 2022 build tools, PowerShell.
 MSBuild build\combosolver.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-`fetch_solver_deps.ps1` fetches the engine at a pinned commit, applies the
-patches the solver needs to observe and snapshot a duel, and freezes a matching
-card script export. It never touches your EDOPro installation.
+`fetch_solver_deps.ps1` retrieves the engine at a pinned commit, applies the
+patches the solver requires to observe and snapshot a duel, and freezes a
+matching card script export. It does not modify the EDOPro installation.
 
-For a build to keep or share, use `.\tools\build_release.ps1 -Workdir <dir>`
-instead: it produces an optimised, self-contained executable and packages it.
+`.\tools\build_release.ps1 -Workdir <dir>` produces the optimised,
+self-contained executable and the release archive.
 
 ---
 
 ## License
 
-GNU Affero General Public License, version 3 or later. The full text is in
-[LICENSE](LICENSE); the component-by-component notices are in [NOTICE](NOTICE).
+GNU Affero General Public License version 3 or later. Full text in
+[LICENSE](LICENSE), per-component notices in [NOTICE](NOTICE).
 
-This is inherited rather than chosen. `combosolver.exe` statically links
+`combosolver.exe` statically links
 [ocgcore](https://github.com/edo9300/ygopro-core), which is AGPL-3.0-or-later,
-so the combined work carries the same terms. In practice: you may use, study,
-modify and redistribute it, and anyone you give a copy to — including over a
-network — is entitled to the corresponding source.
+so the combined work carries the same terms. Recipients of a copy, including
+over a network, are entitled to the corresponding source.
 
-Card data and card scripts are read from your EDOPro installation at run time.
-They are not part of this program and are not redistributed with it. Yu-Gi-Oh!
-is a trademark of Konami Digital Entertainment; this project is unaffiliated
-with and unendorsed by Konami.
+Card data and card scripts are read from the EDOPro installation at run time and
+are not redistributed. Yu-Gi-Oh! is a trademark of Konami Digital Entertainment.
+This project is unaffiliated with Konami.
 
 ---
 
 ## References
 
-The search is built on published methods: NRPA and GNRPA for the sampled policy
+The search implements published methods: NRPA and GNRPA for the sampled policy
 ([arXiv:2003.10024](https://arxiv.org/abs/2003.10024)), Levin Tree Search and
-PHS* for the complete finish ([arXiv:2103.11505](https://arxiv.org/abs/2103.11505),
-[arXiv:2412.05196](https://arxiv.org/abs/2412.05196)), Iterated Width for novelty
-pruning ([arXiv:1801.03354](https://arxiv.org/abs/1801.03354)), Go-Explore for the
-archive of promising positions ([arXiv:2004.12919](https://arxiv.org/abs/2004.12919)),
-hindsight relabelling (Andrychowicz et al., NeurIPS 2017), macro-operators
-selected by Levin loss ([arXiv:2410.11262](https://arxiv.org/abs/2410.11262)),
-learned landmarks ([arXiv:2508.21564](https://arxiv.org/abs/2508.21564)), and
-retrosynthesis search for goal decomposition
+PHS* for the complete finish
+([arXiv:2103.11505](https://arxiv.org/abs/2103.11505),
+[arXiv:2412.05196](https://arxiv.org/abs/2412.05196)), Iterated Width for
+novelty pruning ([arXiv:1801.03354](https://arxiv.org/abs/1801.03354)),
+Go-Explore for the archive of positions
+([arXiv:2004.12919](https://arxiv.org/abs/2004.12919)), hindsight relabelling
+(Andrychowicz et al., NeurIPS 2017), macro-operators selected by Levin loss
+([arXiv:2410.11262](https://arxiv.org/abs/2410.11262)), learned landmarks
+([arXiv:2508.21564](https://arxiv.org/abs/2508.21564)), and retrosynthesis
+search for goal decomposition
 ([arXiv:2006.15820](https://arxiv.org/abs/2006.15820),
 [arXiv:2407.06334](https://arxiv.org/abs/2407.06334)).
