@@ -1,6 +1,14 @@
-# ygo-combo-solver
+<div align="center">
 
-Searches for Yu-Gi-Oh! combo lines inside a recorded duel.
+# Armytille's Yu-Gi-Oh! Combo Solver
+
+**Searches for Yu-Gi-Oh! combo lines inside a recorded duel.**
+
+[![Download](https://img.shields.io/github/v/release/Armytille/ygo-combo-solver?style=for-the-badge&label=Download&color=2ea043)](https://github.com/Armytille/ygo-combo-solver/releases/latest)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge)](#setup)
+[![Licence AGPL-3.0](https://img.shields.io/badge/Licence-AGPL--3.0-8957e5?style=for-the-badge)](LICENSE)
+
+</div>
 
 Given a replay, the solver determines the board the player ended their turn on
 and searches for other move sequences that reach it: lines that spend fewer
@@ -13,8 +21,7 @@ The solver runs the same engine EDOPro runs, so every line it produces is legal
 and playable.
 
 **[Download the latest release](https://github.com/Armytille/ygo-combo-solver/releases/latest)**
-
-Windows x64. One executable, no dependencies. Requires an EDOPro installation.
+— Windows x64, one executable, no dependencies. Requires an EDOPro installation.
 
 ---
 
