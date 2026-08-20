@@ -551,7 +551,8 @@ Points of detail:
 `combosolver.exe --help` prints the same list. All 133 flags follow, grouped as
 they are there.
 
-### Input and output
+<details>
+<summary><b>Input and output</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -562,7 +563,10 @@ they are there.
 | `--verbose` | off | trace every decision |
 | `--help`, `-h` | — | the flag list |
 
-### What to search for
+</details>
+
+<details>
+<summary><b>What to search for</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -580,7 +584,10 @@ they are there.
 | `--no-ref` | off | goal-only mode: the replay is demoted to a duel template. Implies `--no-plan`, requires `--target` and `--deck` |
 | `--approach <f.yrp>` | — | an approach written by an earlier run, served to the finisher as an extra root, full path plus backtracks. Repeatable. Must come from the same starting duel and `--opp-hand` |
 
-### Line constraints
+</details>
+
+<details>
+<summary><b>Line constraints</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -596,7 +603,10 @@ they are there.
 | `--mp1-only` | off | the whole combo lives in Main Phase 1: entering the Battle Phase is removed from the enumeration; `-> End Phase` always remains |
 | `--turns <n>` | 1 | domain in turns. 2 lets the line cross the opponent's turn, where our only decisions are the quick windows |
 
-### Search budget
+</details>
+
+<details>
+<summary><b>Search budget</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -610,7 +620,10 @@ they are there.
 | `--tt-mb <n>` | 64 | transposition table shared between workers (lazy SMP), MB per pass. 0 = private tables |
 | `--seed <n>` | clock, printed | seed of the rollouts; passing it back replays the same rollouts |
 
-### Search mechanisms
+</details>
+
+<details>
+<summary><b>Search mechanisms</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -639,7 +652,10 @@ they are there.
 | `--carry` | off | under `--rounds`, the global archive and the merged policy persist from one round to the next |
 | `--archive-fin` | off | the finisher's search archives enter the global archive, with their paths re-rooted |
 
-### Goal decomposition
+</details>
+
+<details>
+<summary><b>Goal decomposition</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -659,7 +675,10 @@ they are there.
 | `--landmark-h <f>` | — | weight of the landmark h in the finisher, same entry point as `--recipes` |
 | `--derive-summon-min` | off | derive the `--summon-min` constraints from the target board. 3x Liger Dancer = three Fusion summon events, never "three Polymerizations": the trigger varies. The counting is always printed; this flag wires it into the constraints |
 
-### Policy learning from solved lines
+</details>
+
+<details>
+<summary><b>Policy learning from solved lines</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -676,7 +695,10 @@ they are there.
 | `--options-pool <n>` | 12 | living corpus: lines kept in total |
 | `--options-per-worker <n>` | 2 | and at most n per worker; without a quota the workers pour the same shared best line in sixteen times |
 
-### Head bandit (MCPS)
+</details>
+
+<details>
+<summary><b>Head bandit (MCPS)</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -688,7 +710,10 @@ they are there.
 | `--ctx-shrink <k>` | negative = off | two-level policy: one weight per move and one per (move, context), mixed convexly by s = n/(n+k), n being the evidence of the contextual cell. The agreement curve printed by `--adapt` calibrates k without spending a run |
 | `--ctx-max <n>` | 262144 | cap on the contextual level's entries per worker. 0 = unlimited |
 
-### Finisher
+</details>
+
+<details>
+<summary><b>Finisher</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -704,7 +729,10 @@ they are there.
 | `--finisher-post-goal` | off | under `--optimize`, a goal node continues instead of stopping (post-goal recovery) |
 | `--finisher-options` | off | the catalogue's macros become edges of the Levin tree, at cost log 1/pi, advancing k decisions, an abort being a dead edge |
 
-### Cost optimisation
+</details>
+
+<details>
+<summary><b>Cost optimisation</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -713,7 +741,10 @@ they are there.
 | `--burn-limit <n>` | 0 = none | seed of the bound: best burned count known in advance |
 | `--no-burn-share` | off | do not share the burned bound between workers. By default a worker that improves it cuts for all |
 
-### Opponent test
+</details>
+
+<details>
+<summary><b>Opponent test</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -724,7 +755,10 @@ they are there.
 | `--fire-no-chain <c>` | — | no-chain list specific to the post-injection continuation; the global `--no-chain` lists are lifted there. Repeatable |
 | `--fire-open` | off | inject only at open windows, empty chain, where the drawn card starts a chain instead of being chained onto our effects |
 
-### Measurement and diagnostics
+</details>
+
+<details>
+<summary><b>Measurement and diagnostics</b></summary>
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -740,6 +774,8 @@ they are there.
 | `--profile` | off | hot path profile, rdtsc probes per phase, "everything else" line included |
 | `--no-arena` | off | system allocator, no snapshot. For comparison |
 | `--keep-gc` | off | leave the Lua garbage collector running. For comparison |
+
+</details>
 
 ---
 
@@ -807,8 +843,6 @@ in English.
 - The default domain is a single turn. `--turns 2` covers lines that cross into
   the opponent's turn, with less coverage.
 - A replay whose card script set is unavailable cannot be reproduced.
-- 133 flags exist. The fourteen tasks above use fifty-four of them.
-- The report is in French.
 
 ---
 
