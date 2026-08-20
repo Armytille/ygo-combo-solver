@@ -868,7 +868,8 @@ matching card script export. It does not modify the EDOPro installation.
 optimised, self-contained executable and the release archive. The replay is the
 PGO training input: the profile is trained on that file and on nothing else, so
 it is supplied per machine rather than carried in the tree. `-NoPgo` skips the
-training and the requirement, at about 21 % per call.
+training and the requirement, saving about six minutes and costing 4.6 % per
+`Process` call.
 
 ---
 
