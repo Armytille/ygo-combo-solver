@@ -223,7 +223,6 @@ struct CardOperators {
 	std::vector<uint64_t> listed_series;     // s.listed_series
 	// Zones the functions of this effect mention, by function. It is what lets us
 	// say "this operator's cost touches DECK|EXTRA" without evaluating the closure.
-	// evaluer la fermeture.
 	std::unordered_map<std::string, uint64_t> fn_locations;
 	// `Duel.<Verb>` verbs called, by function: the declared CONSUMPTION.
 	std::unordered_map<std::string, std::vector<std::string>> fn_verbs;

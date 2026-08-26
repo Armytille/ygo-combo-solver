@@ -95,8 +95,12 @@ void SetLabel(Choice& c, const EnumOptions& opt, const char* prefix,
 	if(!opt.labels)
 		return;
 	c.label = prefix;
-	if(with_num)
+	if(with_num) {
+		// The verb and its operand are separated HERE, so every prefix stays a
+		// bare word: "activate 12345678", never "activate12345678".
+		c.label += ' ';
 		c.label += std::to_string(num);
+	}
 }
 
 // Subsets of `n` elements of size lo..hi, capped, delivered to the callback one
@@ -279,8 +283,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 		// t: 0 summon, 1 special summon, 2 position change, 3 set monster, 4 set
 		// spell/trap, 5 activation.
 		// The answer is t | (s << 16)  (playerop.cpp:141)
-		static const char* kNames[5] = { "invoquer ", "inv.speciale ",
-										 "reposition ", "poser-mon ", "poser-st " };
+		static const char* kNames[5] = { "summon", "sp.summon",
+										 "reposition", "set-mon", "set-st" };
 		const uint32_t strides[5] = { 10, 10, 7, 10, 10 };
 		for(uint32_t g = 0; g < 5; ++g) {
 			uint32_t n = r.Get<uint32_t>();
@@ -327,7 +331,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			PutInt32(c.response, static_cast<int32_t>(5u | (i << 16)));
 			c.edge = EdgeOf(message, { 5, code, desc });
 			c.card = code;
-			SetLabel(c, opt, "activer ", code);
+			SetLabel(c, opt, "activate", code);
 		}
 		uint8_t to_bp = r.Get<uint8_t>();
 		uint8_t to_ep = r.Get<uint8_t>();
@@ -372,7 +376,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			PutInt32(c.response, static_cast<int32_t>(0u | (i << 16)));
 			c.edge = EdgeOf(message, { 0, code, desc });
 			c.card = code;
-			SetLabel(c, opt, "activer ", code);
+			SetLabel(c, opt, "activate", code);
 		}
 		uint32_t n_atk = r.Get<uint32_t>();
 		for(uint32_t i = 0; i < n_atk && r.Ok(); ++i) {
@@ -399,7 +403,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			PutInt32(c.response, static_cast<int32_t>(1u | (i << 16)));
 			c.edge = EdgeOf(message, { 1, code });
 			c.card = code;
-			SetLabel(c, opt, "attaquer avec ", code);
+			SetLabel(c, opt, "attack with", code);
 		}
 		uint8_t to_m2 = r.Get<uint8_t>();
 		uint8_t to_ep = r.Get<uint8_t>();
@@ -489,7 +493,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			Choice& c = out.Emit();
 			PutInt32(c.response, i);
 			c.edge = EdgeOf(message, { desc });
-			SetLabel(c, opt, "option ", i);
+			SetLabel(c, opt, "option", i);
 		}
 		return;
 	}
@@ -529,7 +533,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			c.card = code;
 			// The effect engaged: what gives --no-self-negate its precision.
 			c.desc = desc;
-			SetLabel(c, opt, "chainer ", code);
+			SetLabel(c, opt, "chain", code);
 		}
 		if(!r.Ok()) {
 			out.Clear();
@@ -539,7 +543,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
 			c.edge = EdgeOf(message, { uint64_t(-1) });
-			SetLabel(c, opt, "ne pas chainer", 0, false);
+			SetLabel(c, opt, "do not chain", 0, false);
 		}
 		return;
 	}
@@ -594,8 +598,8 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  if(k)
 							  c.card = codes[pool[s[0]]];
 						  if(opt.labels)
-							  c.label = "choisir " + std::to_string(k) +
-										" carte(s)";
+							  c.label = "choose " + std::to_string(k) +
+										" card(s)";
 					  },
 					  opt.subsets_capped, false);
 		EmitAssignExtremes(message, opt, pool, codes, lo, hi, out);
@@ -603,7 +607,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
 			c.edge = EdgeOf(message, { uint64_t(-1) });
-			SetLabel(c, opt, "annuler", 0, false);
+			SetLabel(c, opt, "cancel", 0, false);
 		}
 		return;
 	}
@@ -668,16 +672,16 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 					continue;
 				seen_keys.push_back(key);
 			}
-			make(i, codes[i], "selectionner");
+			make(i, codes[i], "select");
 		}
 		for(uint32_t i = 0; i < n_un; ++i)
 			make(static_cast<uint32_t>(codes.size()) + i, 0x8000000ull + i,
-				 "deselectionner");
+				 "deselect");
 		if(finishable || cancelable) {
 			Choice& c = out.Emit();
 			PutInt32(c.response, -1);
 			c.edge = EdgeOf(message, { uint64_t(-1) });
-			SetLabel(c, opt, "terminer", 0, false);
+			SetLabel(c, opt, "finish", 0, false);
 		}
 		return;
 	}
@@ -744,7 +748,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 				// Plan identity ignores the column: two placements in two
 				// free columns carry out the same intent.
 				c.plan_key = EdgeOf(message, { s.owner, s.loc });
-				SetLabel(c, opt, "zone ", s.seq);
+				SetLabel(c, opt, "zone", s.seq);
 			}
 		} else {
 			// Multiple placement: take the first free zones.
@@ -757,7 +761,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 					c.response[size_t(i) * 3 + 2] = free_slots[i].seq;
 				}
 				c.edge = EdgeOf(message, { count });
-				SetLabel(c, opt, "placement multiple", 0, false);
+				SetLabel(c, opt, "multi-place", 0, false);
 			}
 		}
 		return;
@@ -819,7 +823,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 						  PutCardIndex(c.response, s, k);
 						  c.edge = EdgeOf(message, { h, k });
 						  if(opt.labels)
-							  c.label = "somme " + std::to_string(k);
+							  c.label = "sum " + std::to_string(k);
 					  },
 					  opt.subsets_capped, false);
 		// The SUM prompt is the one for tributes and Synchro materials: it is
@@ -850,7 +854,7 @@ void EnumerateRaw(uint8_t message, const uint8_t* data, uint32_t len,
 			Choice& c = out.Emit();
 			c.response = def;
 			c.edge = EdgeOf(message, { 0 });
-			SetLabel(c, opt, "defaut", 0, false);
+			SetLabel(c, opt, "default", 0, false);
 		}
 		return;
 	}

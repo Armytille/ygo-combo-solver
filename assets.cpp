@@ -32,7 +32,8 @@ bool CardDB::LoadFile(const std::string& path) {
 		return false;
 	}
 	static constexpr char kQuery[] =
-		"SELECT id,alias,setcode,type,atk,def,level,race,attribute FROM datas";
+		"SELECT id,alias,setcode,type,atk,def,level,race,attribute "
+				"FROM datas";
 	sqlite3_stmt* st = nullptr;
 	if(sqlite3_prepare_v2(db, kQuery, -1, &st, nullptr) != SQLITE_OK) {
 		sqlite3_close(db);
@@ -174,8 +175,9 @@ bool CardDB::Load(const std::string& workdir, std::string& error) {
 	}
 
 	if(cards.empty()) {
-		error = "aucune carte chargee depuis " + workdir +
-				" (expansions/*.cdb et repositories/**/*.cdb introuvables ou vides)";
+		error = "no card loaded from " + workdir +
+				" (expansions/*.cdb and repositories/**/*.cdb "
+								"not found or empty)";
 		return false;
 	}
 	return true;

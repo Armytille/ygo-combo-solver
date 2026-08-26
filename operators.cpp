@@ -645,7 +645,8 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 
 		// --- what the operator PRODUCES --------------------------------------
 		for(const char* oi : { "Duel.SetOperationInfo",
-							   "Duel.SetPossibleOperationInfo" }) {
+							   "Duel.SetPossibleOper"
+														"ationInfo" }) {
 			size_t op = FindCall(line, oi);
 			if(op == std::string::npos)
 				continue;
@@ -697,8 +698,10 @@ CardOperators ParseScript(uint32_t code, const std::vector<char>& src,
 						const std::string head = line.substr(0, from);
 						static const char* kSites[] = {
 							"SetDescription", "Duel.SelectYesNo",
-							"Duel.SelectEffectYesNo", "Duel.SelectOption",
-							"aux.RegisterClientHint", "Duel.Hint",
+							"Duel.SelectEffectYesN"
+														"o", "Duel.SelectOption",
+							"aux.RegisterClientHin"
+														"t", "Duel.Hint",
 							"Duel.HintMessage", "Duel.SelectSequence" };
 						for(const char* s : kSites)
 							if(head.find(s) != std::string::npos) {
@@ -1240,22 +1243,24 @@ void OperatorTable::Print(const CardDB& db, const ConstantTable& kt) const {
 		ordered.push_back(c);
 	std::sort(ordered.begin(), ordered.end());
 
-	std::printf("\n=== TABLE D'OPERATEURS DECLARES (analyse statique du Lua) ===\n");
-	std::printf("  %zu carte(s) lue(s), %zu sans script, %zu operateur(s), "
-				"%zu etat(s) accorde(s), %zu declaration(s) de produit\n",
+	std::printf("\n=== DECLARED OPERATOR TABLE (static analysis of the "
+					"Lua) ===\n");
+	std::printf("  %zu card(s) read, %zu without a script, %zu "
+					"operator(s), %zu granted state(s), %zu product "
+					"declaration(s)\n",
 				cards.size() - missing, missing, OperatorCount(), GrantCount(),
 				ProductCount());
-	std::printf("  constantes : %zu, depuis %zu fichier(s) du jeu\n",
+	std::printf("  constants: %zu, from %zu game file(s)\n",
 				kt.Size(), kt.Files().size());
-	std::printf("  RAPPEL : cette table est DECLARATIVE et OPTIMISTE — conditions "
-				"et couts sont des\n"
-				"  fermetures, non evaluees ici. Elle dit ce qu'une carte declare "
-				"pouvoir faire.\n");
+	std::printf("  NOTE: this table is DECLARATIVE and OPTIMISTIC - "
+					"conditions and costs are\n"
+					"  closures, not evaluated here. It says what a card "
+					"declares it can do.\n");
 
 	for(uint32_t c : ordered) {
 		const CardOperators& co = cards.at(c);
 		if(!co.script_found) {
-			std::printf("\n  %-8u %-34s   (aucun script : %s)\n", c,
+			std::printf("\n  %-8u %-34s   (no script: %s)\n", c,
 						db.Name(c).c_str(), co.script.c_str());
 			continue;
 		}
@@ -1265,46 +1270,54 @@ void OperatorTable::Print(const CardDB& db, const ConstantTable& kt) const {
 			continue;
 		std::printf("\n  %-8u %s\n", c, db.Name(c).c_str());
 		for(const DeclaredRecipe& rc : co.recipes) {
-			std::printf("      RECETTE  %s%s\n", rc.proc.c_str(),
+			std::printf("      RECIPE   %s%s\n", rc.proc.c_str(),
 						rc.must_be_fusion_summoned
-							? "  + AddMustBeFusionSummoned" : "");
+							? "  + AddMustBeFusionS"
+														"ummoned" : "");
 			for(const auto& [mc, n] : rc.named)
-				std::printf("               materiau NOMME %u x%u  (%s)\n", mc, n,
+				std::printf("               NAMED material %u "
+											"x%u  (%s)\n", mc, n,
 							db.Name(mc).c_str());
 			for(const auto& [sc, n] : rc.setcode)
-				std::printf("               archetype 0x%llx x%u\n",
+				std::printf("               archetype 0x%llx "
+											"x%u\n",
 							(unsigned long long)sc, n);
 			for(uint32_t n : rc.unresolved_counts)
-				std::printf("               cardinal non resolu x%u\n", n);
+				std::printf("               unresolved "
+											"cardinal x%u\n", n);
 		}
 		for(const DeclaredEffect& e : co.operators) {
 			const bool usable = (e.etype & act) != 0;
-			std::printf("      %s %-3s type=%s\n", usable ? "OPERATEUR" : "passif  ",
+			std::printf("      %s %-3s type=%s\n", usable ? "OPERATOR " : "passive  ",
 						e.var.c_str(),
 						kt.MaskNames("EFFECT_TYPE_", e.etype).c_str());
 			if(e.range)
-				std::printf("               zone exigee : %s%s\n",
+				std::printf("               zone required: "
+											"%s%s\n",
 							kt.MaskNames("LOCATION_", e.range).c_str(),
 							NormalizeRange(e.range) != e.range
-								? "   (zone SYMBOLIQUE : le message porte la zone "
-								  "physique)" : "");
+								? "   (SYMBOLIC zone: "
+																"the message carries "
+																"the physical one)" : "");
 			if(e.code_is_event)
-				std::printf("               declenche sur : %s\n", e.code_name.c_str());
+				std::printf("               triggers on: %s\n", e.code_name.c_str());
 			if(e.code_is_effect)
-				std::printf("               ACCORDE : %s\n", e.code_name.c_str());
+				std::printf("               GRANTS: %s\n", e.code_name.c_str());
 			if(e.category)
-				std::printf("               categorie : %s\n",
+				std::printf("               category: %s\n",
 							kt.MaskNames("CATEGORY_", e.category).c_str());
 			if(e.has_count_limit)
-				std::printf("               ressource : %u/tour %s\n",
+				std::printf("               resource: %u/turn "
+											"%s\n",
 							e.count_limit,
-							e.count_by_name ? "par NOM" : "par COPIE");
+							e.count_by_name ? "per NAME" : "per COPY");
 			if(e.desc_value)
-				std::printf("               description : %llu  (id %u, chaine %u)\n",
+				std::printf("               description: %llu "
+											" (id %u, string %u)\n",
 							(unsigned long long)e.desc_value, e.desc_card,
 							e.desc_index);
 			std::string fns;
-			if(!e.fn_cost.empty())      fns += "cout=" + e.fn_cost + " ";
+			if(!e.fn_cost.empty())      fns += "cost=" + e.fn_cost + " ";
 			if(!e.fn_condition.empty()) fns += "cond=" + e.fn_condition + " ";
 			if(!e.fn_target.empty())    fns += "cible=" + e.fn_target + " ";
 			if(!e.fn_operation.empty()) fns += "op=" + e.fn_operation;
@@ -1319,24 +1332,25 @@ void OperatorTable::Print(const CardDB& db, const ConstantTable& kt) const {
 					base = base.substr(2);
 				auto it = co.fn_locations.find(base);
 				if(it != co.fn_locations.end() && it->second)
-					std::printf("               %s touche : %s\n", base.c_str(),
+					std::printf("               %s hits: "
+													"%s\n", base.c_str(),
 								kt.MaskNames("LOCATION_", it->second).c_str());
 			}
 		}
 		for(const DeclaredEffect& e : co.grants) {
-			std::printf("      ACCORDE  %s   (pose par %s)\n",
-						e.code_name.empty() ? "<sans code>" : e.code_name.c_str(),
+			std::printf("      GRANTS   %s   (placed by %s)\n",
+						e.code_name.empty() ? "<no code>" : e.code_name.c_str(),
 						e.in_function.c_str());
 			if(e.target_range_self || e.target_range_opp)
-				std::printf("               portee : %s / %s\n",
+				std::printf("               range: %s / %s\n",
 							kt.MaskNames("LOCATION_", e.target_range_self).c_str(),
 							kt.MaskNames("LOCATION_", e.target_range_opp).c_str());
 			if(e.has_count_limit)
-				std::printf("               ressource : %u %s\n", e.count_limit,
-							e.count_by_name ? "par NOM" : "par COPIE");
+				std::printf("               resource: %u %s\n", e.count_limit,
+							e.count_by_name ? "per NAME" : "per COPY");
 		}
 		for(const DeclaredProduct& p : co.products)
-			std::printf("      PRODUIT  %s @ %s   (%s%s)\n",
+			std::printf("      PRODUCT  %s @ %s   (%s%s)\n",
 						p.category_name.c_str(),
 						p.location_name.empty() ? "-" : p.location_name.c_str(),
 						p.in_function.c_str(), p.possible ? ", eventuel" : "");
@@ -1345,8 +1359,8 @@ void OperatorTable::Print(const CardDB& db, const ConstantTable& kt) const {
 
 void OperatorTable::PrintGrants(const CardDB& db, const ConstantTable& kt) const {
 	(void)kt;
-	std::printf("\n--- LES ETATS ACCORDES (le vocabulaire EFFECT_*, "
-				"celui que CATEGORY_* ne voit pas) ---\n");
+	std::printf("\n--- THE GRANTED STATES (the EFFECT_* vocabulary "
+					"CATEGORY_* does not see) ---\n");
 	std::vector<std::pair<std::string, std::string>> rows;
 	for(const auto& [c, co] : cards) {
 		for(const DeclaredEffect& e : co.grants) {
@@ -1362,10 +1376,10 @@ void OperatorTable::PrintGrants(const CardDB& db, const ConstantTable& kt) const
 	for(const auto& [k, s] : rows)
 		std::printf("%s\n", s.c_str());
 	if(rows.empty())
-		std::printf("  (aucun)\n");
-	std::printf("  %zu etat(s) accorde(s) en resolution sur %zu carte(s). "
-				"C'est ICI que vivent les aretes\n"
-				"  que le graphe de recettes n'a jamais eues.\n",
+		std::printf("  (none)\n");
+	std::printf("  %zu state(s) granted on resolution over %zu card(s). "
+					"THIS is where the edges the\n"
+					"  recipe graph never had actually live.\n",
 				rows.size(), cards.size());
 }
 
@@ -1447,8 +1461,8 @@ const DeclaredEffect* OwnerOf(const CardOperators& co, const std::string& fn) {
 
 void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
 									 uint64_t goal_zone) const {
-	std::printf("\n--- LA COLONNE NEGATIVE : ce que chaque operateur DETRUIT "
-				"---\n");
+	std::printf("\n--- THE NEGATIVE COLUMN: what each operator DESTROYS "
+					"---\n");
 	// One row of the material balance: (card, function) -> classified verbs, zones
 	// touched, declared capacity.
 	struct Edge {
@@ -1512,8 +1526,8 @@ void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
 		if(e.locs)
 			std::printf("  @ %s", kt.MaskNames("LOCATION_", e.locs).c_str());
 		if(e.has_cap)
-			std::printf("  [cap %u/tour %s]", e.cap,
-						e.cap_by_name ? "par NOM" : "par COPIE");
+			std::printf("  [cap %u/turn %s]", e.cap,
+						e.cap_by_name ? "per NAME" : "per COPY");
 		std::printf("\n");
 	}
 
@@ -1521,7 +1535,7 @@ void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
 	// the goal's zone: that is the `A_p` row of the balance equation, the one
 	// whose feasibility decides that a rollout is dead.
 	const std::string zname = kt.MaskNames("LOCATION_", goal_zone);
-	std::printf("\n  --- CE QUI CONSOMME DANS %s (la ligne du but) ---\n",
+	std::printf("\n  --- WHAT CONSUMES IN %s (the goal's row) ---\n",
 				zname.empty() ? "<zone>" : zname.c_str());
 	size_t n_destroy = 0, n_recycle = 0;
 	for(const Edge& e : edges) {
@@ -1535,10 +1549,10 @@ void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
 		// nothing.
 		char cap[48];
 		if(e.has_cap)
-			std::snprintf(cap, sizeof cap, "[cap %u/tour par %s]", e.cap,
-						  e.cap_by_name ? "NOM" : "COPIE");
+			std::snprintf(cap, sizeof cap, "[cap %u/turn per %s]", e.cap,
+						  e.cap_by_name ? "NAME" : "COPY");
 		else
-			std::snprintf(cap, sizeof cap, "[SANS BORNE declaree]");
+			std::snprintf(cap, sizeof cap, "[NO declared bound]");
 		if(!e.destroy.empty()) {
 			++n_destroy;
 			// THE PLACE, and no longer just the zone. `IsSetCard`/`IsCode` in the
@@ -1585,16 +1599,15 @@ void OperatorTable::PrintConsumption(const CardDB& db, const ConstantTable& kt,
 						e.fn.c_str(), join(e.recycle).c_str(), cap);
 		}
 	}
-	std::printf("\n  %zu arete(s) NEGATIVE(S), %zu RECYCLEUR(S) sur cette "
-				"zone.\n", n_destroy, n_recycle);
-	std::printf("  Lecture : une place dont le but exige plus de jetons qu'il "
-				"n'en reste, et dont\n"
-				"  AUCUNE arete positive n'est servie, rend la ligne du bilan "
-				"INFAISABLE — donc\n"
-				"  le tirage est mort, prouve. Un recycleur BORNE ne repousse "
-				"ce mur que de sa\n"
-				"  capacite : c'est la borne `Y_o <= cap`, et sans elle le "
-				"bilan ne dit jamais rien.\n");
+	std::printf("\n  %zu NEGATIVE edge(s), %zu RECYCLER(S) on this zone.\n", n_destroy, n_recycle);
+	std::printf("  A place whose goal demands more tokens than remain, "
+					"and none of whose positive\n"
+					"  edges is served, makes the balance row INFEASIBLE - so "
+					"the rollout is provably\n"
+					"  dead. A BOUNDED recycler pushes that wall back only by "
+					"its capacity: that is the\n"
+					"  bound `Y_o <= cap`, and without it the balance never "
+					"says anything.\n");
 }
 
 // --- THE MISSING NODE TYPE ---------------------------------------------------
@@ -1800,8 +1813,9 @@ HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,
 					if(v.failures.size() < 40) {
 						char buf[256];
 						std::snprintf(buf, sizeof buf,
-									  "  #%-4zu %-30s desc=%llu : AUCUN "
-									  "operateur declare", a.at,
+									  "  #%-4zu %-30s "
+																		"desc=%llu: NO "
+																		"operateur declare", a.at,
 									  db.Name(a.code).c_str(),
 									  (unsigned long long)a.desc);
 						v.failures.emplace_back(buf);
@@ -1841,7 +1855,9 @@ HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,
 				if(v.failures.size() < 40) {
 					char buf[320];
 					std::snprintf(buf, sizeof buf,
-								  "  #%-4zu %-30s zone %s attendue %s : ECART",
+								  "  #%-4zu %-30s zone "
+																"%s attendue %s : "
+																"ECART",
 								  a.at, db.Name(a.code).c_str(),
 								  kt.MaskNames("LOCATION_", a.location).c_str(),
 								  kt.MaskNames("LOCATION_", de->range).c_str());
@@ -1872,7 +1888,9 @@ HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,
 				if(v.failures.size() < 40) {
 					char buf[256];
 					std::snprintf(buf, sizeof buf,
-								  "  #%-4zu %-30s ressource %u/tour depassee",
+								  "  #%-4zu %-30s "
+																"resource %u/turn "
+																"depassee",
 								  a.at, db.Name(a.code).c_str(), de->count_limit);
 					v.failures.emplace_back(buf);
 				}
@@ -1883,40 +1901,41 @@ HarnessVerdict ConfrontPlan(const OperatorTable& tbl, const CardDB& db,
 }
 
 void PrintVerdict(const HarnessVerdict& v) {
-	std::printf("\n=== HARNAIS : LA TABLE EXPLIQUE-T-ELLE LE PLAN ? ===\n");
-	std::printf("  activations relevees        : %zu\n", v.total);
-	std::printf("  appariees par DESCRIPTION   : %zu   (aux.Stringid : un "
-				"operateur et un seul)\n", v.matched_by_desc);
-	std::printf("  appariees par chaine SYSTEME: %zu   (l'operateur declare "
-				"cette chaine : exact)\n", v.matched_by_system);
-	std::printf("  appariees par CARTE         : %zu   (description fabriquee "
-				"par le core ;\n"
-				"                                       le message ne dit pas "
-				"QUEL effet), dont %zu ambigue(s)\n",
+	std::printf("\n=== HARNESS: DOES THE TABLE EXPLAIN THE PLAN? ===\n");
+	std::printf("  activations recorded        : %zu\n", v.total);
+	std::printf("  matched by DESCRIPTION      : %zu   (aux.Stringid: one "
+					"operator and one only)\n", v.matched_by_desc);
+	std::printf("  matched by SYSTEM string    : %zu   (the operator "
+					"declares that string: exact)\n", v.matched_by_system);
+	std::printf("  matched by CARD             : %zu   (description "
+					"manufactured by the core;\n"
+					"                                       the message does "
+					"not say WHICH effect), %zu ambiguous\n",
 				v.matched_by_card, v.ambiguous);
-	std::printf("  carte hors table            : %zu\n", v.no_script);
-	std::printf("  NON APPARIEES               : %zu%s\n", v.unmatched,
-				v.unmatched ? "   <-- LA TABLE NE DECRIT PAS LE JEU" : "");
-	std::printf("  precondition de ZONE        : %zu verifiee(s), %zu tenue(s), "
-				"%zu ecart(s)%s\n", v.zone_checked, v.zone_ok, v.zone_violated,
+	std::printf("  card outside the table      : %zu\n", v.no_script);
+	std::printf("  UNMATCHED                   : %zu%s\n", v.unmatched,
+				v.unmatched ? "   <-- LA TABLE NE DECRIT PAS "
+											"LE JEU" : "");
+	std::printf("  ZONE precondition           : %zu checked, %zu held, "
+					"%zu gap(s)%s\n", v.zone_checked, v.zone_ok, v.zone_violated,
 				v.zone_violated ? "   <-- ECART" : "");
-	std::printf("  precondition de RESSOURCE   : %zu verifiee(s), %zu "
-				"depassement(s)%s\n", v.count_checked, v.count_violated,
+	std::printf("  RESOURCE precondition       : %zu checked, %zu "
+					"overrun(s)%s\n", v.count_checked, v.count_violated,
 				v.count_violated ? "   <-- ECART" : "");
 	if(!v.failures.empty()) {
-		std::printf("  detail (borne a 40) :\n");
+		std::printf("  detail (capped at 40):\n");
 		for(const std::string& f : v.failures)
 			std::printf("%s\n", f.c_str());
 	}
 	const bool ok = v.unmatched == 0 && v.zone_violated == 0 &&
 					v.count_violated == 0;
 	std::printf("  => %s\n", ok
-		? "LA TABLE EXPLIQUE LE PLAN : toute activation correspond a un operateur "
-		  "declare,\n     et la sequence est valide sous les preconditions "
-		  "extraites."
-		: "LA TABLE NE SUFFIT PAS. Le chantier suivant est SANS OBJET tant que "
-		  "cet ecart\n     n'est pas explique — c'est exactement ce qu'on voulait "
-		  "savoir en premier.");
+		? "THE TABLE EXPLAINS THE PLAN: every activation matches a "
+				"declared operator,\n     and the sequence is valid under "
+				"the extracted preconditions."
+		: "THE TABLE IS NOT ENOUGH. Anything built on it is moot "
+				"until this gap\n     is explained - which is exactly what "
+				"one wanted to know first.");
 }
 
 // --- THE SIMPLEX -------------------------------------------------------------
@@ -2273,11 +2292,11 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 			// The Fusion IGNITION place: every summon through a
 			// Fusion.AddProcMix* recipe consumes one; the operators with
 			// CATEGORY_FUSION_SUMMON produce them, at their declared capacity.
-			std::snprintf(b, sizeof b, "ignitions de Fusion");
+			std::snprintf(b, sizeof b, "Fusion ignitions");
 		else if(kind == 3)
 			// Pool of CHOICES for a summon product: the effect drops one unit
 			// there, and the conversions specialise it towards ONE card.
-			std::snprintf(b, sizeof b, "choix de l'effet #%llu",
+			std::snprintf(b, sizeof b, "effect choice #%llu",
 						  (unsigned long long)key);
 		else
 			std::snprintf(b, sizeof b, "arch 0x%llx @%s",
@@ -2450,7 +2469,7 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 					}
 				}
 			}
-			const size_t t = add_tr("effet", cap, 1.0, host);
+			const size_t t = add_tr("effect", cap, 1.0, host);
 			if(!also_field) {
 				for(uint32_t nc : named) {
 					eff(t, place(0, nc, src), -1.0);
@@ -2716,9 +2735,10 @@ bool BalanceModel::Build(const OperatorTable& tbl, const CardDB& cdb,
 				producible = it != col[t].end() && it->second > 0;
 			}
 		if(!producible) {
-			std::printf("  demande transitoire SANS PRODUCTEUR lisible : %s @DISPO "
-						"— non posee (garde d'asymetrie : lacune d'extraction, "
-						"pas une preuve)\n",
+			std::printf("  transient demand with NO readable "
+									"PRODUCER: %s @AVAILABLE - not posted "
+									"(asymmetry guard: an extraction gap, not "
+									"a proof)\n",
 						cdb.Name(cc).c_str());
 			continue;
 		}
@@ -2859,8 +2879,9 @@ double BalanceModel::Solve(const std::vector<uint32_t>& res,
 		for(const auto& kv : row.coef)
 			producible = producible || kv.second > 0;
 		if(!producible)
-			std::printf("!! place SANS PRODUCTEUR : %s (exige %.0f) — lacune "
-						"d'extraction, PAS une preuve d'impossibilite\n",
+			std::printf("!! place with NO PRODUCER: %s (requires "
+									"%.0f) - an extraction gap, NOT a proof "
+									"of impossibility\n",
 						row.label.c_str(), row.rhs);
 	}
 	LPResult r = SolveOperatorLP(inst);
@@ -3045,13 +3066,13 @@ double BuildAndSolveBalance(
 	const std::vector<uint32_t>& deck,
 	const std::vector<std::pair<uint32_t, uint32_t>>& goal,
 	const std::vector<std::pair<uint32_t, uint32_t>>& transient) {
-	std::printf("\n=== LE BILAN MATIERE : h(depart) ===\n");
+	std::printf("\n=== THE MATERIAL BALANCE: h(start) ===\n");
 	BalanceModel m;
 	if(!m.Build(tbl, db, kt, deck, goal, transient)) {
-		std::printf("  (aucun but donne)\n");
+		std::printf("  (no goal given)\n");
 		return -1.0;
 	}
-	std::printf("  places %zu, transitions %zu (dont %zu renommages)\n",
+	std::printf("  places %zu, transitions %zu (of which %zu renames)\n",
 				m.Places(), m.Transitions(), m.Renames());
 	LPResult r;
 	// Starting state: the whole deck is in RESERVE. That is the state BEFORE the
@@ -3059,19 +3080,19 @@ double BuildAndSolveBalance(
 	const double h = m.Solve(deck, std::vector<uint32_t>(),
 							 std::vector<uint32_t>(), &r);
 	if(!r.feasible) {
-		std::printf("  h = INFINI  —  IMPASSE PROUVEE (theoreme 3) : aucun "
-					"plan n'atteint ce but depuis ce deck.\n");
+		std::printf("  h = INFINITE   -   DEAD END PROVEN (theorem "
+							"3): no plan reaches this goal from this deck.\n");
 		return -1.0;
 	}
-	std::printf("  h(depart) = %.0f   [gardes : primal %s, optimal %s]\n",
+	std::printf("  h(start) = %.0f   [guards: primal %s, optimal %s]\n",
 				r.value, r.primal_ok ? "OK" : "VIOLE",
 				r.optimal_ok ? "OK" : "VIOLE");
 	if(h < 0) {
-		std::printf("!! LE SOLVEUR S'EST CONTREDIT — valeur a jeter "
-					"(garde 9.30)\n");
+		std::printf("!! THE SOLVER CONTRADICTED ITSELF - value to be "
+							"discarded\n");
 		return -1.0;
 	}
-	std::printf("  --- le vecteur de tirs x (non nuls) ---\n");
+	std::printf("  --- the firing vector x (non-zero) ---\n");
 	std::vector<std::pair<double, size_t>> nz;
 	for(size_t t = 0; t < m.Transitions(); ++t)
 		if(r.x[t] > 1e-6)
@@ -3092,13 +3113,13 @@ double BuildAndSolveBalance(
 			s1 += db.Name(c) + " ; ";
 		for(uint32_t c : presence)
 			s2 += db.Name(c) + " ; ";
-		std::printf("  QUOTAS derives (duaux) : %s\n",
-					s1.empty() ? "(aucun)" : s1.c_str());
-		std::printf("  HABILITANTS tires par x* : %s\n",
-					s2.empty() ? "(aucun)" : s2.c_str());
+		std::printf("  QUOTAS derived (duals): %s\n",
+					s1.empty() ? "(none)" : s1.c_str());
+		std::printf("  ENABLERS fired by x*: %s\n",
+					s2.empty() ? "(none)" : s2.c_str());
 		if(m.FusionIgniters())
-			std::printf("  igniteurs de Fusion lus : %zu (couplage d'ignition "
-						"ARME)\n", m.FusionIgniters());
+			std::printf("  Fusion igniters read: %zu (ignition "
+									"coupling ARMED)\n", m.FusionIgniters());
 	}
 	return h;
 }
@@ -3220,11 +3241,12 @@ size_t SelfTestOperatorLP(size_t* total) {
 		if(ok)
 			++pass;
 		else
-			std::printf("!! AUTO-TEST LP : cas #%zu « %s » attendu %s %.2f, rendu "
-						"%s %.2f (primal %d, optimal %d)\n", ci,
+			std::printf("!! LP SELF-TEST: case #%zu \"%s\" "
+									"expected %s %.2f, got %s %.2f (primal "
+									"%d, optimal %d)\n", ci,
 						c.lp.rows.empty() ? "?" : c.lp.rows[0].label.c_str(),
-						c.feas ? "faisable" : "INFAISABLE", c.val,
-						r.feasible ? "faisable" : "INFAISABLE", r.value,
+						c.feas ? "feasible" : "INFEASIBLE", c.val,
+						r.feasible ? "feasible" : "INFEASIBLE", r.value,
 						r.primal_ok ? 1 : 0, r.optimal_ok ? 1 : 0);
 	}
 	if(total)
@@ -3236,10 +3258,10 @@ void OperatorTable::PrintFiringCounts(
 	const CardDB& db, const ConstantTable& kt,
 	const std::vector<uint32_t>& deck,
 	const std::vector<std::pair<uint32_t, uint32_t>>& goal) const {
-	std::printf("\n=== MARCHE 1 : LES COMPTES DE TIR (multiplicite x capacite) "
-				"===\n");
+	std::printf("\n=== STEP 1: THE FIRING COUNTS (multiplicity x "
+					"capacity) ===\n");
 	if(goal.empty()) {
-		std::printf("  (aucun but donne : ajouter --target)\n");
+		std::printf("  (no goal given: add --target)\n");
 		return;
 	}
 	// PHYSICAL copies per code. It is that number, not mere presence, that decides
@@ -3294,15 +3316,17 @@ void OperatorTable::PrintFiringCounts(
 			need_setcode[s] += n * k;
 	}
 
-	std::printf("\n  --- CE QUI DOIT TIRER, ET COMBIEN DE FOIS ---\n");
+	std::printf("\n  --- WHAT MUST FIRE, AND HOW MANY TIMES ---\n");
 	std::vector<std::pair<uint32_t, uint32_t>> rows(fire.begin(), fire.end());
 	std::sort(rows.begin(), rows.end(),
 			  [&](const auto& a, const auto& b) { return a.second > b.second; });
 	for(const auto& [code, n] : rows)
-		std::printf("  x%-3u  invocation de %-34s (%u copie(s) au deck)\n", n,
+		std::printf("  x%-3u  summon of %-34s (%u copy/copies in the "
+							"deck)\n", n,
 					db.Name(code).c_str(), copies[code]);
 	for(const auto& [s, n] : need_setcode)
-		std::printf("  x%-3u  CORPS d'archetype 0x%llx  (exigence cardinale)\n",
+		std::printf("  x%-3u  BODY of archetype 0x%llx  (cardinal "
+							"requirement)\n",
 					n, (unsigned long long)s);
 
 	// WHAT DOES NOT ENTER THE COUNTS MUST BE SEEN. A goal for which no recipe was
@@ -3315,11 +3339,12 @@ void OperatorTable::PrintFiringCounts(
 		if(fire.count(c))
 			continue;
 		auto it = cards.find(c);
-		std::printf("  --    %-34s x%u : HORS COMPTES (%s)\n",
+		std::printf("  --    %-34s x%u: OUT OF THE COUNTS (%s)\n",
 					db.Name(c).c_str(), gn,
 					it == cards.end()
-						? "code absent de la table — alias non reduit"
-						: "aucune recette declaree extraite");
+						? "code absent from the table "
+												"- alias not reduced"
+						: "no declared recipe extraite");
 	}
 
 	// THE BALANCE ROW, PER PRODUCT, and it is HERE that the objection "the deck
@@ -3354,12 +3379,13 @@ void OperatorTable::PrintFiringCounts(
 										  : owner->count_limit * nb;
 		}
 	}
-	std::printf("\n  --- LA LIGNE DU BILAN, PAR PRODUIT (copies + recyclage "
-				">= tirs) ---\n");
-	std::printf("  capacite de RECYCLAGE sur l'extra : %u/tour%s\n", recyc,
-				recyc_unbounded ? " + au moins un recycleur SANS BORNE declaree"
-								  " (garde par une fermeture : on ne conclut"
-								  " pas)" : "");
+	std::printf("\n  --- THE BALANCE ROW, BY PRODUCT (copies + recycling "
+					">= firings) ---\n");
+	std::printf("  RECYCLING capacity on the extra deck: %u/turn%s\n", recyc,
+				recyc_unbounded ? " + at least one recycler "
+												"with NO declared bound "
+												"(guarded by a closure: no "
+												"conclusion drawn)" : "");
 	size_t n_tight = 0, n_dead = 0;
 	for(const auto& [code, n] : rows) {
 		const uint32_t have = copies.count(code) ? copies.at(code) : 0u;
@@ -3368,14 +3394,14 @@ void OperatorTable::PrintFiringCounts(
 		const uint32_t manque = n - have;
 		const bool dead = !recyc_unbounded && recyc < manque;
 		if(dead) ++n_dead; else ++n_tight;
-		std::printf("  %-34s tirs x%u, copies %u  =>  il MANQUE %u, "
-					"a servir par recyclage   %s\n",
+		std::printf("  %-34s firings x%u, copies %u  =>  %u MISSING, "
+							"to be served by recycling   %s\n",
 					db.Name(code).c_str(), n, have, manque,
-					dead ? "<<< LIGNE INFAISABLE" : "TENDU");
+					dead ? "<<< ROW INFEASIBLE" : "TIGHT");
 	}
 	if(!n_tight && !n_dead)
-		std::printf("  (aucun produit ne depasse ses copies : la ligne ne "
-					"contraint rien ici)\n");
+		std::printf("  (no product exceeds its copies: the row "
+							"constrains nothing here)\n");
 
 	// THE ACQUISITIONS, AND THIS IS WHERE CAPACITY DECIDES. A NAMED material
 	// absent from the deck can only come from an `EFFECT_ADD_CODE` granted state,
@@ -3385,7 +3411,8 @@ void OperatorTable::PrintFiringCounts(
 	// without a single rollout.
 	uint64_t add_code = 0;
 	kt.Lookup("EFFECT_ADD_CODE", add_code);
-	std::printf("\n  --- LES ACQUISITIONS (materiau NOMME absent du deck) ---\n");
+	std::printf("\n  --- THE ACQUISITIONS (NAMED material absent from the "
+					"deck) ---\n");
 	size_t n_acq = 0, n_bad = 0;
 	for(const auto& [code, n] : need_named) {
 		// Present in the deck (hand OR extra): it exists physically, nothing to
@@ -3402,38 +3429,39 @@ void OperatorTable::PrintFiringCounts(
 				const DeclaredEffect* owner = OwnerOf(co, NormFn(g.in_function));
 				const uint32_t nb = copies.count(host) ? copies.at(host) : 0u;
 				uint32_t cap = 0;
-				const char* how = "SANS BORNE";
+				const char* how = "UNBOUNDED";
 				if(owner && owner->has_count_limit) {
 					cap = owner->count_by_name ? owner->count_limit
 											   : owner->count_limit * nb;
-					how = owner->count_by_name ? "par NOM" : "par COPIE";
+					how = owner->count_by_name ? "per NAME" : "per COPY";
 				}
 				const bool ok = !owner || !owner->has_count_limit || cap >= n;
-				std::printf("  %-30s <- %-28s  requis x%u,  capacite %u %s"
-							" (%u copie(s))   %s\n",
+				std::printf("  %-30s <- %-28s  required x%u,  "
+											"capacity %u %s (%u copy/copies)  "
+											" %s\n",
 							db.Name(code).c_str(), db.Name(host).c_str(), n,
-							cap, how, nb, ok ? "OK" : "<<< INFAISABLE");
+							cap, how, nb, ok ? "OK" : "<<< INFEASIBLE");
 				if(!ok)
 					++n_bad;
 				served = true;
 			}
 		}
 		if(!served)
-			std::printf("  %-30s <- AUCUN etat accorde ne le rend  requis x%u"
-						"   <<< INFAISABLE (ligne vide)\n",
+			std::printf("  %-30s <- NO granted state provides it  "
+									"required x%u   <<< INFEASIBLE (empty "
+									"row)\n",
 						db.Name(code).c_str(), n);
 	}
 	if(!n_acq)
-		std::printf("  (aucune : tout materiau nomme est au deck)\n");
+		std::printf("  (none: every named material is in the deck)\n");
 
-	std::printf("\n  VERDICT DE LA LIGNE : %zu acquisition(s) exigee(s), "
-				"%zu au-dela de la capacite declaree.\n", n_acq, n_bad);
-	std::printf("  Ce verdict est NECESSAIRE, jamais suffisant : une voie "
-				"declaree est developpee,\n"
-				"  les conditions restent des fermetures, et l'ordre n'y entre "
-				"pas. Un `INFAISABLE`\n"
-				"  est donc une preuve ; un `OK` n'est qu'une absence de "
-				"preuve du contraire.\n");
+	std::printf("\n  ROW VERDICT: %zu acquisition(s) required, %zu beyond "
+					"the declared capacity.\n", n_acq, n_bad);
+	std::printf("  This verdict is NECESSARY, never sufficient: a "
+					"declared route is expanded, the\n"
+					"  conditions stay closures, and order does not enter. So "
+					"an `INFEASIBLE` is a\n  proof; an `OK` is only the "
+					"absence of a proof to the contrary.\n");
 }
 
 } // namespace solver

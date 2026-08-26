@@ -303,7 +303,7 @@ PromptInfo DecodePrompt(uint8_t message, const uint8_t* data, uint32_t len) {
 		if(!b.Ok())
 			return info;
 		info.raw = info.dedup = n;
-		info.detail = Detail({ { "cartes", n }, { "count", count } });
+		info.detail = Detail({ { "cards", n }, { "count", count } });
 		return info;
 	}
 	case MSG_SELECT_SUM: {

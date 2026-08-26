@@ -575,6 +575,72 @@ bool Search::FillChoices(ChoiceList& out) {
 			}
 		}
 	}
+	// THE --guard-keep DISCIPLINE. A card the guard RESTS on is not spendable
+	// while it is the only cover: presence in hand is not availability once its
+	// once-per-turn has been burnt elsewhere. Only MAIN PHASE activations are
+	// filtered (MSG_SELECT_IDLECMD); at a chain window the activation IS the
+	// protection. The move survives as soon as another clause holds on its own,
+	// which is exactly "spend it once Crystal Wing or Dis Pater covers".
+	//
+	// NOT gated on `guard_after`, and that is deliberate: burning the resource
+	// BEFORE the guard arms is precisely what makes the presence atom lie at the
+	// window afterwards. `guard_opp_hand_release` is different -- once the threat
+	// is gone the guard is off for good, so freezing the resource past that point
+	// would delete legal moves for nothing.
+	if(cfg.guard_keep && !cfg.guard_keep->empty() &&
+	   !cfg.guard_clauses.empty() && prompt_type == MSG_SELECT_IDLECMD &&
+	   prompt_player == cfg.target_player && out.size() > 1 &&
+	   !(cfg.guard_opp_hand_release >= 0 &&
+	     static_cast<int>(duel.Count(
+		     static_cast<uint8_t>(1 - cfg.target_player), LOCATION_HAND)) <=
+		     cfg.guard_opp_hand_release)) {
+		// The board key does not depend on the candidate being examined, and this
+		// runs inside FillChoices, on every idle prompt of every rollout.
+		BoardKey bk = ComputeBoardKey(duel,
+									  static_cast<uint8_t>(cfg.target_player));
+		static thread_local std::vector<GuardClause> others;
+		static thread_local std::vector<std::pair<uint32_t, bool>> covered_of;
+		covered_of.clear();
+		for(size_t i = out.size(); i-- > 0;) {
+			ActivationRead ar;
+			if(!DecodeActivation(prompt_type, prompt_payload.data(),
+								 static_cast<uint32_t>(prompt_payload.size()),
+								 out[i].response, cfg.enumeration, ar))
+				continue;
+			if(std::find(cfg.guard_keep->begin(), cfg.guard_keep->end(),
+						 ar.code) == cfg.guard_keep->end())
+				continue;
+			// `covered` is a property of the CODE, not of the candidate, so it is
+			// memoised: several candidates can activate the same card.
+			bool covered = false, known = false;
+			for(const auto& cv : covered_of)
+				if(cv.first == ar.code) { covered = cv.second; known = true; break; }
+			if(!known) {
+				// The clauses that do NOT name this card: if one of them holds, the
+				// player stays covered without it and the move is legitimate.
+				others.clear();
+				for(const GuardClause& cl : cfg.guard_clauses) {
+					bool mentions = false;
+					for(const GuardAtom& a : cl)
+						mentions = mentions || (a.kind == 0 && a.code == ar.code);
+					if(!mentions)
+						others.push_back(cl);
+				}
+				covered = !others.empty() &&
+						  GuardHolds(duel,
+									 static_cast<uint8_t>(cfg.target_player),
+									 others, bk.codes);
+				covered_of.emplace_back(ar.code, covered);
+			}
+			// `continue`, NEVER `break`: with two guard resources declared, breaking
+			// on the first covered one lets every lower-indexed candidate escape the
+			// discipline, and the guard proof silently becomes false again.
+			if(covered)
+				continue;
+			out.RemoveAt(i);
+			++stats.guard_keep_cuts;
+		}
+	}
 	if(out.empty()) {
 		// Non-enumerable prompt: we try the default answer rather than letting the
 		// branch die. This is a REDUCTION TO ONE BRANCH, and it would otherwise be
@@ -1893,23 +1959,12 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	// states with the same vector but different quotas stop sharing a
 	// representative. That was the invisible member of the conjunction, and the
 	// "short path" representative was systematically the state that had not paid.
-	//
-	// THE GRID (cfg.grid, the regime without serialisation): the cell IS
-	// (resolutions, overlap), at most 28 cells with one elite each. The scalar
-	// score no longer decides WHICH families survive (the scalarisation theorem:
-	// it only kept the extremes of the front); it only breaks ties WITHIN a cell,
-	// where rips and overlap are fixed, and there it is exactly the "shallowest at
-	// equal progress" the derivation prescribes (the depth tail of the score).
 	const uint64_t cell =
-		cfg.grid && cfg.serial_reqs.empty() && !cfg.resolve_min.empty()
-			? (0x6A1DBA5E00000000ull |
-			   (static_cast<uint64_t>((std::min)(rp, 15u)) << 8) |
-			   (std::min)(overlap, 255u))
-			: cfg.serial_reqs.empty()
-				  ? here.hash
-				  : (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
-					 (sp2_vec * 0x9E3779B97F4A7C15ull) ^
-					 (rvec * 0xA24BAED4963EE407ull));
+		cfg.serial_reqs.empty()
+			? here.hash
+			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
+			   (sp2_vec * 0x9E3779B97F4A7C15ull) ^
+			   (rvec * 0xA24BAED4963EE407ull));
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
@@ -2215,8 +2270,12 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 		return false;
 
 	// The deviation budget is the binding constraint: that is what we memoise.
+	// `key` is computed in every case: the semantic resynchronisation below
+	// reads it even when nothing is memoised.
 	uint64_t key = Digest();
-	if(cfg.shared_tt) {
+	if(cfg.no_memo) {
+		// Zero deviation: single path, nothing to memoise (see SearchConfig).
+	} else if(cfg.shared_tt) {
 		// Table shared between workers (lazy SMP): a state solved by one prunes for
 		// all. `fresh`: see SharedTT::CheckAndClaim; without it `distinct_by_depth`
 		// stayed at ZERO in every multi-worker run.
@@ -2489,7 +2548,8 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	if(cfg.trace) {
 		std::printf("    d%-4u %-22s %2zu choix, %zu au repertoire%s\n", depth,
 					PromptName(prompt_type), choices.size(), in_plan,
-					(in_plan == 0 && !forced) ? "   <-- hors repertoire" : "");
+					(in_plan == 0 && !forced) ? "   <-- hors "
+																	"repertoire" : "");
 		if(in_plan == 0 && !forced)
 			for(const Choice& c : choices)
 				std::printf("            propose : %s\n", c.label.c_str());
@@ -3331,7 +3391,6 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			// CONTEXT of the decision: target board cards already placed. The same
 			// descriptor as the one recorded on corpus lines; it is SEMANTIC, hence
 			// comparable from one line to another, unlike depth.
-			// l'autre, contrairement a la profondeur.
 			// The descriptor costs one zone query per decision: it is only paid for
 			// when the contextual level is on, or when the options' semantic guard
 			// needs it.
@@ -3908,11 +3967,9 @@ void Search::InitSerialBase() {
 
 void Search::ReenterMaybe(uint64_t& rng) {
 	reenter_active = false;
-	// Re-entry requires a STRUCTURE of cells: the ladder (armed serialisation)
-	// or the GRID (rips x overlap). Without one of the two, the archive is a
-	// cache, not a frontier.
-	if(cfg.reenter <= 0.0f || archive.empty() ||
-	   (cfg.serial_reqs.empty() && !cfg.grid))
+	// Re-entry requires a STRUCTURE of cells: armed serialisation. Without the
+	// ladder the archive is a cache, not a frontier.
+	if(cfg.reenter <= 0.0f || archive.empty() || cfg.serial_reqs.empty())
 		return;
 	auto next = [&rng] {
 		rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
@@ -3933,39 +3990,14 @@ void Search::ReenterMaybe(uint64_t& rng) {
 	// ladder, and no low rung is abandoned (Go-Explore: high ones can be dead
 	// ends).
 	//
-	// UNDER THE GRID: UNIFORM over the RIPPED cells ONLY (r > 0), no
-	// tournament. WARNING: BOTH VARIANTS LOSE IN PROPORTION (4 seeds, 180 s,
-	// MIN control on the same binary):
-	//   V1 (uniform over ALL cells): 3/4 seeds at ZERO rips. The early-run
-	//      archive only has (0 rips, o) cells, re-entry pours the mass there
-	//      and the SHARED NRPA policy adapts on those continuations, so the
-	//      rip-seeker dies.
-	//   V2 (ripped only, this code): >=3 free = 0 on 4/4 and DEGRADED joint
-	//      lines (3r/1-of-6 against the control's 3r/5-of-6). The r>0 cells
-	//      are massively low-overlap, the policy adapts on continuations poor
-	//      in board, and the INTERLEAVED lines the control finds from the root
-	//      disappear.
-	// The lesson: re-entry by replay COUPLES the shared adaptive policy to the
-	// re-entered family, whatever it is. The independence assumption of the race
-	// (R6 of the refined closed form) is violated by this channel, and the
-	// additive grid cost is UNREACHABLE by "replay + shared adaptation" together.
-	// Any successor must DECOUPLE the adaptation from the re-entered lines.
-	const ArchiveEntry* pick = nullptr;
-	if(cfg.grid && cfg.serial_reqs.empty()) {
-		static thread_local std::vector<const ArchiveEntry*> ripped;
-		ripped.clear();
-		for(const ArchiveEntry& e : archive)
-			if(e.resolves > 0)
-				ripped.push_back(&e);
-		if(ripped.empty())
-			return;
-		pick = ripped[next() % ripped.size()];
-	} else {
-		pick = &archive[next() % archive.size()];
-		const ArchiveEntry* other = &archive[next() % archive.size()];
-		if(other->score > pick->score)
-			pick = other;
-	}
+	// Re-entry by replay COUPLES the shared adaptive policy to the re-entered
+	// family: the independence assumption of the race (R6 of the refined closed
+	// form) is violated by that channel. Any successor must DECOUPLE the
+	// adaptation from the re-entered lines.
+	const ArchiveEntry* pick = &archive[next() % archive.size()];
+	const ArchiveEntry* other = &archive[next() % archive.size()];
+	if(other->score > pick->score)
+		pick = other;
 	if(want_refine) {
 		size_t best_i = 0;
 		for(size_t i = 1; i < archive.size(); ++i)
@@ -4098,14 +4130,17 @@ void Search::RefineLadderHere() {
 	char qh[96] = "";
 	if(cfg.quota_h) {
 		std::snprintf(qh, sizeof(qh),
-					  ", quotas du chemin : %u pose(s), %zu sans-borne, "
-					  "%zu hors-budget",
+					  ", path quotas: %u posted, %zu "
+										"unbounded, %zu over "
+																				"budget",
 					  r.quota_applied, r.quota_unbounded_hosts.size(),
 					  r.quota_overrun_hosts.size());
 	}
-	std::printf("  RAFFINEMENT (s22) : frontiere stagnante (%u tirages sans "
-				"gain, seuil %u) — LP a la cellule h=%.0f, %zu sous-barreau(x) "
-				"poses, porte sp=%u%s\n",
+	std::printf("  REFINEMENT: frontier stagnant (%u rollouts with no "
+					"gain, "
+					"threshold %u) - LP at the cell "
+										"h=%.0f, %zu sub-rung(s) "
+					"posted, door sp=%u%s\n",
 				rollouts_since_gain, cfg.refine_after, h2, refine_reqs.size(),
 				refine_gate_sp, qh);
 }
@@ -4539,19 +4574,16 @@ void Search::RunLevin(const BoardKey& t, const std::vector<PlanStep>& p,
 	// bounded by the probability of the solution under the policy.
 	// politique.
 	using QE = std::pair<double, uint32_t>;
-	// Tie-break (cfg.lifo_ties): std::greater on the pair extracted the SMALLEST
-	// index, i.e. the oldest node, the furthest from the dive stack. In LIFO, the
-	// tie extracted is the last queued: almost always a child of the node just
-	// expanded, whose replay is ONE answer from the top of the stack.
+	// Tie-break: std::greater on the pair extracts the SMALLEST index, i.e. the
+	// oldest node, the furthest from the dive stack.
 	struct QCmp {
-		bool lifo;
 		bool operator()(const QE& a, const QE& b) const {
 			if(a.first != b.first)
 				return a.first > b.first;
-			return lifo ? a.second < b.second : a.second > b.second;
+			return a.second > b.second;
 		}
 	};
-	std::priority_queue<QE, std::vector<QE>, QCmp> pq(QCmp{ cfg.lifo_ties });
+	std::priority_queue<QE, std::vector<QE>, QCmp> pq;
 	pq.push({ 0.0, 0 });
 
 	std::vector<uint32_t> chain;

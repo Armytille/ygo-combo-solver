@@ -2065,6 +2065,16 @@ struct SearchConfig {
 	// applies to NON-forced chain windows whose last link belongs to the target
 	// player.
 	const std::vector<std::pair<uint32_t, uint64_t>>* self_negate = nullptr;
+	// THE "GUARD RESOURCE" DISCIPLINE (--guard-keep, same family as the above).
+	// Canonical codes of the cards a guard CLAUSE rests on and whose protection is
+	// spent by ACTIVATING them: a clause "Zalen@field + Junk Signal@hand" only
+	// covers while Junk Signal's once-per-turn is intact, so a second copy in hand
+	// makes the presence atom hold over a dead card. Activating such a card from
+	// the main phase is removed from the enumeration at every decision where the
+	// guard, evaluated over the clauses that do NOT mention it, does not hold.
+	// Chain windows are untouched: activating it THERE is the protection itself.
+	// Pure function of the duel state, so nothing to undo on backtrack.
+	const std::vector<uint32_t>* guard_keep = nullptr;
 	// THE SELF-REFINING LADDER. A bare run has no reference line: when the frontier
 	// STAGNATES (no gain in sp_max for `refine_after` measured rollouts; the
 	// threshold is PRINTED), the next return to the rung aims at the BEST cell,
@@ -2074,16 +2084,6 @@ struct SearchConfig {
 	// tournament work unchanged on the refined ladder. ONE level to start with,
 	// measured. 0 = off.
 	uint32_t refine_after = 0;
-	// THE GRID (rips x overlap), derived from the refined closed form. The cell
-	// key becomes
-	// (resolutions, overlap): one ELITE per cell of the 4x7 grid (28 cells)
-	// instead of a board hash under a scalar score. Archiving each choice frontier
-	// makes the interleaving cost additive (the scalar loses
-	// 2*b^(l_t-1)/L ~ 4e7 at the measured values); re-entry becomes UNIFORM over
-	// the non-empty cells (C-competitive, C <= 28; a tournament of 2 would be a
-	// re-scalarisation). Only bites WITHOUT armed serialisation (the MIN regime
-	// trims it) and with --resolve. False by default.
-	bool grid = false;
 	// THE PATH QUOTAS IN THE LP (red-black). At refinement time, the observed uses
 	// of the quota hosts (quota_uses, the same bookkeeping as the cell key) enter
 	// the LP's capacities: h and the sub-ladder become honest about what the path
@@ -2282,7 +2282,6 @@ struct SearchConfig {
 	// ties are rare (log-probabilities differ per node), rj does not move, and the
 	// changed order visits more expensive states (90.4 against 70.4 us/Process) for
 	// -20 % expansions; neutral when combined with dive_full. Off by default.
-	bool lifo_ties = false;
 	// MERGED pop (Arena::PopToAndRestore) when returning to the shared ancestor:
 	// each hot page is copied once instead of once per level. ON BY DEFAULT: exact
 	// equivalence checked on benchmark 0 (42/b=0/EXHAUSTED, same best), unit
@@ -2553,6 +2552,14 @@ struct SearchConfig {
 	// Null = a private table per worker (the previous behaviour).
 	SharedTT* shared_tt = nullptr;
 
+	// NO MEMOISATION AT ALL (neither shared nor private). Set for the ZERO
+	// deviation pass, which follows a SINGLE path: memoising cannot save work
+	// there, it can only cut, and a reference line that makes a no-op round
+	// trip revisits a state it has already been in. Its own table then killed
+	// the control pass that exists to find it back. Off everywhere else: the
+	// cut is right for the SEARCH, wrong for the REPLAY.
+	bool no_memo = false;
+
 	// --- line constraints ---
 	// n-th summon (1-based, normal + special; Nibiru's count, flips excluded) ->
 	// admissible CANONICAL codes. A summon at a constrained index whose card is not
@@ -2768,7 +2775,7 @@ inline int ZoneSlot(uint8_t normalized) {
 	}
 }
 inline const char* ZoneSlotName(int slot) {
-	static const char* kNames[6] = { "main", "terrain", "cimetiere", "bannie",
+	static const char* kNames[6] = { "main", "field", "grave", "bannie",
 									 "extra", "deck" };
 	return (slot >= 0 && slot < 6) ? kNames[slot] : "?";
 }
@@ -2877,6 +2884,10 @@ struct SearchStats {
 	// with the flag armed, either the window never came up or the wiring is dead,
 	// and both can be read.
 	uint64_t self_negate_cuts = 0;
+	// Main-phase activations removed by --guard-keep. Same liveness reading as
+	// above: zero with the flag armed means the window never came up, or the
+	// wiring is dead.
+	uint64_t guard_keep_cuts = 0;
 	// --- anytime cost objective ---
 	uint64_t burn_cuts = 0;         // rollouts cut by the burned bound
 	// sqrt-LTS: number of expanded nodes that RE-ROOTED the search (a hint landed
@@ -3141,18 +3152,19 @@ struct SearchStats {
 inline const char* SearchOutcome(const SearchStats& st) {
 	// First: a poisoned arena invalidates EVERYTHING else, including any
 	// "EXHAUSTED".
-	if(st.arena_poisoned)   return "!! ARENE CORROMPUE";
+	if(st.arena_poisoned)   return "!! ARENA POISONED";
 	if(st.hit_time_limit)   return "budget";
-	if(st.hit_memory_limit) return "memoire";
-	if(st.hit_node_limit)   return "noeuds";
+	if(st.hit_memory_limit) return "memory";
+	if(st.hit_node_limit)   return "nodes";
 	// One non-exhausted case remains: the search stopped on its solution quota.
 	// Without this word it displays as an EMPTY column, indistinguishable from an
 	// unexplained stop.
 	if(!st.exhausted)       return "quota";
 	// A truncated enumeration removes LEGAL answers from the space: it strips
 	// "EXHAUSTED" of its value as a proof, exactly as a ceiling does.
-	return (st.edges_skipped || st.subsets_capped) ? "EPUISE SOUS BORNE"
-												   : "EPUISE";
+	return (st.edges_skipped || st.subsets_capped) ? "EXHAUSTED UNDER "
+														"BOUND"
+												   : "EXHAUSTED";
 }
 
 class Search {

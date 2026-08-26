@@ -267,7 +267,8 @@ const size_t kClassSizes[] = {
 	10240, 12288, 14336, 16384, 20480, 24576, 28672, 32768,
 };
 constexpr size_t kNumClasses = sizeof(kClassSizes) / sizeof(kClassSizes[0]);
-static_assert(kNumClasses < kLargeTail, "les classes doivent rester sous les marqueurs");
+static_assert(kNumClasses < kLargeTail, "size classes must stay under the "
+										"markers");
 
 struct ClassTable {
 	uint8_t lookup[kMaxSmall / kAlign + 1];
@@ -319,7 +320,7 @@ bool Arena::Init(size_t reserve, std::uintptr_t preferred_base, std::string& err
 					(reserve + kBaseAlign - 1) & ~(kBaseAlign - 1)));
 	write_watch = base != nullptr;   // the barrier plays the role of the hardware tracker
 	if(!base) {
-		error = "aligned_alloc a echoue pour " + std::to_string(reserve) + " octets";
+		error = "aligned_alloc failed for " + std::to_string(reserve) + " bytes";
 		return false;
 	}
 	barrier::EnsureBits();
@@ -355,7 +356,7 @@ bool Arena::Init(size_t reserve, std::uintptr_t preferred_base, std::string& err
 		write_watch = false;
 	}
 	if(!base) {
-		error = "VirtualAlloc a echoue pour " + std::to_string(reserve) + " octets";
+		error = "VirtualAlloc failed for " + std::to_string(reserve) + " bytes";
 		return false;
 	}
 #endif
@@ -707,8 +708,12 @@ void Arena::VerifyDirtySet(const Checkpoint& cp) {
 		if(!marked) {
 			if(missed == 0 && g_verify_missed.load(std::memory_order_relaxed) < 4) {
 				std::fprintf(stderr,
-							 "!! barriere INCOMPLETE : page %zu (offset %zu) differe "
-							 "du miroir sans etre marquee\n", page, off);
+							 "!! barrier "
+														"INCOMPLETE: page "
+														"%zu (offset %zu) "
+														"differs from the "
+														"mirror without "
+														"being marked\n", page, off);
 				// WHAT changed, not only WHERE: text points at an uninstrumented libc
 				// function, pointers at a structure copy lowered to `memory.copy`.
 				// structure abaissee en `memory.copy`.
@@ -717,10 +722,10 @@ void Arena::VerifyDirtySet(const Checkpoint& cp) {
 					if(base[off + k] == mirror[off + k])
 						continue;
 					++shown;
-					std::fprintf(stderr, "   +%04zu miroir:", k);
+					std::fprintf(stderr, "   +%04zu mirror:", k);
 					for(size_t j = 0; j < 16; ++j)
 						std::fprintf(stderr, " %02x", mirror[off + k + j]);
-					std::fprintf(stderr, "\n         arene :");
+					std::fprintf(stderr, "\n         arena:");
 					for(size_t j = 0; j < 16; ++j)
 						std::fprintf(stderr, " %02x", base[off + k + j]);
 					std::fprintf(stderr, "\n         texte : ");
@@ -745,12 +750,14 @@ void Arena::PrintVerifyReport() {
 		return;
 	const uint64_t checked = g_verify_checked.load(std::memory_order_relaxed);
 	const uint64_t missed = g_verify_missed.load(std::memory_order_relaxed);
-	std::printf("\n--- verificateur de la barriere d'ecriture ---\n"
-				"  pages comparees au miroir : %llu\n"
-				"  pages sales NON marquees  : %llu  %s\n",
+	std::printf("\n--- write-barrier verifier ---\n"
+					"  pages compared to the mirror : %llu\n"
+					"  dirty pages NOT marked       : %llu  %s\n",
 				(unsigned long long)checked, (unsigned long long)missed,
-				missed ? "<-- CORRUPTION : la barriere laisse passer des ecritures"
-					   : "(aucune : la barriere capture tout ce qui a bouge)");
+				missed ? "<-- CORRUPTION: the barrier lets "
+										"writes through"
+					   : "(none: the barrier catches "
+											"everything that moved)");
 }
 #endif
 
@@ -1033,11 +1040,13 @@ std::string Arena::SelfCheck() const {
 	};
 	for(const auto& c : checks) {
 		if(c.p && Contains(c.p))
-			return std::string("la structure interne '") + c.name +
-				   "' vit dans l'arene : une restauration la corromprait";
+			return std::string("the internal structure '") + c.name +
+				   "' lives in the arena: a restore would "
+								"corrupt it";
 	}
 	if(free_span_runs.size() == free_span_runs.capacity() && !free_span_runs.empty())
-		return "free_span_runs est plein : la prochaine insertion reallouerait";
+		return "free_span_runs is full: the next insert would "
+					"reallocate";
 	return {};
 }
 
@@ -1065,8 +1074,8 @@ bool enabled = false;
 namespace {
 
 const char* const kSiteNames[kSiteCount] = {
-	"recherche (reste)",     // kSearch: self time of the Run* bodies
-	"rejeu prefixe (reste)", // kPrefix
+	"search (rest)",     // kSearch: self time of the Run* bodies
+	"prefix replay (rest)", // kPrefix
 	"Process (core)",        // kProcess
 	"Query (zones)",         // kQuery
 	"QueryCodes",            // kQueryCodes
@@ -1075,11 +1084,11 @@ const char* const kSiteNames[kSiteCount] = {
 	"enumeration",           // kEnumerate
 	"digest (self)",         // kDigest
 	"board key (self)",      // kBoardKey
-	"atomes IW (self)",      // kAtoms
-	"recettes (self)",       // kRecipe
-	"arene Push",            // kArenaPush
-	"arene Restore",         // kArenaRestore
-	"arene Pop",             // kArenaPop
+	"IW atoms (self)",      // kAtoms
+	"recipes (self)",       // kRecipe
+	"arena Push",            // kArenaPush
+	"arena Restore",         // kArenaRestore
+	"arena Pop",             // kArenaPop
 };
 
 struct TlBuf;
@@ -1153,7 +1162,7 @@ void PrintTable(const char* label, const uint64_t calls[], const uint64_t ticks[
 		return;
 	const uint64_t dec = counters[kDecisions];
 	std::printf("\n--- profil [%s] (tsc %.2f GHz) ---\n", label, ghz);
-	std::printf("  %-22s %12s %9s %12s %9s %6s\n", "sonde", "appels", "/dec",
+	std::printf("  %-22s %12s %9s %12s %9s %6s\n", "probe", "appels", "/dec",
 				"total", "us/appel", "part");
 	// Sorted by decreasing time: the profile reads top to bottom.
 	uint32_t order[kSiteCount];
@@ -1176,16 +1185,19 @@ void PrintTable(const char* label, const uint64_t calls[], const uint64_t ticks[
 	const double ts = double(total) / ghz / 1e9;
 	std::printf("  %-22s %12s %9s %10.3f s\n", "total mesure", "", "", ts);
 	if(dec)
-		std::printf("  decisions : %llu  (%.1f us par decision, sondes comprises)\n",
+		std::printf("  decisions: %llu  (%.1f us per decision, probes "
+							"included)\n",
 					(unsigned long long)dec, ts * 1e6 / double(dec));
 	if(counters[kAlloc] || counters[kFree])
-		std::printf("  arene : alloc %llu (%.1f/dec)  free %llu  realloc %llu\n",
+		std::printf("  arena: alloc %llu (%.1f/dec)  free %llu  "
+							"realloc %llu\n",
 					(unsigned long long)counters[kAlloc],
 					dec ? double(counters[kAlloc]) / double(dec) : 0.0,
 					(unsigned long long)counters[kFree],
 					(unsigned long long)counters[kRealloc]);
 	if(calls[kArenaRestore] || calls[kArenaPush])
-		std::printf("  pages : %.1f/Restore (%llu appels)  %.1f/Push (%llu appels)\n",
+		std::printf("  pages : %.1f/Restore (%llu appels)  %.1f/Push "
+							"(%llu appels)\n",
 					calls[kArenaRestore]
 						? double(counters[kPagesRestored]) / double(calls[kArenaRestore])
 						: 0.0,
@@ -1252,7 +1264,7 @@ void PrintTotal() {
 		return;
 	// A phase never printed (a path with no PrintPhase) is poured into the total here.
 	PrintPhase("phase residuelle");
-	PrintTable("cumul du run", g_run_calls, g_run_ticks, g_run_counters);
+	PrintTable("run total", g_run_calls, g_run_ticks, g_run_counters);
 }
 
 } // namespace prof

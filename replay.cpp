@@ -62,7 +62,7 @@ private:
 bool Replay::Load(const std::string& path, std::string& error) {
 	FILE* fp = std::fopen(path.c_str(), "rb");
 	if(!fp) {
-		error = "impossible d'ouvrir " + path;
+		error = "cannot open " + path;
 		return false;
 	}
 	std::fseek(fp, 0, SEEK_END);
@@ -70,14 +70,14 @@ bool Replay::Load(const std::string& path, std::string& error) {
 	std::fseek(fp, 0, SEEK_SET);
 	if(size <= 0) {
 		std::fclose(fp);
-		error = "fichier vide : " + path;
+		error = "empty file: " + path;
 		return false;
 	}
 	std::vector<uint8_t> buf(static_cast<size_t>(size));
 	size_t got = std::fread(buf.data(), 1, buf.size(), fp);
 	std::fclose(fp);
 	if(got != buf.size()) {
-		error = "lecture incomplete de " + path;
+		error = "incomplete read of " + path;
 		return false;
 	}
 	return LoadFromBuffer(std::move(buf), error);
@@ -85,7 +85,7 @@ bool Replay::Load(const std::string& path, std::string& error) {
 
 bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 	if(contents.size() < 32) {
-		error = "en-tete tronque";
+		error = "truncated header";
 		return false;
 	}
 	std::memcpy(&id, contents.data() + 0, 4);
@@ -97,12 +97,12 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 	size_t header_len = 32;
 
 	if(id != REPLAY_YRP1 && id != REPLAY_YRPX) {
-		error = "identifiant de replay inconnu";
+		error = "unknown replay identifier";
 		return false;
 	}
 	if(flag & FLAG_EXTENDED_HEADER) {
 		if(contents.size() < 72) {
-			error = "en-tete etendu tronque";
+			error = "truncated extended header";
 			return false;
 		}
 		std::memcpy(&header_version, contents.data() + 32, 8);
@@ -180,9 +180,9 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 				// `ref_decisions`, i.e. the decision ceiling of the whole search: a byte-level
 				// problem propagated into a silently reduced budget.
 				if(d.main.size() != nm || d.extra.size() != nx) {
-					error = "replay tronque : deck " + std::to_string(i) +
+					error = "truncated replay: deck " + std::to_string(i) +
 							" annonce " + std::to_string(nm) + "+" +
-							std::to_string(nx) + " cartes, " +
+							std::to_string(nx) + " cards, " +
 							std::to_string(d.main.size()) + "+" +
 							std::to_string(d.extra.size()) + " lues";
 					return false;
@@ -190,10 +190,10 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 				decks.push_back(std::move(d));
 			}
 			if(decks.size() != home_count + opposing_count) {
-				error = "replay tronque : " +
+				error = "truncated replay:" +
 						std::to_string(home_count + opposing_count) +
-						" deck(s) annonces, " + std::to_string(decks.size()) +
-						" lus";
+						" deck(s) announced," + std::to_string(decks.size()) +
+						" read";
 				return false;
 			}
 			if((flag & FLAG_NEWREPLAY) && !(flag & FLAG_HAND_TEST)) {
@@ -206,17 +206,19 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 			uint8_t len = cur.Get<uint8_t>();
 			// `len == 0` is the normal terminator; a failed read is not.
 			if(!cur.Ok()) {
-				error = "replay tronque : en-tete de reponse illisible apres " +
-						std::to_string(responses.size()) + " reponse(s)";
+				error = "truncated replay: unreadable answer "
+										"header after" +
+						std::to_string(responses.size()) + " answer(s)";
 				return false;
 			}
 			if(!len)
 				break;
 			std::vector<uint8_t> r(len);
 			if(!cur.Read(r.data(), len)) {
-				error = "replay tronque : reponse " +
+				error = "truncated replay: answer " +
 						std::to_string(responses.size()) + " annoncee a " +
-						std::to_string(len) + " octets, corps absent";
+						std::to_string(len) + " bytes, body "
+																	"missing";
 				return false;
 			}
 			responses.push_back(std::move(r));
@@ -229,15 +231,16 @@ bool Replay::LoadFromBuffer(std::vector<uint8_t> contents, std::string& error) {
 				break;
 			uint32_t len = cur.Get<uint32_t>();
 			if(!cur.Ok()) {
-				error = "replay tronque : longueur du paquet " +
-						std::to_string(packets.size()) + " illisible";
+				error = "truncated replay: packet length " +
+						std::to_string(packets.size()) + " unreadable";
 				return false;
 			}
 			std::vector<uint8_t> data(len);
 			if(len && !cur.Read(data.data(), len)) {
-				error = "replay tronque : paquet " +
+				error = "truncated replay: packet " +
 						std::to_string(packets.size()) + " annonce a " +
-						std::to_string(len) + " octets, corps absent";
+						std::to_string(len) + " bytes, body "
+																	"missing";
 				return false;
 			}
 			if(msg == OLD_REPLAY_MODE) {
@@ -263,7 +266,8 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 			   const std::vector<std::vector<uint8_t>>& responses,
 			   std::string& error) {
 	if(base.id != REPLAY_YRP1) {
-		error = "le modele n'est pas un yrp1 : decks et parametres manquants";
+		error = "the template is not a yrp1: decks and parameters "
+						"missing";
 		return false;
 	}
 	std::vector<uint8_t> body;
@@ -325,7 +329,7 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 
 	for(const auto& r : responses) {
 		if(r.empty() || r.size() > 255) {
-			error = "reponse de taille invalide (" + std::to_string(r.size()) + ")";
+			error = "answer of invalid size (" + std::to_string(r.size()) + ")";
 			return false;
 		}
 		body.push_back(static_cast<uint8_t>(r.size()));
@@ -361,13 +365,13 @@ bool WriteYrp1(const std::string& path, const Replay& base,
 
 	FILE* fp = std::fopen(path.c_str(), "wb");
 	if(!fp) {
-		error = "impossible d'ecrire " + path;
+		error = "cannot write " + path;
 		return false;
 	}
 	bool ok = std::fwrite(out.data(), 1, out.size(), fp) == out.size();
 	std::fclose(fp);
 	if(!ok)
-		error = "ecriture incomplete de " + path;
+		error = "incomplete write of " + path;
 	return ok;
 }
 

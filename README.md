@@ -411,13 +411,12 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
 </details>
 
 <details>
-<summary><b>13. Reuse work from earlier runs</b> — <code>--prior --adapt --options-online --approach</code></summary>
+<summary><b>13. Reuse work from earlier runs</b> — <code>--adapt --options-online --approach</code></summary>
 
 ```powershell
 combosolver.exe duel.yrpX --scriptdir <card-scripts> `
     --solve --optimize `
     --adapt solutions --adapt-passes 4 `
-    --prior solutions --prior-weight 2.0 `
     --options-online 60 `
     --approach best_approach_00.yrp `
     --solve-ms 900000 `
@@ -426,8 +425,7 @@ combosolver.exe duel.yrpX --scriptdir <card-scripts> `
 
 | Flag | Effect |
 |---|---|
-| `--prior <f\|dir>` | the plan keys of the given lines become initial policy weights |
-| `--adapt <f\|dir>` | the same lines, recorded as sequences of decisions, are adapted into the policy before the first rollout: a discriminative signal where `--prior` only gives a per-move bonus |
+| `--adapt <f\|dir>` | the lines of an earlier run, recorded as sequences of decisions (legal choices plus the one taken) and adapted into the NRPA policy before the first rollout |
 | `--options-online <s>` | re-mine a macro catalogue every s seconds from the run's own best lines; no external corpus needed |
 | `--approach <f.yrp>` | an approach written by an earlier run, `best_approach_*.yrp`, served to the finisher as an extra root. Must come from the same starting duel and the same `--opp-hand` |
 
@@ -552,7 +550,7 @@ Points of detail:
 
 ## Flag reference
 
-`combosolver.exe --help` prints the same list. All 133 flags follow, grouped as
+`combosolver.exe --help` prints the same list. All 123 flags follow, grouped as
 they are there.
 
 <details>
@@ -597,6 +595,7 @@ they are there.
 |---|---|---|
 | `--summon <spec>` | — | the n-th summon must be one of the cards given. Repeatable |
 | `--guard <spec>` | — | from the n-th summon on, a clause holds at every opponent response window, where Nibiru would land |
+| `--guard-keep <c>` | — | this card is a GUARD RESOURCE: its main-phase activation is forbidden while the guard rests on it, i.e. while no clause WITHOUT it holds. Chain windows are untouched. Repeatable |
 | `--guard-off <cond>` | — | turn the guard off once the threat is gone |
 | `--resolve <spec>` | — | resolve this card's effect at least n times before the board. Repeatable, at most 4 shared with `--summon-min` |
 | `--summon-min <spec>` | — | summon this card at least n times. Same machinery as `--resolve`, counted on summons |
@@ -618,6 +617,7 @@ they are there.
 | `--threads <n>` | every core | search workers |
 | `--rounds <n>` | 1 | internal loop: n rounds share `--solve-ms`, and the best joint line of each is re-injected into the next |
 | `--max-decisions <n>` | 1.5x the reference + 32 | depth ceiling of a searched line, in decisions |
+| `--max-ecarts <n>` | 12 | ceiling of the discrepancy ladder. The ladder stops on this ceiling OR on `--solve-ms`, whichever comes first; at 12 a budget over ~100 s stays unspent |
 | `--max-rollouts <n>` | — | deterministic mode: budget in rollouts per worker instead of wall time. Wall time is the cause of the run-to-run variation |
 | `--max-nodes <n>` | — | the same, in nodes expanded per worker |
 | `--arena-mb <n>` | 256 | address space reserved for the arena |
@@ -634,6 +634,7 @@ they are there.
 | `--no-nrpa` | off | greedy rollouts only, with no learned policy |
 | `--novelty <n>` | auto-calibrated | patience of the novelty pruning, calibrated from the width measurement |
 | `--no-novelty` | off | disable novelty pruning |
+| `--novelty-ab` | off | A/B control of the novelty pruning: two extra passes at k=1, with then without it, printed side by side. Costs up to 2 × 20 s of `--solve-ms` and starts the discrepancy ladder at k=2 |
 | `--nrpa-bias <x>` | 1.5 | GNRPA bias of the repertoire's moves |
 | `--nrpa-keep <x>` | 0.5 | persistence of the policy across restarts: weights attenuated by x instead of restarting from zero. 0 = a virgin policy |
 | `--nrpa-alpha <x>` | 1.0 | adaptation step. Small = the policy moves slowly and explores one basin for longer |
@@ -647,12 +648,11 @@ they are there.
 | `--max-subsets <n>` | 24 | subsets emitted per selection prompt; caps the branching factor of every `SELECT_CARD` / `SELECT_SUM`. Sizes are visited alternating from both ends |
 | `--elide-forced` | off | a prompt with a single legal answer is played inline: no table entry, no arena snapshot, no depth, no evaluation. 74.6 % of nodes offer no choice at all |
 | `--canonical-zones` | off | explore one representative free zone per zone type. Link arrows and columns can change everything: judge it before trusting it |
-| `--adapt-to-peak` / `--no-adapt-to-peak` | on | adapt only the prefix that produced the score. A rollout's score is a max over prefixes; adapting every step made a line peaking at step 200 then wandering for 230 more learn the collapse as strongly as the climb |
+| `--no-adapt-to-peak` | on | adapt only the prefix that produced the score. A rollout's score is a max over prefixes; adapting every step made a line peaking at step 200 then wandering for 230 more learn the collapse as strongly as the climb |
 | `--no-serial` | off | turn off serialisation by the material balance. On by default, the novelty table reopens at every subgoal of the LP's plan instead of only at every target card placed |
 | `--reenter <p>` | 0.5 | probability that a rollout restarts from an archive cell, a rung of the x* ladder, instead of from the root. Only bites under armed serialisation. 0 = the A/B control |
 | `--refine-after <n>` | 0 = off | self-refining ladder: re-serialise from the best frontier cell once `sp_max` has stagnated for n measured rollouts |
 | `--quota-h` | off | put the path's observed quota uses into the LP's capacities at refinement time (red-black relaxation) |
-| `--grid` | off | archive key = the (resolutions, overlap) cell, one elite per cell, uniform re-entry. Requires `--resolve` and a regime without armed serialisation |
 | `--carry` | off | under `--rounds`, the global archive and the merged policy persist from one round to the next |
 | `--archive-fin` | off | the finisher's search archives enter the global archive, with their paths re-rooted |
 
@@ -686,17 +686,11 @@ they are there.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--prior <f\|dir>` | — | the plan keys of the given lines, each recorded on its own duel, become initial policy weights. A `.yrp` file or a directory. Repeatable |
-| `--prior-weight <x>` | 2.0 | weight of a move present in the whole corpus; proportional to its frequency otherwise |
 | `--adapt <f\|dir>` | — | the same lines recorded as sequences of decisions, legal choices plus the chosen one, and adapted into the policy before the first rollout. Repeatable |
 | `--adapt-passes <n>` | 4 | adaptation passes per line. 0 disables the mechanism without touching the recording, which is the A/B |
 | `--options <n>` | 0 = off | catalogue of n macros mined from the `--adapt` corpus and offered as one sampling unit to the rollouts |
 | `--options-support <n>` | 2 | minimum occurrences of a macro |
-| `--options-len <n>` | 8 | maximum length of a macro |
-| `--options-window <n>` | 0 = no guard | only offer a macro within ±n decisions of its original position in the corpus |
-| `--options-ctx <n>` | -1 = off | semantic guard: only offer a macro when the current context is compatible with a corpus occurrence, target cards placed exact and hand within ±n |
 | `--options-online <s>` | 0 = off | re-mine the catalogue every s seconds from the run's own best lines. Implies `--options 256` when `--options` is not given |
-| `--options-pool <n>` | 12 | living corpus: lines kept in total |
 | `--options-per-worker <n>` | 2 | and at most n per worker; without a quota the workers pour the same shared best line in sixteen times |
 
 </details>
@@ -727,9 +721,8 @@ they are there.
 | `--levin-h <x>` | 1.0 | PHS* weight of the distance to the goal, missing cards plus missing resolutions. 0 = pure Levin, blind to the goal |
 | `--reroot` | off | sqrt-LTS with a hard rerooter: re-root at every hint, i.e. whenever the number of target cards placed changes. With no hint, inert |
 | `--reroot-h <a>` | 0 = off | sqrt-LTS-H with a heuristic rerooter: weight exp(-a*h/h0) on every node, hence active even when no hint lands. a = inverse temperature. Exclusive with `--reroot` |
-| `--dive-full` / `--no-dive-full` | on | push an arena level at every replayed chain node |
-| `--merged-pop` / `--no-merged-pop` | on | merged arena pop when returning to the shared ancestor |
-| `--lifo-ties` | off | at equal Levin cost, extract the node queued last. Refuted on its own |
+| `--no-dive-full` | on | push an arena level at every replayed chain node |
+| `--no-merged-pop` | on | merged arena pop when returning to the shared ancestor |
 | `--finisher-post-goal` | off | under `--optimize`, a goal node continues instead of stopping (post-goal recovery) |
 | `--finisher-options` | off | the catalogue's macros become edges of the Levin tree, at cost log 1/pi, advancing k decisions, an abort being a dead edge |
 
@@ -773,8 +766,6 @@ they are there.
 | `--watch <card>` | — | card observed by `--probe-repeat`, with no constraint, no gradient and no hint bias. Repeatable, at most 4 |
 | `--probe-repeat` | off | per `--summon-min` / `--resolve` card, the histogram of summons per rollout and, at the first one, the recipe distance to one more copy against the same distance from the starting state. Separates the second copy never attempted from the second always lost. Implies `--recipes 0` |
 | `--operators` | off | extract the operator table from the deck's Lua scripts — preconditions, product, granted state, recipes — print it, then confront it with the replayed plan. The constants come from the game's `constant.lua`: no card is named in the code |
-| `--quota-legacy` | off | replay the earlier quota derivation by effect classes instead of the derivation from the LP's duals |
-| `--resolve-legacy` | off | do not compile the `--resolve` / `--summon-min` requirements into the material balance |
 | `--profile` | off | hot path profile, rdtsc probes per phase, "everything else" line included |
 | `--no-arena` | off | system allocator, no snapshot. For comparison |
 | `--keep-gc` | off | leave the Lua garbage collector running. For comparison |
@@ -788,14 +779,22 @@ they are there.
 Every run ends with self-checks, search or no search. The measurements are valid
 only when the replay reproduces and the self-checks pass.
 
+The report has two levels. **By default** it carries the answer and nothing else:
+
 | Section | Contents | Expected |
 |---|---|---|
-| Loading | cards and script directories found | non-zero, and the scripts intended |
+| Loading | cards, script directories, arena | non-zero, and the scripts intended |
 | Replay result | answers consumed, `MSG_RETRY` | all consumed, `MSG_RETRY` 0 |
-| Decision points | options the engine offered, by prompt type | sizes the search space |
+| Possible lines | the raw branching product along this line, and after dedup by code | the size of the problem posed |
 | Cost of the line | cards consumed, burned, actions, decisions | the baseline for task 2 |
 | Target board | the board captured, card by card | the board expected |
-| Self-checks | save and restore fidelity, stress cycles | all pass |
+| `self-checks` | one line: enumerator coverage, snapshot stress, novelty patience | `pass` |
+| Pruning | per rung: what the search cut (constraint, guard, turn, bound, partition, subsets) and its health (dead ends, terminals, novelty, atoms) | `dead ends` near zero |
+| Solutions | the ranking of the lines found, and the replays written | |
+
+`--verbose` reopens the instrument on top of that: per-prompt decision tables,
+elision potential, rollout and bandit counters, the repetition probe, page-dirtying
+and arena figures, the full self-check blocks, and the per-mechanism liveness line.
 
 A line's cost is three numbers, compared in this order:
 
@@ -806,12 +805,16 @@ A line's cost is three numbers, compared in this order:
 The cards on the final board are fixed by the target, so burned cards are the
 variable part.
 
-After a search the report adds the ranking of the lines found, the number
-examined and the number written. A flag with no effect on the run is marked
-`!! INERT`.
+A flag with no effect on the run is marked `!! INERT` — under `--verbose`, or
+always when it is fatal to what you asked for.
 
-The report is in French. The command line, the help text and this document are
-in English.
+`dead ends` is the number to watch: it is the first symptom of a script set that
+does not match the replay, the failure this project fears most.
+
+The report, the command line, the help text and this document are all in English.
+The report is pure ASCII, so a Windows console renders it correctly whatever the
+code page.
+
 
 ---
 

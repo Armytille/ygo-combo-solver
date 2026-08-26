@@ -38,6 +38,20 @@ using namespace solver;
 
 namespace {
 
+// OUTPUT LEVEL. The default report answers the question that was asked: the
+// cost of the line, the target board, the verdict of the self-checks, the lines
+// found. Everything that measures the SOLVER rather than the duel -- counters,
+// probes, per-mechanism liveness, cost tables -- is instrumentation, and waits
+// behind --verbose. Set once in main, before any thread exists.
+bool g_verbose = false;
+
+// The self-check summary, gathered as the checks run and printed as ONE line at
+// the default level. The numbers are the ones the health gate is read on; only
+// their layout changes when --verbose opens the full blocks.
+std::string g_stress_line;      // passed/total/failed of the stress test
+std::string g_enum_line;        // digests, coverage and candidates
+std::string g_width_line;       // effective width (IW atoms)
+
 using Clock = std::chrono::steady_clock;
 
 double MsSince(Clock::time_point t0) {
@@ -56,7 +70,7 @@ double MsSince(Clock::time_point t0) {
 // that is a distinction the report must keep.
 struct CutCounts {
 	uint64_t constraint = 0, guard = 0, turn = 0, bound = 0, claim = 0,
-			 subsets = 0, selfneg = 0;
+			 subsets = 0, selfneg = 0, guardkeep = 0;
 	// --- what is NOT pruning, but an amputation of the space ---
 	uint64_t forced = 0;          // prompts reduced to the default answer
 	uint64_t forced_mask = 0;     // which prompt types
@@ -82,6 +96,7 @@ struct CutCounts {
 		constraint += s.constraint_cuts;
 		guard      += s.guard_cuts;
 		selfneg    += s.self_negate_cuts;
+		guardkeep  += s.guard_keep_cuts;
 		turn       += s.turn_cuts;
 		bound      += s.edges_skipped;
 		claim      += s.claim_denied;
@@ -112,7 +127,7 @@ void WorkerAbort(const char* ou, const std::string& err) {
 	static std::mutex abort_mx;
 	std::lock_guard<std::mutex> lk(abort_mx);
 	std::printf("  !! worker %s : %s\n", ou,
-				err.empty() ? "echec sans message" : err.c_str());
+				err.empty() ? "failure with no message" : err.c_str());
 	std::fflush(stdout);
 }
 
@@ -127,10 +142,10 @@ void ReportPoison(const char* ou, const Arena& a) {
 		return;
 	static std::mutex poison_mx;
 	std::lock_guard<std::mutex> lk(poison_mx);
-	std::printf("  !! ARENE CORROMPUE — worker %s : %zu allocation(s) hors "
-				"arene.\n     Restore() ne les restaure pas : tout ce que ce "
-				"worker a mesure ensuite est FAUX.\n     Augmenter --arena-mb, "
-				"ou reduire --threads.\n", ou, a.Fallbacks());
+	std::printf("  !! ARENA POISONED - worker %s: %zu allocation(s) "
+					"outside the arena.\n     Restore() does not restore "
+					"them: everything this worker measured after that is "
+					"WRONG.\n     Raise --arena-mb, or lower --threads.\n", ou, a.Fallbacks());
 	std::fflush(stdout);
 }
 
@@ -161,16 +176,16 @@ void CheckSaturations(size_t target_size,
 	for(const ResolveReq& r : resolve_min)
 		total += r.min_count;
 	if(total > 15)
-		std::printf("!! %u resolutions exigees : le score d'archive n'en encode "
-					"que 15\n   (les etats au-dela sont classes a egalite — "
-					"reduire --resolve)\n", total);
+		std::printf("!! %u resolutions required: the archive score "
+							"encodes only 15\n   (states beyond that rank as "
+							"ties - lower --resolve)\n", total);
 	if(target_size > 255)
-		std::printf("!! board cible de %zu cartes : le score d'archive n'en "
-					"encode que 255\n", target_size);
+		std::printf("!! target board of %zu cards: the archive score "
+							"encodes only 255\n", target_size);
 	if(target_size > 15)
-		std::printf("!! board cible de %zu cartes : ContextKey n'en distingue "
-					"que 15\n   (le contexte de politique et la segmentation de "
-					"ForecastSearchCost saturent)\n", target_size);
+		std::printf("!! target board of %zu cards: ContextKey "
+							"distinguishes only 15\n"
+							"   (the policy context saturates)\n", target_size);
 }
 
 // Depth left for the finisher after replaying a prefix.
@@ -229,8 +244,8 @@ const char* MechName(Mech m) {
 	case Mech::Xyz:         return "Xyz";
 	case Mech::Link:        return "Lien";
 	case Mech::Ritual:      return "Rituelle";
-	case Mech::MainMonster: return "mise en jeu (main deck)";
-	default:                return "pose/activation";
+	case Mech::MainMonster: return "play from hand (main deck)";
+	default:                return "place/activate";
 	}
 }
 
@@ -303,9 +318,9 @@ std::vector<TargetCount> CountTarget(const BoardKey& target, const Deck& deck,
 size_t ReportTargetCounting(const std::vector<TargetCount>& counts,
 							const std::map<Mech, uint32_t>& events,
 							const CardDB& db) {
-	std::printf("\n--- comptage derive du board cible ---\n");
-	std::printf("  %-9s %-6s %-6s %-24s %s\n", "exiges", "deck", "code",
-				"mecanisme", "carte");
+	std::printf("\n--- counting derived from the target board ---\n");
+	std::printf("  %-9s %-6s %-6s %-24s %s\n", "required", "deck", "code",
+				"mecanisme", "card");
 	size_t short_of = 0;
 	for(const TargetCount& t : counts) {
 		const bool manque = !t.token && t.have < t.need;
@@ -314,26 +329,31 @@ size_t ReportTargetCounting(const std::vector<TargetCount>& counts,
 		std::printf("  %-9u %-6u %-6u %-24s %s%s\n", t.need,
 					t.token ? 0u : t.have, t.code, MechName(t.mech),
 					db.Name(t.code).c_str(),
-					t.token ? "   (Token : produit par un effet)"
-							: (manque ? "   <-- la decklist n'en a pas assez"
+					t.token ? "   (Token: produced by an "
+												"effect)"
+							: (manque ? "   <-- the decklist "
+																	"does not hold "
+																	"enough"
 									  : ""));
 	}
 	if(!events.empty()) {
-		std::printf("\n  EVENEMENTS d'invocation exiges par le board seul :");
+		std::printf("\n  Summon EVENTS required by the board alone:");
 		for(const auto& [m, n] : events)
 			std::printf("  %u %s", n, MechName(m));
-		std::printf("\n  (on compte les EVENEMENTS, jamais leurs declencheurs :"
-					" « trois Fusions » ne veut\n   pas dire « trois "
-					"Polymerisations » — une Fusion peut partir d'ailleurs.)\n");
+		std::printf("\n  (EVENTS are counted, never their triggers: "
+							"\"three Fusions\" does not\n"
+							"   mean \"three Polymerizations\" - a Fusion can "
+							"start from elsewhere.)\n");
 	}
 	if(short_of) {
-		std::printf("\n  !! FAISABILITE DOUTEUSE : %zu carte(s) cible(s) "
-					"exigent plus d'exemplaires que\n     la decklist n'en "
-					"contient. Ce n'est PAS un verdict d'impossibilite — une "
-					"carte\n     qui COPIE un nom satisfait le but sans etre "
-					"une copie physique, et le but se\n     juge sur le code "
-					"EFFECTIF. La recherche continue (regle : on pondere, on "
-					"ne\n     prune pas).\n", short_of);
+		std::printf("\n  !! FEASIBILITY DOUBTFUL: %zu target card(s) "
+							"require more copies than the\n"
+							"     decklist holds. This is NOT a verdict of "
+							"impossibility - a card that COPIES\n"
+							"     a name satisfies the goal without being a "
+							"physical copy, and the goal is\n"
+							"     judged on the EFFECTIVE code. The search "
+							"continues (rule: weigh, never prune).\n", short_of);
 	}
 	return short_of;
 }
@@ -454,7 +474,7 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 		void ResetClaims() {}
 	} none;
 	std::vector<uint32_t> seen;
-	std::printf("     %-44s %-8s %s\n", "carte", "h plat",
+	std::printf("     %-44s %-8s %s\n", "card", "h plat",
 				"distance amorcee");
 	// The WATCHED cards are printed with the targets, and for the same reason:
 	// the repetition probe measures distances to THOSE cards, and a line at the
@@ -468,7 +488,7 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 		const std::vector<uint32_t> one{ c };
 		const uint32_t d = graph.DistanceAll(one, 0x0c /* terrain */, none);
 		std::printf("     %-44s %-8u %u%s%s\n", db.Name(c).c_str(), 1u, d,
-					d > 1 ? "   <-- gradient" : "   (plancher : rien a dire)",
+					d > 1 ? "   <-- gradient" : "   (floor: nothing to say)",
 					tag);
 	};
 	for(uint32_t code : target.codes)
@@ -493,15 +513,16 @@ void ReportSeededDistances(const BoardKey& target, const RecipeGraph& graph,
 void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					  const CardDB& db, bool card_id, bool yn_id,
 					  const char* phase) {
-	std::printf("\n  --- sonde de repetition (--probe-repeat), %s : %llu "
-				"tirage(s) ---\n", phase, (unsigned long long)rollouts);
+	std::printf("\n  --- repetition probe (--probe-repeat), %s: %llu "
+					"rollout(s) ---\n", phase, (unsigned long long)rollouts);
 	bool any = false;
 	for(int i = 0; i < 4; ++i) {
 		const RepeatProbe& r = rep[i];
 		if(!r.code)
 			continue;
 		any = true;
-		std::printf("  %s : >=1 %llu  >=2 %llu  >=3 %llu  >=4 %llu  >=5 %llu%s\n",
+		std::printf("  %s : >=1 %llu  >=2 %llu  >=3 %llu  >=4 %llu  "
+							">=5 %llu%s\n",
 					db.Name(r.code).c_str(),
 					(unsigned long long)r.reached[0],
 					(unsigned long long)r.reached[1],
@@ -509,7 +530,8 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					(unsigned long long)r.reached[3],
 					(unsigned long long)r.reached[4],
 					r.reached[0] == 0
-						? "  <-- JAMAIS : aucune invocation dans cette phase"
+						? "  <-- NEVER: no summon in "
+												"this phase"
 						: "");
 		// OFFER PROBE: THE DECOMPOSITION OF THE ARITY LAW.
 		// Printed BEFORE everything else because it decides which kind of work the
@@ -519,8 +541,8 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			const double per = rollouts ? double(r.offer_rollouts) * 100.0 /
 											  double(rollouts)
 										: 0.0;
-			std::printf("      OFFRE : proposee dans %llu tirage(s) (%.2f %%), "
-						"%llu decision(s)\n",
+			std::printf("      OFFER: proposed in %llu rollout(s) "
+									"(%.2f %%), %llu decision(s)\n",
 						(unsigned long long)r.offer_rollouts, per,
 						(unsigned long long)r.offer_steps);
 			static const char* kOfferNames[7] = { "IDLECMD", "SELECT_CARD",
@@ -531,13 +553,13 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// placed (Wolf, Masquerade, and Leo Dancer, which is never summonable
 			// by the normal route since its named material is absent from the
 			// deck).
-			std::printf("      ACTIVEE dans %llu tirage(s) (%.2f %%), %llu fois "
-						"au total%s\n",
+			std::printf("      ACTIVATED in %llu rollout(s) (%.2f "
+									"%%), %llu time(s) in total%s\n",
 						(unsigned long long)r.act_rollouts,
 						rollouts ? double(r.act_rollouts) * 100.0 / double(rollouts)
 								 : 0.0,
 						(unsigned long long)r.act_total,
-						r.act_rollouts ? "" : "   <-- JAMAIS ACTIVEE");
+						r.act_rollouts ? "" : "   <-- NEVER ACTIVATED");
 			// ZONE PRESENCE: the only part that talks about STATES. For a card whose
 			// role is to ARRIVE somewhere (Leo Dancer in the graveyard, whence it
 			// will be banished as a material), this is THE measurement: "never
@@ -548,7 +570,8 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 					if(r.zone_rollouts[z]) { any_zone = true; break; }
 				std::printf("      ATTEINT :");
 				if(!any_zone) {
-					std::printf("  aucune zone   <-- la carte n'a JAMAIS BOUGE\n");
+					std::printf("  no zone       <-- the "
+													"card NEVER MOVED\n");
 				} else {
 					for(int z = 0; z < 6; ++z)
 						if(r.zone_rollouts[z])
@@ -565,21 +588,22 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// EVENTS (hundreds), and that is what makes it readable despite the
 			// inter-run noise.
 			if(r.offer_steps && !card_id)
-				std::printf("      CHOISIE quand offerte : INDISPONIBLE — ce "
-							"compteur exige --card-on-select.\n"
-							"                              Sans lui "
-							"`Choice::card` est NUL sur les prompts de "
-							"SELECTION,\n                              donc le "
-							"compte vaut structurellement ZERO et ne dit "
-							"RIEN.\n");
+				std::printf("      CHOSEN when offered: "
+											"UNAVAILABLE - on SELECTION "
+											"prompts the choice carries no\n"
+											"                           card "
+											"identity, so the count is "
+											"structurally ZERO and says "
+											"NOTHING.\n");
 			else if(r.offer_steps)
-				std::printf("      CHOISIE quand offerte : %llu / %llu   "
-							"conversion %.2f %%%s\n",
+				std::printf("      CHOISIE quand offerte : "
+											"%llu / %llu   conversion %.2f "
+											"%%%s\n",
 							(unsigned long long)r.taken_steps,
 							(unsigned long long)r.offer_steps,
 							100.0 * double(r.taken_steps) / double(r.offer_steps),
-							r.taken_steps ? "" : "   <-- JAMAIS RETENUE");
-			std::printf("        par prompt :");
+							r.taken_steps ? "" : "   <-- NEVER TAKEN");
+			std::printf("        by prompt:");
 			for(int k = 0; k < 7; ++k)
 				if(r.offer_by[k])
 					std::printf("  %s %llu", kOfferNames[k],
@@ -594,15 +618,17 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// Requires the yes/no identity, without which the prompt is anonymous
 			// and the probe can attribute it to nobody.
 			if(!yn_id && r.offer_by[6])
-				std::printf("        OUI/NON : INDISPONIBLE — exige "
-							"--yn-identity (le prompt est anonyme sans lui)\n");
+				std::printf("        YES/NO: UNAVAILABLE - "
+											"the prompt carries no card "
+											"identity\n");
 			if(r.yn_steps)
-				std::printf("        OUI/NON : %llu offre(s), OUI retenu %llu "
-							"fois (%.1f %%)%s\n",
+				std::printf("        YES/NO: %llu offer(s), "
+											"YES taken %llu time(s) (%.1f "
+											"%%)%s\n",
 							(unsigned long long)r.yn_steps,
 							(unsigned long long)r.yn_yes,
 							100.0 * double(r.yn_yes) / double(r.yn_steps),
-							r.yn_yes ? "" : "   <-- JAMAIS OUI");
+							r.yn_yes ? "" : "   <-- NEVER YES");
 			// THE VERDICT IS NOT READ OFF THE TOTAL, and that is the probe's most
 			// important correction. `SELECT_CARD` is AMBIGUOUS: it carries "choose
 			// your Fusion among the payable ones" as well as "look at your extra
@@ -611,34 +637,39 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// those are at zero, the card was never summonable, whatever the total.
 			const uint64_t real = r.offer_by[0] + r.offer_by[5];
 			if(!r.offer_rollouts) {
-				std::printf("        <-- JAMAIS PROPOSEE, sur aucun prompt.\n");
+				std::printf("        <-- NEVER OFFERED, on "
+											"any prompt.\n");
 			} else if(!real && !r.reached[0]) {
-				std::printf("        <-- JAMAIS INVOCABLE. Les %llu offre(s) sont "
-							"toutes sur des prompts de SELECTION,\n"
-							"            aucune sur IDLECMD ni POSITION : le pool "
-							"la CONTIENT sans qu'elle soit payable\n"
-							"            (un pool qui liste tout l'extra deck). La "
-							"panne est dans l'ETAT — chantiers 3\n"
-							"            (--recipe-w) et 4 (--backward), pas dans "
-							"l'echantillonnage.\n",
+				std::printf("        <-- NEVER SUMMONABLE. "
+											"All %llu offer(s) are on "
+											"SELECTION prompts, none on\n"
+											"            IDLECMD or POSITION: "
+											"the pool CONTAINS it without it "
+											"being payable\n"
+											"            (a pool that lists "
+											"the whole extra deck). The "
+											"failure is in the STATE,\n"
+											"            not in the sampling.\n",
 							(unsigned long long)r.offer_steps);
 			} else if(!r.reached[0]) {
-				std::printf("        <-- INVOCABLE ET JAMAIS PRISE (%llu offre(s) "
-							"sur IDLECMD/POSITION). La panne est\n"
-							"            dans l'ECHANTILLONNAGE : troncature des "
-							"sous-ensembles ou poids de politique.\n"
-							"            Chantiers 1 (--assign) et 2 "
-							"(--hindsight).\n",
+				std::printf("        <-- SUMMONABLE AND NEVER "
+											"TAKEN (%llu offer(s) on "
+											"IDLECMD/POSITION). The failure "
+											"is\n            in the SAMPLING: "
+											"subset truncation, or policy "
+											"weights.\n",
 							(unsigned long long)real);
 			} else {
 				const double take = 100.0 * double(r.reached[0]) /
 									double(r.offer_rollouts);
-				std::printf("        conversion offre -> invocation : %.1f %% des "
-							"tirages qui l'ont vue\n", take);
+				std::printf("        offer -> summon "
+											"conversion: %.1f %% of the "
+											"rollouts that saw it\n", take);
 			}
 		}
 		if(!r.more_n) {
-			std::printf("      (aucune premiere invocation : rien a sonder)\n");
+			std::printf("      (no first summon: nothing to "
+									"probe)\n");
 			continue;
 		}
 		char refd0[32], refrest[32];
@@ -650,10 +681,10 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			std::snprintf(refrest, sizeof refrest, "non mesuree");
 		else
 			std::snprintf(refrest, sizeof refrest, "%u", r.rest0);
-		std::printf("      distance de recettes a un exemplaire DE PLUS, prise A "
-					"LA 1re invocation :\n"
-					"        moyenne %.2f, min %u, max %u   (reference depuis "
-					"l'etat de depart : %s, %llu releve(s))\n",
+		std::printf("      recipe distance to ONE MORE copy, taken AT "
+							"the 1st summon:\n        mean %.2f, min %u, max "
+							"%u   (reference from the starting state: %s, "
+							"%llu sample(s))\n",
 					r.more_sum / double(r.more_n), r.more_min, r.more_max, refd0,
 					(unsigned long long)r.d0_samples);
 		// FLOOR SAFEGUARD (the most expensive lesson here: a diagnosis that
@@ -664,10 +695,10 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 		// conclusion out of an absence of measurement.
 		// absence de mesure.
 		if(!r.known) {
-			std::printf("        <-- PLANCHER : le graphe ne connait AUCUNE "
-						"recette pour cette carte (regle 2).\n"
-						"            La distance ne peut RIEN dire ici — aucun "
-						"verdict n'est rendu.\n");
+			std::printf("        <-- FLOOR: the graph knows NO "
+									"recipe for this card (rule 2).\n"
+									"            The distance can say NOTHING "
+									"here - no verdict is returned.\n");
 		} else if(r.more_max <= 1) {
 			// MEASURED RESERVATION, and it forbids the verdict just as much as a
 			// floor does. Recipes SEEDED FROM TEXT carry the JOKER zone
@@ -676,43 +707,49 @@ void PrintRepeatProbe(const RepeatProbe rep[4], uint64_t rollouts,
 			// as available and "one more copy" always looks one summon away. A
 			// distance uniformly equal to 1 is the signature of that bias, not
 			// proof of a preserved material.
-			std::printf("        <-- distance uniformement 1 : la recette lue "
-						"est AMORCEE (zone joker),\n"
-						"            et le materiau qui vient d'etre consomme "
-						"compte encore depuis le cimetiere.\n"
-						"            Biais connu — aucun verdict n'est rendu "
-						"sur cet axe.\n");
+			std::printf("        <-- distance uniformly 1: the "
+									"recipe read is SEEDED (wildcard zone),\n"
+									"            and the material just "
+									"consumed still counts from the "
+									"graveyard.\n            Known bias - no "
+									"verdict is returned on this axis.\n");
 		} else if(r.more_kept + r.more_lost) {
 			const double kept = 100.0 * double(r.more_kept) /
 								double(r.more_kept + r.more_lost);
-			std::printf("        materiau CONSERVE (<= reference) : %llu (%.1f %%)"
-						"   CONSOMME (> reference) : %llu\n",
+			std::printf("        materiau CONSERVE (<= reference) "
+									": %llu (%.1f %%)   CONSOMME (> "
+									"reference) : %llu\n",
 						(unsigned long long)r.more_kept, kept,
 						(unsigned long long)r.more_lost);
 			std::printf("        VERDICT : %s\n",
 						kept >= 50.0
-							? "le 2e exemplaire est JAMAIS TENTE — le materiau "
-							  "reste la, le correctif est dans l'ECHANTILLONNAGE"
-							: "le 2e exemplaire est TOUJOURS PERDU — la 1re "
-							  "invocation consomme la chaine, le correctif est "
-							  "dans le `h`");
+							? "the 2nd copy is "
+														"NEVER ATTEMPTED - "
+														"the material is "
+														"there, the fix is "
+														"in the SAMPLING"
+							: "the 2nd copy is "
+														"ALWAYS LOST - the "
+														"1st summon consumes "
+														"the chain, the fix "
+														"is in `h`");
 		}
 		// THE CONSUMPTION AXIS, which also applies to a goal WITHOUT repetition
 		// (benchmark B): the distance to the rest of the board when this piece
 		// lands, against the same distance at the start. It MUST have dropped,
 		// since a piece placed brings the board closer. If it does not, placing
 		// that piece cost elsewhere what it gained here: exactly the wall.
-		std::printf("      distance au RESTE de la cible au meme instant : %.2f  "
-					"(au depart : %s)\n"
-					"      decision moyenne de la 1re invocation : %.1f  |  "
-					"decisions restantes apres : %.1f\n",
+		std::printf("      distance to the REST of the target at the "
+							"same instant: %.2f  (at the start: %s)\n"
+							"      mean decision of the 1st summon: %.1f  |  "
+							"decisions left after: %.1f\n",
 					r.rest_sum / double(r.more_n), refrest,
 					double(r.first_depth_sum) / double(r.more_n),
 					double(r.after_sum) / double(r.more_n));
 	}
 	if(!any)
-		std::printf("  (aucune carte surveillee : --probe-repeat exige "
-					"--summon-min ou --resolve)\n");
+		std::printf("  (no card watched: --probe-repeat needs "
+							"--summon-min or --resolve)\n");
 }
 
 size_t SeedRecipesFromText(const CardDB& db, const Deck& deck,
@@ -837,8 +874,9 @@ size_t SeedRecipesFromText(const CardDB& db, const Deck& deck,
 				if(std::find(announced.begin(), announced.end(), name) ==
 				   announced.end()) {
 					announced.push_back(name);
-					std::printf("     archetype « %s » -> setcode 0x%x, %zu "
-								"fournisseur(s) au deck\n", name.c_str(), sc,
+					std::printf("     archetype \"%s\" -> "
+													"setcode 0x%x, %zu "
+													"provider(s) in the deck\n", name.c_str(), sc,
 								providers);
 				}
 				mats.push_back(Requirement{ sc, kZoneAny, kReqSetcode,
@@ -888,61 +926,67 @@ size_t SeedRecipesFromText(const CardDB& db, const Deck& deck,
 		++seeded;
 	}
 	if(dead_routes)
-		std::printf("     (%zu recette(s) ecartee(s) : elles nomment un materiau "
-					"absent de ce deck)\n", dead_routes);
+		std::printf("     (%zu recipe(s) set aside: they name a "
+							"material absent from this deck)\n", dead_routes);
 	if(seeded)
-		std::printf("     exigences posees : %zu nommee(s), %zu archetype(s), "
-					"%zu niveau(x)%s\n", named, arch, lvl,
+		std::printf("     requirements posted: %zu named, %zu "
+							"archetype(s), %zu level(s)%s\n", named, arch, lvl,
 					cardinal ? "" : "   (--no-seed-quant : cardinales ETEINTES)");
 	return seeded;
 }
 
 void PrintCuts(const CutCounts& c) {
-	std::printf("           elagage : contrainte %llu, garde %llu, tour %llu, "
-				"borne %llu, partition %llu, sous-ens. %llu\n",
+	std::printf("           pruning: constraint %llu, guard %llu, turn "
+					"%llu, bound %llu, partition %llu, subsets %llu\n",
 				(unsigned long long)c.constraint, (unsigned long long)c.guard,
 				(unsigned long long)c.turn, (unsigned long long)c.bound,
 				(unsigned long long)c.claim, (unsigned long long)c.subsets);
 	// Liveness of --no-self-negate: chain options removed.
 	if(c.selfneg)
-		std::printf("           discipline : %llu negation(s) sur soi "
-					"retiree(s) (--no-self-negate)\n",
+		std::printf("           discipline: %llu self-negation(s) "
+							"removed (--no-self-negate)\n",
 					(unsigned long long)c.selfneg);
+	// Liveness of --guard-keep: main-phase activations of a guard resource removed.
+	if(c.guardkeep)
+		std::printf("           discipline: %llu guard-resource "
+							"activation(s) removed (--guard-keep)\n",
+					(unsigned long long)c.guardkeep);
 	// `dead ends` is the number one symptom of a mismatched script set, the
 	// failure this project fears most, and it was only printed in --width mode,
 	// i.e. mute exactly where it would occur. `novelty` says whether the
 	// rollouts' tie-break term still counts for anything or is saturated;
 	// `atoms` is the measured width.
-	std::printf("           sante   : impasses %llu, terminaux %llu, "
-				"nouveaute %llu/%llu, atomes %zu\n",
+	std::printf("           health : dead ends %llu, terminals %llu, "
+					"novelty %llu/%llu, atoms %zu\n",
 				(unsigned long long)c.dead_ends,
 				(unsigned long long)c.terminals, (unsigned long long)c.novel,
 				(unsigned long long)(c.novel + c.stale), c.atoms);
 	if(c.forced) {
-		std::printf("           !! %llu prompt(s) reduits a LA reponse par "
-					"defaut (types :", (unsigned long long)c.forced);
+		std::printf("           !! %llu prompt(s) reduced to THE "
+							"default answer (types:", (unsigned long long)c.forced);
 		for(int b = 0; b < 64; ++b)
 			if(c.forced_mask & (1ull << b))
 				std::printf(" %d", b);
-		std::printf(")\n              La branche SURVIT, reduite a un seul "
-					"choix : tout le reste de ce prompt est hors d'atteinte.\n");
+		std::printf(")\n              The branch SURVIVES, reduced to "
+							"one choice: all the rest of that prompt is out "
+							"of reach.\n");
 	}
 	// SEPARATE FROM THE ABOVE: here no default answer exists, so the branch
 	// DIES, and it also counts in `dead ends` above. Conflating them made a
 	// single fact read as two.
 	if(c.killed) {
-		std::printf("           !! %llu prompt(s) sans AUCUNE reponse par "
-					"defaut : BRANCHE TUEE (types :",
+		std::printf("           !! %llu prompt(s) with NO default "
+							"answer at all: BRANCH KILLED (types:",
 					(unsigned long long)c.killed);
 		for(int b = 0; b < 64; ++b)
 			if(c.killed_mask & (1ull << b))
 				std::printf(" %d", b);
-		std::printf(")\n              Ces branches n'ont jamais existe, et "
-					"elles sont DEJA comptees dans « impasses ».\n");
+		std::printf(")\n              These branches never existed, "
+							"and they are ALREADY counted in \"dead ends\".\n");
 	}
 	if(c.num_broken)
-		std::printf("           !! %llu debordement(s) arithmetiques sqrt-LTS : "
-					"ce bras est a JETER\n", (unsigned long long)c.num_broken);
+		std::printf("           !! %llu sqrt-LTS arithmetic "
+							"overflow(s): this arm is to be DISCARDED\n", (unsigned long long)c.num_broken);
 	// RECIPE GRAPH: without these two figures the mechanism would be invisible.
 	// `summons observed` at zero = the graph is EMPTY, so the distance is exactly
 	// the flat `h` and the mechanism is INERT, which has to be known before any
@@ -954,8 +998,8 @@ void PrintCuts(const CutCounts& c) {
 	// "has the graph seen anything", not to say "how many DISTINCT recipes it
 	// knows".
 	if(c.recipes_seen || c.recipe_h_count)
-		std::printf("           recettes : %llu invocation(s) observee(s), "
-					"h moyen %.2f sur %llu evaluation(s)\n",
+		std::printf("           recipes: %llu summon(s) observed, "
+							"mean h %.2f over %llu evaluation(s)\n",
 					(unsigned long long)c.recipes_seen,
 					c.recipe_h_count ? c.recipe_h_sum / double(c.recipe_h_count)
 									 : 0.0,
@@ -966,7 +1010,8 @@ void PrintCuts(const CutCounts& c) {
 	// the total number of landmarks, the search achieves NOTHING; stuck to zero,
 	// the landmarks are too easy and do not guide.
 	if(c.landmark_h_count)
-		std::printf("           landmarks : h moyen %.2f sur %llu evaluation(s)\n",
+		std::printf("           landmarks: mean h %.2f over %llu "
+							"evaluation(s)\n",
 					c.landmark_h_sum / double(c.landmark_h_count),
 					(unsigned long long)c.landmark_h_count);
 }
@@ -985,6 +1030,10 @@ struct Options {
 	// Directory of the replays produced: the requested deliverable.
 	std::string outdir = "solutions";
 	bool verbose = false;
+	// `--help` asked for the text and got it: that is a SUCCESS. Parse failures
+	// print the same text but exit non-zero, so the two paths must be told apart
+	// here rather than at the single `return false` they used to share.
+	bool help = false;
 	// Hot path profile: thread_local rdtsc probes, printed per phase with the
 	// "everything else" line. The instrument's cost is quantified by comparing two
 	// runs at equal seed, with and without.
@@ -1059,7 +1108,6 @@ struct Options {
 	// benchmark 0, on by default) and LIFO tie-break (wins nothing alone, off).
 	// See SearchConfig.
 	bool dive_full = true;
-	bool lifo_ties = false;
 	// Weight of a required resolution in the rollouts' gradient (default 250;
 	// 100 = the old weight, one target card, and a measured loser: the 8/8 lines
 	// with no rip won the adaptation race against the partially ripping ones).
@@ -1115,19 +1163,6 @@ struct Options {
 	// on publication, relaxed load at the cut).
 	// --no-burn-share disables it.
 	bool burn_share = true;
-	// PRIOR BY SOLUTION REPLAY (arXiv:2401.10431): corpus lines (--prior, a file or
-	// a directory, repeatable) whose plan_keys are recorded EACH ON ITS OWN DUEL (a
-	// corpus line is never replayed on the starting duel) and served as INITIAL
-	// NRPA policy weights: a policy that already knows how to rip, where virgin
-	// sampling does 1 in 800k.
-	std::vector<std::string> prior_files;
-	// Weight of a move present in the WHOLE corpus (proportional otherwise).
-	double prior_weight = 2.0;
-	// ADAPTATION REPLAY OF THE CORPUS (the remaining route of 2401.10431 once the
-	// WEIGHT prior is set aside): the same lines, recorded no longer as
-	// isolated moves but as SEQUENCES OF DECISIONS (legal choices + the chosen
-	// one), adapted into the policy by the NRPA gradient before the first rollout.
-	// --adapt-passes 0 disables the mechanism.
 	std::vector<std::string> adapt_files;
 	uint32_t adapt_passes = 4;
 	// OPTIONS: size of the catalogue of macros mined from the --adapt corpus and
@@ -1136,15 +1171,13 @@ struct Options {
 	// orders, while 16 and 64 are counterproductive.
 	uint32_t options_n = 0;
 	uint32_t options_support = 2;
-	uint32_t options_len = 8;
-	// Offer window: a macro is only offered within +/- window recorded decisions of
-	// its original position in the corpus. 0 = no guard. Wins nothing on its own.
-	uint32_t options_window = 0;
-	// SEMANTIC guard (the form the measurement pointed at): a macro is only offered
-	// when the current context (target cards placed, hand) is compatible with a
-	// corpus occurrence, with the cards placed exact and the hand within +/-
-	// options_ctx. -1 = guard off (default).
-	int options_ctx = -1;
+	// Dials of the mining, judged and frozen. Macro length, offer window and
+	// semantic guard were each refuted on their own; the living corpus size was
+	// too. They stay as the values that were measured, not as flags.
+	static constexpr uint32_t kOptionsMaxLen = 8;
+	static constexpr uint32_t kOptionsWindow = 0;   // no positional guard
+	static constexpr int      kOptionsCtxTol = -1;  // semantic guard off
+	static constexpr uint32_t kOptionsPool   = 12;
 	// ONLINE MINING (Marvin, arXiv:1110.2736): period in SECONDS of the re-mining
 	// over the run's own best lines. 0 = off (the catalogue is mined once at
 	// startup from --adapt and never moves: the previous behaviour byte for byte).
@@ -1152,9 +1185,6 @@ struct Options {
 	// without an external corpus, without an inherited --approach, without a
 	// relaunch.
 	uint32_t options_online = 0;
-	// Living corpus: lines kept in total, and per worker (the DIVERSITY PUMP; over
-	// multiple runs it came from the seeds).
-	uint32_t options_pool = 12;
 	uint32_t options_per_worker = 2;
 	// Canonical PHS*: the paper's (d + h)/pi cost instead of our
 	// log(d+1) + h - log pi (a factor e^h, with no guarantee).
@@ -1205,8 +1235,9 @@ struct Options {
 	// The flag existed in EnumOptions with no dial at all, and it was only read at
 	// the idle prompt; at the battle prompt the two exits were emitted
 	// unconditionally.
-	// One representative free zone per zone type: declared and documented, ENABLED
-	// NOWHERE.
+	// One representative free zone per zone type. Wired into all three search
+	// configurations; link arrows and columns can change everything, so it stays
+	// off until it is judged.
 	bool canonical_zones = false;
 	// QUOTA PER PROGRESS LEVEL in the Go-Explore archive: gives the archive back
 	// its nature as a COVERING when its sort key saturates.
@@ -1272,7 +1303,7 @@ struct Options {
 	// of the ten extra deck cards name no card at all).
 	bool seed_cardinal = true;
 	// LEARNED LANDMARK GRAPH. The corpus of RESOLVED plans the landmarks are
-	// extracted from: files or directories, like --adapt and --prior.
+	// extracted from: files or directories, like --adapt.
 	//
 	// EXPLICIT AND NEVER IMPLICIT, and that is a measurement requirement: the
 	// reference line is a legitimate resolved plan, but if the solver absorbed it
@@ -1328,19 +1359,6 @@ struct Options {
 	// closed form says `Sigma b^(l_i)` only exists when each block is searched from
 	// the previous rung. Only bites under armed serialisation. 0 = off.
 	double reenter = 0.5;
-	// Replays the earlier derivation by effect classes in place of the derivation
-	// from the LP's duals. Both derivations are printed in every case.
-	bool quota_legacy = false;
-	// Do NOT compile the --resolve / --summon-min requirements into the material
-	// balance (the earlier behaviour: post-resolution credit only). The active
-	// wiring is printed in every case.
-	bool resolve_legacy = false;
-	// THE PATH QUOTAS IN THE LP (red-black partial relaxation,
-	// Katz-Hoffmann-Domshlak): at refinement time, the observed uses of the quota
-	// hosts enter the LP's capacities, so h and the sub-ladder become honest about
-	// what the path has already spent. It also arms the h_quota column of the
-	// theorem 2 walk (the mandated judge: 0 NEW infeasible state along the
-	// reference). False by default while it is being measured.
 	bool quota_h = false;
 	// THE GRID (rips x overlap), derived from the refined closed form (sympy
 	// 13/13). Archive key = the (resolutions, overlap) cell, one elite per cell (28
@@ -1349,7 +1367,6 @@ struct Options {
 	// cost of interleaving the conjunction is additive (the scalar loses
 	// ~2*b^(l_t-1)/L = 4e7 at the measured values). The regime without
 	// serialisation, and it requires --resolve. False by default.
-	bool grid = false;
 	// FULL GO-EXPLORE, first half: the archives of the FINISHER's searches
 	// (A1/A2/phase 2) enter the global archive, with their paths re-rooted at the
 	// start. Until now they DIED with their phase; the literature (Go-Explore:
@@ -1367,7 +1384,6 @@ struct Options {
 	// (Crystal Wing, Zalen, Silver Hound...). The --no-activate/--no-chain family:
 	// a chosen constraint, not a quality pruning. The effects targeted are derived
 	// from the declared table (NEGATE/DISABLE categories), with zero names.
-	// derivent de la table declaree (categories NEGATE/DISABLE), zero nom.
 	bool no_self_negate = false;
 	// DISCIPLINE: the whole combo lives in MAIN PHASE 1, so entering the Battle
 	// Phase (hence Main 2) is removed from the enumeration and "-> End Phase"
@@ -1404,6 +1420,9 @@ struct Options {
 	// bias + gradient + goal requirement), so a probe that can only count
 	// `--resolve` cards cannot measure "does the solver find it ON ITS OWN".
 	std::vector<std::string> watch_specs;
+	// --guard-keep: cards a guard clause rests on, never spent from the main phase
+	// while they are the only cover. Resolved into codes like the rest.
+	std::vector<std::string> guard_keep_specs;
 	// BIAS DERIVED FROM THE TARGET. Two changes that are useless without each
 	// other, hence one flag:
 	//   1. the TARGET BOARD's codes enter `hint_cards`; until now only `--hint`
@@ -1484,6 +1503,15 @@ struct Options {
 	// when the line AIMED AT is longer than the reference, e.g. aiming for three
 	// Fusions when the reference places one. Too short a ceiling truncates SILENTLY.
 	uint32_t max_decisions = 0;
+	// Ceiling of the discrepancy ladder in the guided search. 12 was hard-coded;
+	// it is the DEFAULT here, so every earlier measurement is reproduced byte for
+	// byte. Raising it is the only way for a budget beyond ~100 s to be spent at
+	// all on this mode: the ladder used to stop on the ceiling, never on time.
+	uint32_t max_ecarts = 12;
+	// NOVELTY CONTROL: two extra passes at k = 1, with then without the
+	// pruning, printed side by side. Off by default -- it spends up to 40 s
+	// of the search budget and starts the discrepancy ladder at k = 2.
+	bool novelty_ab = false;
 	// Line constraints, raw, resolved into codes once the card database is loaded.
 	// cartes chargee.
 	std::vector<std::string> summon_specs;      // "5:Zalen|Crystal Wing"
@@ -1532,6 +1560,8 @@ struct LineConstraints {
 	SummonConstraints summons;
 	uint32_t guard_after = 0;
 	std::vector<GuardClause> guard;
+	// Cards the guard RESTS on (--guard-keep): canonical codes.
+	std::vector<uint32_t> guard_keep;
 	// Turning the guard off: no longer required when the opponent's hand holds at
 	// most this many cards (-1 = never). A handrip deck extinguishes the threat.
 	int guard_opp_hand_release = -1;
@@ -1569,10 +1599,15 @@ struct LineConstraints {
 	bool AnyBoardEdit() const {
 		return !board_add.empty() || !board_remove.empty() || target_scratch;
 	}
+	// Every CHOSEN discipline counts, `self_negate` and `guard_keep` included:
+	// leaving one out makes the whole constraint report vanish when it is the
+	// only flag passed, which reads as "the flag does nothing" and is exactly
+	// what the report exists to disprove.
 	bool Any() const {
 		return !summons.empty() || !guard.empty() || !no_activate.empty() ||
 			   !no_chain.empty() || !resolve_min.empty() ||
-			   !material_req.empty();
+			   !material_req.empty() || !self_negate.empty() ||
+			   !guard_keep.empty();
 	}
 };
 
@@ -1619,435 +1654,543 @@ void DeriveSummonMin(const std::vector<TargetCount>& counts,
 		++added;
 	}
 	if(!added) {
-		std::printf("  --derive-summon-min : rien a deriver (aucune carte "
-					"d'extra deck libre sous le plafond de %zu).\n", kMaxEntries);
+		std::printf("  --derive-summon-min: nothing to derive (no "
+							"free extra-deck card under the ceiling of %zu).\n", kMaxEntries);
 		return;
 	}
 	cfg.resolve_min = eff;
-	std::printf("  --derive-summon-min : %zu contrainte(s) DERIVEE(S) du board "
-				"cible.\n     Guide de recherche ; redondantes a la "
-				"verification, qui juge le board lui-meme :\n", added);
+	std::printf("  --derive-summon-min: %zu constraint(s) DERIVED from "
+					"the target board.\n     A search guide; redundant at "
+					"verification, which judges the board itself:\n", added);
 	for(const ResolveReq& r : eff)
 		std::printf("      %ux %s\n", r.min_count, db.Name(r.code).c_str());
 	if(counts.size() > kMaxEntries)
-		std::printf("      (plafond de %zu entrees : les cartes cibles au-dela "
-					"ne sont pas contraintes)\n", kMaxEntries);
+		std::printf("      (ceiling of %zu entries: target cards "
+							"beyond it are not constrained)\n", kMaxEntries);
 }
 
 
 void Usage() {
 	std::printf(
-		"usage: combosolver <replay.yrpX> [options]\n"
-		"\n"
-		"Replays the line recorded in a .yrpX, captures the board it ends the turn on,\n"
-		"then searches for other ways to reach that board. Without --solve (or a flag\n"
-		"that implies it) the run is a replay plus the self-checks, and no search.\n"
-		"\n"
-		"INPUT AND OUTPUT\n"
-		"  --workdir <dir>    EDOPro installation. REQUIRED, unless the\n"
-		"                     COMBOSOLVER_WORKDIR environment variable\n"
-		"                     supplies it.\n"
-		"  --scriptdir <dir>  card script set, highest priority first (repeatable).\n"
-		"                     Use an export of the repository contemporary with the\n"
-		"                     replay: a mismatched set makes the replay diverge in\n"
-		"                     silence.\n"
-		"  --player <0|1>     player whose turn is optimised (default 0)\n"
-		"  --outdir <dir>     where the replays produced are written (default\n"
-		"                     solutions/)\n"
-		"  --verbose          trace every decision\n"
-		"  --help             this text\n"
-		"\n"
-		"WHAT TO SEARCH FOR\n"
-		"  --solve            search for a line towards the target board\n"
-		"  --start <replay>   rebuild the reference board from THAT duel (another deck,\n"
-		"                     hand and seed). Implies --solve.\n"
-		"  --deck <f.ydk>     rebuild the reference board from THAT decklist, with no\n"
-		"                     starting replay. The opening hand comes from --hand\n"
-		"                     (default: the reference's). Implies --solve.\n"
-		"  --hand <cards>     opening hand, cards separated by '|' (codes or name\n"
-		"                     fragments). Used with --deck.\n"
-		"  --opp-hand <c>     ADD these cards to the opponent's hand in the starting\n"
-		"                     duel (separated by '|', repeatable). Gives the guard and\n"
-		"                     the handrip something to work on when the start is a hand\n"
-		"                     test; PLAYABLE cards (Nibiru...) are needed for the core\n"
-		"                     to open opponent response windows. The replays produced\n"
-		"                     only replay with the same --opp-hand.\n"
-		"  --target <c>       BUILD the target board from scratch, <c> = card[@ATK|DEF]\n"
-		"                     (default ATK). The reference's capture does not enter.\n"
-		"                     Repeatable.\n"
-		"  --board-add <c>    EDIT the captured target board: also require this card.\n"
-		"                     Same grammar as --target. Requires --deck or --start.\n"
-		"  --board-remove <c> EDIT the captured target board: stop requiring this card.\n"
-		"  --target-subset    the final board must CONTAIN the target instead of being\n"
-		"                     EQUAL to it. This is already the default as soon as the\n"
-		"                     target is posted with --target.\n"
-		"  --target-exact     restore exact equality on a posted target (kept for A/B\n"
-		"                     comparisons). Careful: it requires an empty spell/trap\n"
-		"                     zone, which is unsatisfiable as soon as the hand holds a\n"
-		"                     continuous spell.\n"
-		"  --no-plan          discard the reference's REPERTOIRE: the NRPA policy\n"
-		"                     starts uniform. Measures what the reference was worth.\n"
-		"  --no-ref           GOAL-ONLY MODE: the replay is demoted to a duel template\n"
-		"                     (flags, life points, opponent). Implies --no-plan and\n"
-		"                     requires --target and --deck.\n"
-		"  --approach <f.yrp> an approach written by an earlier run\n"
-		"                     (best_approach_*.yrp), served to the finisher as an extra\n"
-		"                     root (full path + backtracks). Repeatable. Must have been\n"
-		"                     produced on the SAME starting duel (and --opp-hand).\n"
-		"\n"
-		"LINE CONSTRAINTS\n"
-		"  --summon <spec>    the n-th summon (normal or special, Nibiru's count) must\n"
-		"                     be one of the cards given. <spec> = n:card[|card...],\n"
-		"                     card = a code or a name fragment that resolves uniquely.\n"
-		"                     Repeatable. Example: --summon \"5:Zalen|Crystal Wing\"\n"
-		"  --guard <spec>     from the n-th summon on, at every OPPONENT response\n"
-		"                     window (where Nibiru would land) at least one clause must\n"
-		"                     hold. <spec> = n:clause[|clause...],\n"
-		"                     clause = card[@zone][+...], zones: hand field grave\n"
-		"                     banished extra (default field). Predicate atom:\n"
-		"                     oppbanished>=N (opponent cards banished).\n"
-		"                     Example: --guard \"5:Crystal Wing|Zalen@field+Junk\n"
-		"                     Signal@hand|27572350@field+oppbanished>=1\"\n"
-		"  --guard-off <cond> turn the guard off once the threat is gone. Form:\n"
-		"                     opphand<=N, i.e. the guard is no longer required at\n"
-		"                     windows where the opponent's hand holds at most N cards\n"
-		"                     (a handrip deck empties Nibiru out of it).\n"
-		"  --resolve <spec>   the line must resolve this card's effect at least n times\n"
-		"                     before the board (<spec> = card[@zone][:n], default 1).\n"
-		"                     @zone restricts the ACTIVATION zone (the Omega that rips\n"
-		"                     activates from the field; without @field its graveyard\n"
-		"                     effect would count too). Checked AT THE GOAL: a\n"
-		"                     conforming board without the resolutions is not a\n"
-		"                     solution. Repeatable, at most 4.\n"
-		"                     Example: --resolve \"Omega@field:2\"\n"
-		"  --summon-min <s>   the line must SUMMON this card at least n times\n"
-		"                     (<s> = card[:n], default 1). Same machinery as --resolve,\n"
-		"                     counted on summons. Shares the limit of 4.\n"
-		"  --material <spec>  summoning this card must consume at least one material of\n"
-		"                     these attributes. <spec> = card:attr[,attr...],\n"
-		"                     attributes: light dark earth water fire wind divine.\n"
-		"                     Repeatable. Example: --material \"Chaos Angel:light\"\n"
-		"  --no-activate <c>  forbid activating this card from a zone (<c> =\n"
-		"                     card[@zone], default field; activating from the hand,\n"
-		"                     which places the card, stays allowed). Repeatable.\n"
-		"  --no-chain <c>     this card is never CHAINED at response windows (playing\n"
-		"                     solo, every chain answers our own actions, so a guard\n"
-		"                     that negates our cards is a useless branch). Forced\n"
-		"                     triggers and idle commands stay allowed. Repeatable.\n"
-		"  --no-self-negate   never offer one of the deck's own NEGATION effects on a\n"
-		"                     chain link of ours. The effects are derived from the\n"
-		"                     declared operator table; no card name is compiled in.\n"
-		"  --mp1-only         the whole combo lives in Main Phase 1: entering the\n"
-		"                     Battle Phase is removed from the enumeration\n"
-		"                     (\"-> End Phase\" always remains).\n"
-		"  --turns <n>        domain in turns: 1 (default) or 2, where the line crosses\n"
-		"                     the opponent's turn and our only decisions there are the\n"
-		"                     quick windows.\n"
-		"\n"
-		"SEARCH BUDGET\n"
-		"  --solve-ms <ms>    search time budget (default 120000)\n"
-		"  --threads <n>      search workers (default: every core)\n"
-		"  --rounds <n>       INTERNAL LOOP: n rounds share --solve-ms, and the best\n"
-		"                     joint line of each round is re-injected into the next\n"
-		"                     (default 1, i.e. a single round)\n"
-		"  --max-decisions <n>  depth ceiling of a searched line, in decisions.\n"
-		"                     Default: derived from the reference (1.5x + 32).\n"
-		"  --max-rollouts <n> DETERMINISTIC MODE: budget in ROLLOUTS per worker instead\n"
-		"                     of wall time. Wall time is the cause of the run-to-run\n"
-		"                     variation; with --threads 1, two executions do exactly\n"
-		"                     the same work.\n"
-		"  --max-nodes <n>    the same, in nodes expanded per worker\n"
-		"  --arena-mb <n>     address space reserved for the arena (default 256)\n"
-		"  --tt-mb <n>        transposition table SHARED between workers (lazy SMP), in\n"
-		"                     MB per pass (default 64; 0 = private tables)\n"
-		"  --seed <n>         seed of the rollouts (default: derived from the clock and\n"
-		"                     printed; passing it back replays the same rollouts)\n"
-		"\n"
-		"SEARCH MECHANISMS\n"
-		"  --no-nrpa          greedy rollouts only, with no learned policy\n"
-		"  --novelty <n>      patience of the novelty pruning (default: auto-calibrated\n"
-		"                     from the width measurement)\n"
-		"  --no-novelty       disable novelty pruning\n"
-		"  --nrpa-bias <x>    GNRPA bias of the repertoire's moves (default 1.5)\n"
-		"  --nrpa-keep <x>    persistence of the NRPA policy across restarts: weights\n"
-		"                     attenuated by x instead of restarting from zero\n"
-		"                     (default 0.5; 0 = a virgin policy)\n"
-		"  --nrpa-alpha <x>   NRPA adaptation step (default 1.0). Small = the policy\n"
-		"                     moves slowly and explores one basin for longer.\n"
-		"  --nrpa-iters <n>   iterations per NRPA level (default 24). A level-L call\n"
-		"                     costs n^L rollouts.\n"
-		"  --nrpa-level <n>   NRPA nesting level, 1..4. Default: 3 when the rollout\n"
-		"                     budget exceeds 180 s, 2 otherwise. The effective level is\n"
-		"                     always printed.\n"
-		"  --nrpa-temp <t>    softmax temperature of the rollouts (default 1.0). t < 1\n"
-		"                     concentrates the mass on the best ranked moves WITHOUT\n"
-		"                     changing the ranking (GNRPA, arXiv:2003.10024).\n"
-		"  --hint <card>      domain hint: the moves that engage this card (summon,\n"
-		"                     activate, position) receive an NRPA sampling bonus.\n"
-		"                     Repeatable.\n"
-		"  --hint-bias <b>    weight of the HINT bias in the sampling (default 2.0).\n"
-		"                     The --resolve/--summon-min cards receive it\n"
-		"                     automatically.\n"
-		"  --phase-w <x>      weight subtracted from the logit of a phase change\n"
-		"                     (0 = off). Ending the turn is irreversible and is drawn\n"
-		"                     uniformly among the idle choices.\n"
-		"  --resolve-weight <x>  weight of a required resolution in the rollouts'\n"
-		"                     gradient (default 250; 100 = one target card)\n"
-		"  --max-subsets <n>  subsets emitted per selection prompt (default 24). This\n"
-		"                     caps the branching factor of every SELECT_CARD /\n"
-		"                     SELECT_SUM; sizes are visited alternating from both ends.\n"
-		"  --elide-forced     a prompt with a SINGLE legal answer is played inline: no\n"
-		"                     table entry, no arena snapshot, no depth, no evaluation.\n"
-		"                     74.6 %% of nodes offer no choice at all.\n"
-		"  --canonical-zones  explore only one representative free zone per zone type.\n"
-		"                     Link arrows and columns can change everything: judge it\n"
-		"                     before trusting it.\n"
-		"  --adapt-to-peak / --no-adapt-to-peak\n"
-		"                     ON BY DEFAULT: adapt only the PREFIX that produced the\n"
-		"                     score. A rollout's score is a MAX over prefixes, but the\n"
-		"                     adaptation used to reinforce EVERY step, so a line\n"
-		"                     peaking at step 200 then wandering for 230 more learned\n"
-		"                     the collapse as strongly as the climb. This flag turns it\n"
-		"                     OFF, to replay the A/B.\n"
-		"  --no-serial        turn off serialisation by the material balance. On by\n"
-		"                     default, the novelty table reopens at every subgoal of\n"
-		"                     the LP's plan instead of only at every target card\n"
-		"                     placed.\n"
-		"  --reenter <p>      RETURN TO THE RUNG: probability that an NRPA rollout\n"
-		"                     restarts from an archive cell (a rung of the x* ladder)\n"
-		"                     instead of from the root. Only bites under armed\n"
-		"                     serialisation. Default 0.5; 0 = the A/B control.\n"
-		"  --refine-after <n>  self-refining ladder: re-serialise from the best\n"
-		"                     frontier cell once sp_max has stagnated for n measured\n"
-		"                     rollouts (0 = off)\n"
-		"  --quota-h          put the path's observed quota uses into the LP's\n"
-		"                     capacities at refinement time (red-black relaxation)\n"
-		"  --grid             archive key = the (resolutions, overlap) cell, one elite\n"
-		"                     per cell, uniform re-entry. Requires --resolve and a\n"
-		"                     regime without armed serialisation.\n"
-		"  --carry            under --rounds, the global archive and the merged policy\n"
-		"                     persist from one round to the next\n"
-		"  --archive-fin      the finisher's search archives enter the global archive,\n"
-		"                     with their paths re-rooted\n"
-		"\n"
-		"GOAL DECOMPOSITION\n"
-		"  --recipes <w>      RECIPE GRAPH: h becomes the distance in SUMMONS still to\n"
-		"                     be made over the OBSERVED recipes, intermediate materials\n"
-		"                     included, i.e. a distance that DECREASES where the flat h\n"
-		"                     does not move. w = 0: the graph is fed and MEASURED\n"
-		"                     without entering the cost. w > 0: it weighs in h. It\n"
-		"                     never PRUNES; an unknown recipe is worth 1, so at worst h\n"
-		"                     falls back to today's flat h.\n"
-		"  --no-seed-recipes  do NOT seed the graph from card text: the graph then only\n"
-		"                     learns from successful summons\n"
-		"  --no-seed-quant    seed the NAMED materials only, without the CARDINAL\n"
-		"                     requirements (\"3 \\\"Lunalight\\\" monsters\", \"2 Level 4\n"
-		"                     monsters\")\n"
-		"  --op-recipes       seed the recipe graph from the DECLARED OPERATORS instead\n"
-		"                     of from English card text: recipes as CODES\n"
-		"                     (Fusion.AddProcMix*), plus the node type that was\n"
-		"                     missing, \"this CODE can be ACQUIRED\", for every\n"
-		"                     EFFECT_ADD_CODE / EFFECT_CHANGE_CODE of the deck. The\n"
-		"                     edges posted are printed one by one. Requires --recipes.\n"
-		"  --backward         BACKWARD SERIALISATION (Retro*, AO*). A summon is an AND\n"
-		"                     node: arity, fatal forwards, becomes a DECOMPOSITION\n"
-		"                     backwards. The number of subproducts already built enters\n"
-		"                     the partition of the novelty table, which therefore\n"
-		"                     reopens BEFORE any target card is placed.\n"
-		"  --assign           RESOLVED ASSIGNMENT (arXiv:2010.12001). Subset prompts\n"
-		"                     ALSO emit the two extreme subsets in the sense of the\n"
-		"                     recipes. The enumeration's truncation is LEXICOGRAPHIC:\n"
-		"                     past --max-subsets the right subset is not rare, it is\n"
-		"                     ABSENT, and no weight makes up for that.\n"
-		"  --assign-bias <f>  sampling weight of the moves that engage a code the\n"
-		"                     RECIPE graph designates as a MATERIAL\n"
-		"  --op-bias <f>      weight added to the moves that PLAY a card the backward\n"
-		"                     decomposition requires ON THE FIELD, i.e. the hosts of\n"
-		"                     the acquisition edges. Requires --recipes and\n"
-		"                     --op-recipes; its liveness is printed, and at zero it is\n"
-		"                     inert.\n"
-		"  --hindsight <f>    HINDSIGHT (HER, NeurIPS 2017). Every extra deck monster\n"
-		"                     actually summoned becomes a substitute goal, and the best\n"
-		"                     line reaching it undergoes the NRPA gradient at f x\n"
-		"                     alpha. DEFAULT 0.5; --no-hindsight turns it off.\n"
-		"  --hindsight-k <n>  substitute goals kept at most (default 16)\n"
-		"  --landmarks <f|d>  LEARNED LANDMARK GRAPH (arXiv:2508.21564): learns, from\n"
-		"                     RESOLVED plans, the facts (card, zone, COUNT) every plan\n"
-		"                     reaches, in which order, and how many times. Repeatable.\n"
-		"                     The graph is printed before it is allowed to weigh.\n"
-		"  --landmark-w <f>   weight of a landmark achievement in the ROLLOUT SCORE, in\n"
-		"                     units of material (one target card placed is worth 100).\n"
-		"                     0 = learned and measured without weighing.\n"
-		"  --landmark-h <f>   weight of the landmark h in the FINISHER (same entry\n"
-		"                     point as --recipes)\n"
-		"  --derive-summon-min  derive the --summon-min constraints from the TARGET\n"
-		"                     BOARD instead of writing them by hand: 3x Liger Dancer =\n"
-		"                     three Fusion summon EVENTS (never \"three\n"
-		"                     Polymerizations\": the trigger varies). The counting is\n"
-		"                     always printed; this flag wires it into the constraints.\n"
-		"\n"
-		"POLICY LEARNING FROM SOLVED LINES\n"
-		"  --prior <f|dir>    prior by solution replay: the plan_keys of the lines\n"
-		"                     given (a .yrp file or a directory, repeatable) are\n"
-		"                     recorded each on ITS OWN duel and become INITIAL NRPA\n"
-		"                     policy weights.\n"
-		"  --prior-weight <x> weight of a move present in the whole corpus (default\n"
-		"                     2.0; proportional to its frequency otherwise)\n"
-		"  --adapt <f|dir>    ADAPTATION replay of the corpus (repeatable): the same\n"
-		"                     lines, recorded as SEQUENCES OF DECISIONS (legal choices\n"
-		"                     + the chosen one) and adapted into the NRPA policy before\n"
-		"                     the first rollout. A discriminative signal where --prior\n"
-		"                     only gives a per-move bonus.\n"
-		"  --adapt-passes <n>  adaptation passes per line (default 4; 0 disables the\n"
-		"                     mechanism without touching the recording, which is the\n"
-		"                     A/B)\n"
-		"  --options <n>      OPTIONS: catalogue of n macros mined from the --adapt\n"
-		"                     corpus and offered as ONE sampling unit to the NRPA\n"
-		"                     rollouts (0 = off, the default)\n"
-		"  --options-support <n>  minimum occurrences of a macro (default 2)\n"
-		"  --options-len <n>  maximum length of a macro (default 8)\n"
-		"  --options-window <n>  only offer a macro within +/- n decisions of its\n"
-		"                     original position in the corpus (default 0 = no guard)\n"
-		"  --options-ctx <n>  SEMANTIC guard: only offer a macro when the current\n"
-		"                     context is compatible with a corpus occurrence (target\n"
-		"                     cards placed exact, hand within +/- n). -1 = off.\n"
-		"  --options-online <s>  ONLINE MINING: re-mine the catalogue every s seconds\n"
-		"                     from the run's own best lines (0 = off). No external\n"
-		"                     corpus needed: the run starts bare and arms itself.\n"
-		"                     Implies --options 256 when --options is not given.\n"
-		"  --options-pool <n>  living corpus: lines kept in total (default 12)\n"
-		"  --options-per-worker <n>  and at most n per worker (default 2): without a\n"
-		"                     quota the workers pour the same shared best line in\n"
-		"                     sixteen times.\n"
-		"\n"
-		"HEAD BANDIT (MCPS)\n"
-		"  --qhat <k>         over the first k decisions of a rollout, the move is\n"
-		"                     chosen by argmax of (n Q + n^ Q^)/(n + n^): Q is the mean\n"
-		"                     reward of the rollouts through this node then this move,\n"
-		"                     Q^ the mean over ALL rollouts containing this move AND\n"
-		"                     those of the path, in any order (MCPS,\n"
-		"                     arXiv:2510.06381). Weights proportional to the sample\n"
-		"                     sizes, so no bias hyperparameter. Past k, NRPA samples as\n"
-		"                     before. Those k decisions are EXCLUDED from the NRPA\n"
-		"                     gradient. 0 = off.\n"
-		"  --qhat-window <W>  size of the sliding window of rollouts, PER worker\n"
-		"                     (default 4096). The measured memory is printed.\n"
-		"  --qhat-rho <r>     visits after which a non-root node FREEZES its\n"
-		"                     permutation statistic (default 32)\n"
-		"  --qhat-nodes <n>   cap on the bandit's nodes per worker (default 65536)\n"
-		"  --no-qhat-probe    do not print the first-decision probe\n"
-		"  --ctx-shrink <k>   TWO-LEVEL policy: one weight per move AND one per (move,\n"
-		"                     context), mixed convexly by s = n/(n+k) where n is the\n"
-		"                     evidence of the contextual cell. Negative k (default) =\n"
-		"                     off. The agreement curve printed by --adapt calibrates k\n"
-		"                     without spending a run.\n"
-		"  --ctx-max <n>      cap on the contextual level's entries per worker (default\n"
-		"                     262144, 0 = unlimited)\n"
-		"\n"
-		"FINISHER\n"
-		"  --finisher <mode>  levin (Go-Explore archive + backtracks + Levin Tree\n"
-		"                     Search over the NRPA policy, the default), mono (the old\n"
-		"                     one: the single best state), ab (both at equal budget)\n"
-		"  --archive-k <n>    size of the finisher's state archive (default 16)\n"
-		"  --finisher-min <ms>  minimum budget RESERVED for the finisher (0 = the\n"
-		"                     original split)\n"
-		"  --levin-h <x>      PHS* weight of the distance to the goal (missing cards +\n"
-		"                     missing resolutions) in the finisher's cost (default 1.0;\n"
-		"                     0 = pure Levin, blind to the goal)\n"
-		"  --reroot           sqrt-LTS with a HARD rerooter (arXiv:2412.05196): the\n"
-		"                     finisher re-roots at every HINT (the number of target\n"
-		"                     cards placed changes). With no hint, inert.\n"
-		"  --reroot-h <a>     sqrt-LTS-H with a HEURISTIC rerooter\n"
-		"                     (arXiv:2605.30664 section 3.2): weight exp(-a*h/h0) on\n"
-		"                     EVERY node, hence active even when no hint lands.\n"
-		"                     a = inverse temperature (0 = off). Exclusive with\n"
-		"                     --reroot.\n"
-		"  --dive-full / --no-dive-full  push an arena level at every replayed chain\n"
-		"                     node (on by default)\n"
-		"  --merged-pop / --no-merged-pop  merged arena pop when returning to the\n"
-		"                     shared ancestor (on by default)\n"
-		"  --lifo-ties        at EQUAL Levin cost, extract the node queued last\n"
-		"                     (refuted on its own, off by default)\n"
-		"  --finisher-post-goal  under --optimize, a goal node CONTINUES instead of\n"
-		"                     stopping (post-goal recovery)\n"
-		"  --finisher-options  the catalogue's macros become EDGES of the Levin tree\n"
-		"                     (cost log 1/pi, advancing k decisions, an abort being a\n"
-		"                     dead edge)\n"
-		"\n"
-		"COST OPTIMISATION\n"
-		"  --optimize         anytime COST OPTIMISATION: the search no longer stops at\n"
-		"                     the first solution (each one tightens the bound), the\n"
-		"                     NRPA goal score becomes lexicographic (burned, then\n"
-		"                     actions, then decisions), rollouts continue PAST the goal\n"
-		"                     (recoveries reduce the burned count), and the finisher\n"
-		"                     runs even when lines already exist\n"
-		"  --burn-slack <n>   slack of the burned B&B bound (default 6): cut the states\n"
-		"                     above best_burned + n. Burned cards are NOT monotonic\n"
-		"                     (recoveries), and the slack is measured on the reference.\n"
-		"                     255 = off.\n"
-		"  --burn-limit <n>   seed of the bound: best burned count known in advance\n"
-		"                     (0 = none)\n"
-		"  --no-burn-share    do NOT share the burned bound between workers (default:\n"
-		"                     shared, so a worker that improves it cuts for all)\n"
-		"\n"
-		"OPPONENT TEST\n"
-		"  --fire <card>      adds the card to the opponent's hand and makes the\n"
-		"                     opponent PLAY it at every window where it is legal (one\n"
-		"                     attempt per window); the search must then close the board\n"
-		"                     back up from the post-injection state. The static guard\n"
-		"                     becomes a dynamic proof. The replays produced only replay\n"
-		"                     with --opp-hand <card> in judge mode.\n"
-		"  --fire-spare <c>   card that may be SACRIFICED to answer: the target board\n"
-		"                     without it is also accepted at the goal (answering with\n"
-		"                     Zalen consumes Junk Signal)\n"
-		"  --fire-ms <ms>     search budget per window (default 45000)\n"
-		"  --fire-bake        bake the drawn card into the header of the replays\n"
-		"                     produced (opponent deck, served into the hand by the\n"
-		"                     pseudo-shuffle), so they replay from their own file and\n"
-		"                     EDOPro can watch them with no flag. The card replaces the\n"
-		"                     last card of the opponent's original hand.\n"
-		"  --fire-no-chain <c>  no-chain list specific to the post-injection\n"
-		"                     continuation (the global --no-chain lists are lifted\n"
-		"                     there). Stages a precise answer: forbidding Crystal Wing\n"
-		"                     forces the Zalen+Junk Signal route. Repeatable.\n"
-		"  --fire-open        only inject at OPEN windows (empty chain): the drawn card\n"
-		"                     STARTS a chain instead of being chained onto our effects,\n"
-		"                     which is the real threat\n"
-		"\n"
-		"MEASUREMENT AND DIAGNOSTICS\n"
-		"  --growth           measure the growth of the state graph\n"
-		"  --growth-max <n>   maximum depth explored (default 14)\n"
-		"  --growth-ms <ms>   time budget per depth (default 20000)\n"
-		"  --width            measure the effective width (IW atoms) along the\n"
-		"                     reference line, with no search\n"
-		"  --watch <card>     card OBSERVED by --probe-repeat, with NO constraint, no\n"
-		"                     gradient and no hint bias. Use it whenever measuring\n"
-		"                     whether the solver finds something ON ITS OWN: --resolve\n"
-		"                     is a disguised hint (it receives hint_bias\n"
-		"                     automatically). Repeatable, at most 4.\n"
-		"  --probe-repeat     REPETITION PROBE: per --summon-min/--resolve card, the\n"
-		"                     histogram of summons PER ROLLOUT and, at the FIRST one,\n"
-		"                     the recipe distance to ONE MORE copy compared with the\n"
-		"                     same distance from the starting state. Separates the two\n"
-		"                     failures best_overlap conflates: the 2nd copy NEVER\n"
-		"                     ATTEMPTED (the material was there, a sampling failure)\n"
-		"                     from the 2nd ALWAYS LOST (the chain was consumed, an h\n"
-		"                     failure). Implies --recipes 0.\n"
-		"  --operators        DECLARED OPERATOR HARNESS: extracts the operator table\n"
-		"                     from the deck's LUA SCRIPTS (preconditions, product,\n"
-		"                     granted state, recipes), prints it, then CONFRONTS it\n"
-		"                     with the replayed plan. The constants come from the\n"
-		"                     game's constant.lua: no card is named in the code. An\n"
-		"                     instrument, not a mechanism.\n"
-		"  --quota-legacy     replay the earlier quota derivation by effect classes\n"
-		"                     instead of the derivation from the LP's duals\n"
-		"  --resolve-legacy   do NOT compile the --resolve/--summon-min requirements\n"
-		"                     into the material balance\n"
-		"  --profile          hot path profile (rdtsc probes per phase, \"everything\n"
-		"                     else\" line included); the instrument costs something, and\n"
-		"                     quantifying it is part of the measurement\n"
-		"  --no-arena         system allocator, no snapshot (comparison)\n"
-		"  --keep-gc          leave the Lua garbage collector running (comparison)\n");
+		"usage: combosolver <replay.yrpX> [options]\n\n"
+				"Replays the line recorded in a .yrpX, captures the board it "
+				"ends the turn on,\nthen searches for other ways to reach "
+				"that board. Without --solve (or a flag\n"
+				"that implies it) the run is a replay plus the self-checks, "
+				"and no search.\n\nINPUT AND OUTPUT\n"
+				"  --workdir <dir>    EDOPro installation. REQUIRED, unless "
+				"the\n                     COMBOSOLVER_WORKDIR environment "
+				"variable\n                     supplies it.\n"
+				"  --scriptdir <dir>  card script set, highest priority first "
+				"(repeatable).\n                     Use an export of the "
+				"repository contemporary with the\n"
+				"                     replay: a mismatched set makes the "
+				"replay diverge in\n                     silence.\n"
+				"  --player <0|1>     player whose turn is optimised (default "
+				"0)\n  --outdir <dir>     where the replays produced are "
+				"written (default\n                     solutions/)\n"
+				"  --verbose          trace every decision\n"
+				"  --help             this text\n\nWHAT TO SEARCH FOR\n"
+				"  --solve            search for a line towards the target "
+				"board\n  --start <replay>   rebuild the reference board from "
+				"THAT duel (another deck,\n"
+				"                     hand and seed). Implies --solve.\n"
+				"  --deck <f.ydk>     rebuild the reference board from THAT "
+				"decklist, with no\n                     starting replay. The "
+				"opening hand comes from --hand\n"
+				"                     (default: the reference's). Implies "
+				"--solve.\n  --hand <cards>     opening hand, cards separated "
+				"by '|' (codes or name\n                     fragments). Used "
+				"with --deck.\n  --opp-hand <c>     ADD these cards to the "
+				"opponent's hand in the starting\n"
+				"                     duel (separated by '|', repeatable). "
+				"Gives the guard and\n                     the handrip "
+				"something to work on when the start is a hand\n"
+				"                     test; PLAYABLE cards (Nibiru...) are "
+				"needed for the core\n                     to open opponent "
+				"response windows. The replays produced\n"
+				"                     only replay with the same --opp-hand.\n"
+				"  --target <c>       BUILD the target board from scratch, "
+				"<c> = card[@ATK|DEF]\n                     (default ATK). "
+				"The reference's capture does not enter.\n"
+				"                     Repeatable.\n"
+				"  --board-add <c>    EDIT the captured target board: also "
+				"require this card.\n                     Same grammar as "
+				"--target. Requires --deck or --start.\n"
+				"  --board-remove <c> EDIT the captured target board: stop "
+				"requiring this card.\n  --target-subset    the final board "
+				"must CONTAIN the target instead of being\n"
+				"                     EQUAL to it. This is already the "
+				"default as soon as the\n                     target is "
+				"posted with --target.\n  --target-exact     restore exact "
+				"equality on a posted target (kept for A/B\n"
+				"                     comparisons). Careful: it requires an "
+				"empty spell/trap\n                     zone, which is "
+				"unsatisfiable as soon as the hand holds a\n"
+				"                     continuous spell.\n"
+				"  --no-plan          discard the reference's REPERTOIRE: the "
+				"NRPA policy\n                     starts uniform. Measures "
+				"what the reference was worth.\n"
+				"  --no-ref           GOAL-ONLY MODE: the replay is demoted "
+				"to a duel template\n                     (flags, life "
+				"points, opponent). Implies --no-plan and\n"
+				"                     requires --target and --deck.\n"
+				"  --approach <f.yrp> an approach written by an earlier run\n"
+				"                     (best_approach_*.yrp), served to the "
+				"finisher as an extra\n                     root (full path + "
+				"backtracks). Repeatable. Must have been\n"
+				"                     produced on the SAME starting duel (and "
+				"--opp-hand).\n\nLINE CONSTRAINTS\n"
+				"  --summon <spec>    the n-th summon (normal or special, "
+				"Nibiru's count) must\n                     be one of the "
+				"cards given. <spec> = n:card[|card...],\n"
+				"                     card = a code or a name fragment that "
+				"resolves uniquely.\n                     Repeatable. "
+				"Example: --summon \"5:Zalen|Crystal Wing\"\n"
+				"  --guard <spec>     from the n-th summon on, at every "
+				"OPPONENT response\n                     window (where Nibiru "
+				"would land) at least one clause must\n"
+				"                     hold. <spec> = n:clause[|clause...],\n"
+				"                     clause = card[@zone][+...], zones: hand "
+				"field grave\n                     banished extra (default "
+				"field). Predicate atom:\n"
+				"                     oppbanished>=N (opponent cards "
+				"banished).\n                     Example: --guard "
+				"\"5:Crystal Wing|Zalen@field+Junk\n"
+				"                     Signal@hand|27572350@field+oppbanished>="
+				"1\"\n  --guard-keep <c>   this card is a GUARD RESOURCE: its "
+				"main-phase\n                     activation is forbidden "
+				"while the guard rests on it,\n"
+				"                     i.e. while no clause WITHOUT it holds. "
+				"Presence in\n                     hand is not availability: "
+				"a once-per-turn already\n"
+				"                     spent leaves the clause covering "
+				"nothing. Chain\n                     windows are untouched "
+				"(there the activation IS the\n"
+				"                     protection). Repeatable.\n"
+				"  --guard-off <cond> turn the guard off once the threat is "
+				"gone. Form:\n                     opphand<=N, i.e. the guard "
+				"is no longer required at\n"
+				"                     windows where the opponent's hand holds "
+				"at most N cards\n                     (a handrip deck "
+				"empties Nibiru out of it).\n"
+				"  --resolve <spec>   the line must resolve this card's "
+				"effect at least n times\n"
+				"                     before the board (<spec> = "
+				"card[@zone][:n], default 1).\n"
+				"                     @zone restricts the ACTIVATION zone "
+				"(the Omega that rips\n                     activates from "
+				"the field; without @field its graveyard\n"
+				"                     effect would count too). Checked AT THE "
+				"GOAL: a\n                     conforming board without the "
+				"resolutions is not a\n                     solution. "
+				"Repeatable, at most 4.\n                     Example: "
+				"--resolve \"Omega@field:2\"\n"
+				"  --summon-min <s>   the line must SUMMON this card at least "
+				"n times\n                     (<s> = card[:n], default 1). "
+				"Same machinery as --resolve,\n"
+				"                     counted on summons. Shares the limit of "
+				"4.\n  --material <spec>  summoning this card must consume at "
+				"least one material of\n                     these "
+				"attributes. <spec> = card:attr[,attr...],\n"
+				"                     attributes: light dark earth water fire "
+				"wind divine.\n                     Repeatable. Example: "
+				"--material \"Chaos Angel:light\"\n"
+				"  --no-activate <c>  forbid activating this card from a zone "
+				"(<c> =\n                     card[@zone], default field; "
+				"activating from the hand,\n"
+				"                     which places the card, stays allowed). "
+				"Repeatable.\n  --no-chain <c>     this card is never CHAINED "
+				"at response windows (playing\n"
+				"                     solo, every chain answers our own "
+				"actions, so a guard\n                     that negates our "
+				"cards is a useless branch). Forced\n"
+				"                     triggers and idle commands stay "
+				"allowed. Repeatable.\n  --no-self-negate   never offer one "
+				"of the deck's own NEGATION effects on a\n"
+				"                     chain link of ours. The effects are "
+				"derived from the\n                     declared operator "
+				"table; no card name is compiled in.\n"
+				"  --mp1-only         the whole combo lives in Main Phase 1: "
+				"entering the\n                     Battle Phase is removed "
+				"from the enumeration\n                     (\"-> End Phase\" "
+				"always remains).\n  --turns <n>        domain in turns: 1 "
+				"(default) or 2, where the line crosses\n"
+				"                     the opponent's turn and our only "
+				"decisions there are the\n                     quick windows.\n"
+				"\nSEARCH BUDGET\n  --solve-ms <ms>    search time budget "
+				"(default 120000)\n  --threads <n>      search workers "
+				"(default: every core)\n  --rounds <n>       INTERNAL LOOP: n "
+				"rounds share --solve-ms, and the best\n"
+				"                     joint line of each round is re-injected "
+				"into the next\n                     (default 1, i.e. a "
+				"single round)\n  --max-decisions <n>  depth ceiling of a "
+				"searched line, in decisions.\n"
+				"                     Default: derived from the reference "
+				"(1.5x + 32).\n  --max-ecarts <n>   ceiling of the "
+				"discrepancy ladder (default 12). The ladder\n"
+				"                     stops on this ceiling OR on --solve-ms, "
+				"whichever comes\n                     first; at 12 a budget "
+				"over ~100 s stays unspent.\n"
+				"  --max-rollouts <n> DETERMINISTIC MODE: budget in ROLLOUTS "
+				"per worker instead\n                     of wall time. Wall "
+				"time is the cause of the run-to-run\n"
+				"                     variation; with --threads 1, two "
+				"executions do exactly\n                     the same work.\n"
+				"  --max-nodes <n>    the same, in nodes expanded per worker\n"
+				"  --arena-mb <n>     address space reserved for the arena "
+				"(default 256)\n  --tt-mb <n>        transposition table "
+				"SHARED between workers (lazy SMP), in\n"
+				"                     MB per pass (default 64; 0 = private "
+				"tables)\n  --seed <n>         seed of the rollouts (default: "
+				"derived from the clock and\n"
+				"                     printed; passing it back replays the "
+				"same rollouts)\n\nSEARCH MECHANISMS\n"
+				"  --no-nrpa          greedy rollouts only, with no learned "
+				"policy\n  --novelty <n>      patience of the novelty pruning "
+				"(default: auto-calibrated\n"
+				"                     from the width measurement)\n"
+				"  --no-novelty       disable novelty pruning\n"
+				"  --novelty-ab      A/B CONTROL of the novelty pruning: two "
+				"extra passes\n                     at k = 1, with then "
+				"without it, printed side by\n"
+				"                     side. Costs up to 2 x 20 s of "
+				"--solve-ms and\n                     starts the discrepancy "
+				"ladder at k = 2.\n  --nrpa-bias <x>    GNRPA bias of the "
+				"repertoire's moves (default 1.5)\n"
+				"  --nrpa-keep <x>    persistence of the NRPA policy across "
+				"restarts: weights\n                     attenuated by x "
+				"instead of restarting from zero\n"
+				"                     (default 0.5; 0 = a virgin policy)\n"
+				"  --nrpa-alpha <x>   NRPA adaptation step (default 1.0). "
+				"Small = the policy\n                     moves slowly and "
+				"explores one basin for longer.\n"
+				"  --nrpa-iters <n>   iterations per NRPA level (default 24). "
+				"A level-L call\n                     costs n^L rollouts.\n"
+				"  --nrpa-level <n>   NRPA nesting level, 1..4. Default: 3 "
+				"when the rollout\n                     budget exceeds 180 s, "
+				"2 otherwise. The effective level is\n"
+				"                     always printed.\n"
+				"  --nrpa-temp <t>    softmax temperature of the rollouts "
+				"(default 1.0). t < 1\n                     concentrates the "
+				"mass on the best ranked moves WITHOUT\n"
+				"                     changing the ranking (GNRPA, "
+				"arXiv:2003.10024).\n  --hint <card>      domain hint: the "
+				"moves that engage this card (summon,\n"
+				"                     activate, position) receive an NRPA "
+				"sampling bonus.\n                     Repeatable.\n"
+				"  --hint-bias <b>    weight of the HINT bias in the sampling "
+				"(default 2.0).\n                     The "
+				"--resolve/--summon-min cards receive it\n"
+				"                     automatically.\n"
+				"  --phase-w <x>      weight subtracted from the logit of a "
+				"phase change\n                     (0 = off). Ending the "
+				"turn is irreversible and is drawn\n"
+				"                     uniformly among the idle choices.\n"
+				"  --resolve-weight <x>  weight of a required resolution in "
+				"the rollouts'\n                     gradient (default 250; "
+				"100 = one target card)\n  --max-subsets <n>  subsets emitted "
+				"per selection prompt (default 24). This\n"
+				"                     caps the branching factor of every "
+				"SELECT_CARD /\n                     SELECT_SUM; sizes are "
+				"visited alternating from both ends.\n"
+				"  --elide-forced     a prompt with a SINGLE legal answer is "
+				"played inline: no\n                     table entry, no "
+				"arena snapshot, no depth, no evaluation.\n"
+				"                     74.6 %% of nodes offer no choice at "
+				"all.\n  --canonical-zones  explore only one representative "
+				"free zone per zone type.\n"
+				"                     Link arrows and columns can change "
+				"everything: judge it\n                     before trusting "
+				"it.\n   --no-adapt-to-peak\n"
+				"                     ON BY DEFAULT: adapt only the PREFIX "
+				"that produced the\n                     score. A rollout's "
+				"score is a MAX over prefixes, but the\n"
+				"                     adaptation used to reinforce EVERY "
+				"step, so a line\n                     peaking at step 200 "
+				"then wandering for 230 more learned\n"
+				"                     the collapse as strongly as the climb. "
+				"This flag turns it\n                     OFF, to replay the "
+				"A/B.\n  --no-serial        turn off serialisation by the "
+				"material balance. On by\n"
+				"                     default, the novelty table reopens at "
+				"every subgoal of\n                     the LP's plan instead "
+				"of only at every target card\n                     placed.\n"
+				"  --reenter <p>      RETURN TO THE RUNG: probability that an "
+				"NRPA rollout\n                     restarts from an archive "
+				"cell (a rung of the x* ladder)\n"
+				"                     instead of from the root. Only bites "
+				"under armed\n                     serialisation. Default "
+				"0.5; 0 = the A/B control.\n"
+				"  --refine-after <n>  self-refining ladder: re-serialise "
+				"from the best\n                     frontier cell once "
+				"sp_max has stagnated for n measured\n"
+				"                     rollouts (0 = off)\n"
+				"  --quota-h          put the path's observed quota uses into "
+				"the LP's\n                     capacities at refinement time "
+				"(red-black relaxation)\n  --carry            under --rounds, "
+				"the global archive and the merged policy\n"
+				"                     persist from one round to the next\n"
+				"  --archive-fin      the finisher's search archives enter "
+				"the global archive,\n                     with their paths "
+				"re-rooted\n\nGOAL DECOMPOSITION\n"
+				"  --recipes <w>      RECIPE GRAPH: h becomes the distance in "
+				"SUMMONS still to\n                     be made over the "
+				"OBSERVED recipes, intermediate materials\n"
+				"                     included, i.e. a distance that "
+				"DECREASES where the flat h\n"
+				"                     does not move. w = 0: the graph is fed "
+				"and MEASURED\n                     without entering the "
+				"cost. w > 0: it weighs in h. It\n"
+				"                     never PRUNES; an unknown recipe is "
+				"worth 1, so at worst h\n                     falls back to "
+				"today's flat h.\n  --no-seed-recipes  do NOT seed the graph "
+				"from card text: the graph then only\n"
+				"                     learns from successful summons\n"
+				"  --no-seed-quant    seed the NAMED materials only, without "
+				"the CARDINAL\n                     requirements (\"3 "
+				"\\\"Lunalight\\\" monsters\", \"2 Level 4\n"
+				"                     monsters\")\n"
+				"  --op-recipes       seed the recipe graph from the DECLARED "
+				"OPERATORS instead\n                     of from English card "
+				"text: recipes as CODES\n                     "
+				"(Fusion.AddProcMix*), plus the node type that was\n"
+				"                     missing, \"this CODE can be ACQUIRED\", "
+				"for every\n                     EFFECT_ADD_CODE / "
+				"EFFECT_CHANGE_CODE of the deck. The\n"
+				"                     edges posted are printed one by one. "
+				"Requires --recipes.\n  --backward         BACKWARD "
+				"SERIALISATION (Retro*, AO*). A summon is an AND\n"
+				"                     node: arity, fatal forwards, becomes a "
+				"DECOMPOSITION\n                     backwards. The number of "
+				"subproducts already built enters\n"
+				"                     the partition of the novelty table, "
+				"which therefore\n                     reopens BEFORE any "
+				"target card is placed.\n  --assign           RESOLVED "
+				"ASSIGNMENT (arXiv:2010.12001). Subset prompts\n"
+				"                     ALSO emit the two extreme subsets in "
+				"the sense of the\n                     recipes. The "
+				"enumeration's truncation is LEXICOGRAPHIC:\n"
+				"                     past --max-subsets the right subset is "
+				"not rare, it is\n                     ABSENT, and no weight "
+				"makes up for that.\n  --assign-bias <f>  sampling weight of "
+				"the moves that engage a code the\n"
+				"                     RECIPE graph designates as a MATERIAL\n"
+				"  --op-bias <f>      weight added to the moves that PLAY a "
+				"card the backward\n                     decomposition "
+				"requires ON THE FIELD, i.e. the hosts of\n"
+				"                     the acquisition edges. Requires "
+				"--recipes and\n                     --op-recipes; its "
+				"liveness is printed, and at zero it is\n"
+				"                     inert.\n"
+				"  --hindsight <f>    HINDSIGHT (HER, NeurIPS 2017). Every "
+				"extra deck monster\n                     actually summoned "
+				"becomes a substitute goal, and the best\n"
+				"                     line reaching it undergoes the NRPA "
+				"gradient at f x\n                     alpha. DEFAULT 0.5; "
+				"--no-hindsight turns it off.\n"
+				"  --hindsight-k <n>  substitute goals kept at most (default "
+				"16)\n  --landmarks <f|d>  LEARNED LANDMARK GRAPH "
+				"(arXiv:2508.21564): learns, from\n"
+				"                     RESOLVED plans, the facts (card, zone, "
+				"COUNT) every plan\n                     reaches, in which "
+				"order, and how many times. Repeatable.\n"
+				"                     The graph is printed before it is "
+				"allowed to weigh.\n  --landmark-w <f>   weight of a landmark "
+				"achievement in the ROLLOUT SCORE, in\n"
+				"                     units of material (one target card "
+				"placed is worth 100).\n                     0 = learned and "
+				"measured without weighing.\n"
+				"  --landmark-h <f>   weight of the landmark h in the "
+				"FINISHER (same entry\n                     point as "
+				"--recipes)\n  --derive-summon-min  derive the --summon-min "
+				"constraints from the TARGET\n"
+				"                     BOARD instead of writing them by hand: "
+				"3x Liger Dancer =\n                     three Fusion summon "
+				"EVENTS (never \"three\n                     "
+				"Polymerizations\": the trigger varies). The counting is\n"
+				"                     always printed; this flag wires it into "
+				"the constraints.\n\nPOLICY LEARNING FROM SOLVED LINES\n"
+				"  --adapt <f|dir>    ADAPTATION replay of the corpus "
+				"(repeatable): the same\n                     lines, recorded "
+				"as SEQUENCES OF DECISIONS (legal choices\n"
+				"                     + the chosen one) and adapted into the "
+				"NRPA policy before\n                     the first rollout.\n"
+				"  --adapt-passes <n>  adaptation passes per line (default 4; "
+				"0 disables the\n                     mechanism without "
+				"touching the recording, which is the\n"
+				"                     A/B)\n"
+				"  --options <n>      OPTIONS: catalogue of n macros mined "
+				"from the --adapt\n                     corpus and offered as "
+				"ONE sampling unit to the NRPA\n"
+				"                     rollouts (0 = off, the default)\n"
+				"  --options-support <n>  minimum occurrences of a macro "
+				"(default 2)\n  --options-online <s>  ONLINE MINING: re-mine "
+				"the catalogue every s seconds\n"
+				"                     from the run's own best lines (0 = "
+				"off). No external\n                     corpus needed: the "
+				"run starts bare and arms itself.\n"
+				"                     Implies --options 256 when --options is "
+				"not given.\n  --options-per-worker <n>  and at most n per "
+				"worker (default 2): without a\n"
+				"                     quota the workers pour the same shared "
+				"best line in\n                     sixteen times.\n\n"
+				"HEAD BANDIT (MCPS)\n  --qhat <k>         over the first k "
+				"decisions of a rollout, the move is\n"
+				"                     chosen by argmax of (n Q + n^ Q^)/(n + "
+				"n^): Q is the mean\n                     reward of the "
+				"rollouts through this node then this move,\n"
+				"                     Q^ the mean over ALL rollouts "
+				"containing this move AND\n"
+				"                     those of the path, in any order (MCPS,\n"
+				"                     arXiv:2510.06381). Weights proportional "
+				"to the sample\n                     sizes, so no bias "
+				"hyperparameter. Past k, NRPA samples as\n"
+				"                     before. Those k decisions are EXCLUDED "
+				"from the NRPA\n                     gradient. 0 = off.\n"
+				"  --qhat-window <W>  size of the sliding window of rollouts, "
+				"PER worker\n                     (default 4096). The "
+				"measured memory is printed.\n"
+				"  --qhat-rho <r>     visits after which a non-root node "
+				"FREEZES its\n                     permutation statistic "
+				"(default 32)\n  --qhat-nodes <n>   cap on the bandit's nodes "
+				"per worker (default 65536)\n"
+				"  --no-qhat-probe    do not print the first-decision probe\n"
+				"  --ctx-shrink <k>   TWO-LEVEL policy: one weight per move "
+				"AND one per (move,\n                     context), mixed "
+				"convexly by s = n/(n+k) where n is the\n"
+				"                     evidence of the contextual cell. "
+				"Negative k (default) =\n                     off. The "
+				"agreement curve printed by --adapt calibrates k\n"
+				"                     without spending a run.\n"
+				"  --ctx-max <n>      cap on the contextual level's entries "
+				"per worker (default\n                     262144, 0 = "
+				"unlimited)\n\nFINISHER\n  --finisher <mode>  levin "
+				"(Go-Explore archive + backtracks + Levin Tree\n"
+				"                     Search over the NRPA policy, the "
+				"default), mono (the old\n"
+				"                     one: the single best state), ab (both "
+				"at equal budget)\n  --archive-k <n>    size of the "
+				"finisher's state archive (default 16)\n"
+				"  --finisher-min <ms>  minimum budget RESERVED for the "
+				"finisher (0 = the\n                     original split)\n"
+				"  --levin-h <x>      PHS* weight of the distance to the goal "
+				"(missing cards +\n                     missing resolutions) "
+				"in the finisher's cost (default 1.0;\n"
+				"                     0 = pure Levin, blind to the goal)\n"
+				"  --reroot           sqrt-LTS with a HARD rerooter "
+				"(arXiv:2412.05196): the\n"
+				"                     finisher re-roots at every HINT (the "
+				"number of target\n                     cards placed "
+				"changes). With no hint, inert.\n"
+				"  --reroot-h <a>     sqrt-LTS-H with a HEURISTIC rerooter\n"
+				"                     (arXiv:2605.30664 section 3.2): weight "
+				"exp(-a*h/h0) on\n                     EVERY node, hence "
+				"active even when no hint lands.\n"
+				"                     a = inverse temperature (0 = off). "
+				"Exclusive with\n                     --reroot.\n"
+				"  --no-dive-full     do NOT push an arena level at every "
+				"replayed chain\n                     node (on by default)\n"
+				"  --no-merged-pop    do NOT merge the arena pop when "
+				"returning to the\n                     shared ancestor (on "
+				"by default)\n  --finisher-post-goal  under --optimize, a "
+				"goal node CONTINUES instead of\n"
+				"                     stopping (post-goal recovery)\n"
+				"  --finisher-options  the catalogue's macros become EDGES of "
+				"the Levin tree\n                     (cost log 1/pi, "
+				"advancing k decisions, an abort being a\n"
+				"                     dead edge)\n\nCOST OPTIMISATION\n"
+				"  --optimize         anytime COST OPTIMISATION: the search "
+				"no longer stops at\n                     the first solution "
+				"(each one tightens the bound), the\n"
+				"                     NRPA goal score becomes lexicographic "
+				"(burned, then\n                     actions, then "
+				"decisions), rollouts continue PAST the goal\n"
+				"                     (recoveries reduce the burned count), "
+				"and the finisher\n                     runs even when lines "
+				"already exist\n  --burn-slack <n>   slack of the burned B&B "
+				"bound (default 6): cut the states\n"
+				"                     above best_burned + n. Burned cards are "
+				"NOT monotonic\n                     (recoveries), and the "
+				"slack is measured on the reference.\n"
+				"                     255 = off.\n"
+				"  --burn-limit <n>   seed of the bound: best burned count "
+				"known in advance\n                     (0 = none)\n"
+				"  --no-burn-share    do NOT share the burned bound between "
+				"workers (default:\n                     shared, so a worker "
+				"that improves it cuts for all)\n\nOPPONENT TEST\n"
+				"  --fire <card>      adds the card to the opponent's hand "
+				"and makes the\n                     opponent PLAY it at "
+				"every window where it is legal (one\n"
+				"                     attempt per window); the search must "
+				"then close the board\n                     back up from the "
+				"post-injection state. The static guard\n"
+				"                     becomes a dynamic proof. The replays "
+				"produced only replay\n                     with --opp-hand "
+				"<card> in judge mode.\n  --fire-spare <c>   card that may be "
+				"SACRIFICED to answer: the target board\n"
+				"                     without it is also accepted at the goal "
+				"(answering with\n                     Zalen consumes Junk "
+				"Signal)\n  --fire-ms <ms>     search budget per window "
+				"(default 45000)\n  --fire-bake        bake the drawn card "
+				"into the header of the replays\n"
+				"                     produced (opponent deck, served into "
+				"the hand by the\n                     pseudo-shuffle), so "
+				"they replay from their own file and\n"
+				"                     EDOPro can watch them with no flag. The "
+				"card replaces the\n                     last card of the "
+				"opponent's original hand.\n"
+				"  --fire-no-chain <c>  no-chain list specific to the "
+				"post-injection\n                     continuation (the "
+				"global --no-chain lists are lifted\n"
+				"                     there). Stages a precise answer: "
+				"forbidding Crystal Wing\n"
+				"                     forces the Zalen+Junk Signal route. "
+				"Repeatable.\n  --fire-open        only inject at OPEN "
+				"windows (empty chain): the drawn card\n"
+				"                     STARTS a chain instead of being chained "
+				"onto our effects,\n                     which is the real "
+				"threat\n\nMEASUREMENT AND DIAGNOSTICS\n"
+				"  --growth           measure the growth of the state graph\n"
+				"  --growth-max <n>   maximum depth explored (default 14)\n"
+				"  --growth-ms <ms>   time budget per depth (default 20000)\n"
+				"  --width            measure the effective width (IW atoms) "
+				"along the\n                     reference line, with no "
+				"search\n  --watch <card>     card OBSERVED by "
+				"--probe-repeat, with NO constraint, no\n"
+				"                     gradient and no hint bias. Use it "
+				"whenever measuring\n                     whether the solver "
+				"finds something ON ITS OWN: --resolve\n"
+				"                     is a disguised hint (it receives "
+				"hint_bias\n                     automatically). Repeatable, "
+				"at most 4.\n  --probe-repeat     REPETITION PROBE: per "
+				"--summon-min/--resolve card, the\n"
+				"                     histogram of summons PER ROLLOUT and, "
+				"at the FIRST one,\n                     the recipe distance "
+				"to ONE MORE copy compared with the\n"
+				"                     same distance from the starting state. "
+				"Separates the two\n                     failures "
+				"best_overlap conflates: the 2nd copy NEVER\n"
+				"                     ATTEMPTED (the material was there, a "
+				"sampling failure)\n                     from the 2nd ALWAYS "
+				"LOST (the chain was consumed, an h\n"
+				"                     failure). Implies --recipes 0.\n"
+				"  --operators        DECLARED OPERATOR HARNESS: extracts the "
+				"operator table\n                     from the deck's LUA "
+				"SCRIPTS (preconditions, product,\n"
+				"                     granted state, recipes), prints it, "
+				"then CONFRONTS it\n                     with the replayed "
+				"plan. The constants come from the\n"
+				"                     game's constant.lua: no card is named "
+				"in the code. An\n                     instrument, not a "
+				"mechanism.\n  --profile          hot path profile (rdtsc "
+				"probes per phase, \"everything\n"
+				"                     else\" line included); the instrument "
+				"costs something, and\n                     quantifying it is "
+				"part of the measurement\n"
+				"  --no-arena         system allocator, no snapshot "
+				"(comparison)\n  --keep-gc          leave the Lua garbage "
+				"collector running (comparison)\n");
 }
 
 bool ParseArgs(int argc, char** argv, Options& o) {
@@ -2055,7 +2198,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		std::string a = argv[i];
 		auto next = [&](const char* what) -> const char* {
 			if(i + 1 >= argc) {
-				std::printf("!! %s attend une valeur\n", what);
+				std::printf("!! %s expects a value\n", what);
 				return nullptr;
 			}
 			return argv[++i];
@@ -2070,15 +2213,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--assign",           &Options::assign },
 				{ "--backward",         &Options::backward },
 				{ "--elide-forced",     &Options::elide_forced },
-				{ "--adapt-to-peak",    &Options::adapt_to_peak },
+				{ "--novelty-ab",       &Options::novelty_ab },
 				{ "--operators",        &Options::operators },
 				{ "--op-recipes",       &Options::op_recipes },
-				{ "--quota-legacy",     &Options::quota_legacy },
 				{ "--quota-h",          &Options::quota_h },
-				{ "--grid",             &Options::grid },
 				{ "--archive-fin",      &Options::archive_fin },
 				{ "--carry",            &Options::carry },
-				{ "--resolve-legacy",   &Options::resolve_legacy },
 				{ "--no-self-negate",   &Options::no_self_negate },
 				{ "--mp1-only",         &Options::mp1_only },
 			};
@@ -2169,6 +2309,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--hint") {
 			const char* v = next("--hint"); if(!v) return false;
 			o.hint_specs.emplace_back(v);
+		} else if(a == "--guard-keep") {
+			const char* v = next("--guard-keep"); if(!v) return false;
+			o.guard_keep_specs.emplace_back(v);
 		} else if(a == "--approach") {
 			const char* v = next("--approach"); if(!v) return false;
 			o.approach_files.emplace_back(v);
@@ -2224,7 +2367,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.finisher = v;
 			if(o.finisher != "levin" && o.finisher != "mono" &&
 			   o.finisher != "ab") {
-				std::printf("!! --finisher attend levin, mono ou ab\n");
+				std::printf("!! --finisher attend levin, mono "
+											"ou ab\n");
 				return false;
 			}
 		} else if(a == "--archive-k") {
@@ -2265,12 +2409,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.burn_limit = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--no-burn-share") {
 			o.burn_share = false;
-		} else if(a == "--prior") {
-			const char* v = next("--prior"); if(!v) return false;
-			o.prior_files.emplace_back(v);
-		} else if(a == "--prior-weight") {
-			const char* v = next("--prior-weight"); if(!v) return false;
-			o.prior_weight = std::atof(v);
 		} else if(a == "--adapt") {
 			const char* v = next("--adapt"); if(!v) return false;
 			o.adapt_files.emplace_back(v);
@@ -2283,26 +2421,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--options-support") {
 			const char* v = next("--options-support"); if(!v) return false;
 			o.options_support = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--options-len") {
-			const char* v = next("--options-len"); if(!v) return false;
-			o.options_len = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--options-window") {
-			const char* v = next("--options-window"); if(!v) return false;
-			o.options_window = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--options-ctx") {
-			const char* v = next("--options-ctx"); if(!v) return false;
-			o.options_ctx = std::atoi(v);
 		} else if(a == "--options-online") {
 			const char* v = next("--options-online"); if(!v) return false;
 			o.options_online = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--options-pool") {
-			const char* v = next("--options-pool"); if(!v) return false;
-			o.options_pool = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--options-per-worker") {
 			const char* v = next("--options-per-worker"); if(!v) return false;
 			o.options_per_worker = static_cast<uint32_t>(std::atoi(v));
-		} else if(a == "--merged-pop") {
-			o.merged_pop = true;
 		} else if(a == "--no-merged-pop") {
 			o.merged_pop = false;
 		} else if(a == "--finisher-post-goal") {
@@ -2312,17 +2436,16 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--max-decisions") {
 			const char* v = next("--max-decisions"); if(!v) return false;
 			o.max_decisions = static_cast<uint32_t>(std::atoi(v));
+		} else if(a == "--max-ecarts") {
+			const char* v = next("--max-ecarts"); if(!v) return false;
+			o.max_ecarts = static_cast<uint32_t>(std::atoi(v));
 		} else if(a == "--reroot") {
 			o.levin_reroot = true;
 		} else if(a == "--reroot-h") {
 			const char* v = next("--reroot-h"); if(!v) return false;
 			o.reroot_h = std::atof(v);
-		} else if(a == "--dive-full") {
-			o.dive_full = true;
 		} else if(a == "--no-dive-full") {
 			o.dive_full = false;
-		} else if(a == "--lifo-ties") {
-			o.lifo_ties = true;
 		} else if(a == "--no-plan") {
 			o.no_plan = true;
 		} else if(a == "--no-ref") {
@@ -2338,7 +2461,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--max-subsets"); if(!v) return false;
 			const int n = std::atoi(v);
 			if(n < 1 || n > 4096) {
-				std::printf("!! --max-subsets attend 1..4096 (recu %s)\n", v);
+				std::printf("!! --max-subsets attend 1..4096 "
+											"(recu %s)\n", v);
 				return false;
 			}
 			o.max_subsets = static_cast<uint32_t>(n);
@@ -2346,8 +2470,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--recipes"); if(!v) return false;
 			o.recipes = std::atof(v);
 			if(o.recipes < 0) {
-				std::printf("!! --recipes attend un poids >= 0 (0 = alimente et "
-							"mesure sans entrer dans le cout)\n");
+				std::printf("!! --recipes expects a weight >= "
+											"0 (0 = fed and measured without "
+											"entering the cost)\n");
 				return false;
 			}
 		} else if(a == "--landmarks") {
@@ -2357,28 +2482,32 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--landmark-w"); if(!v) return false;
 			o.landmark_weight = std::atof(v);
 			if(o.landmark_weight < 0) {
-				std::printf("!! --landmark-w attend un poids >= 0\n");
+				std::printf("!! --landmark-w expects a weight "
+											">= 0\n");
 				return false;
 			}
 		} else if(a == "--landmark-h") {
 			const char* v = next("--landmark-h"); if(!v) return false;
 			o.landmark_h = std::atof(v);
 			if(o.landmark_h < 0) {
-				std::printf("!! --landmark-h attend un poids >= 0\n");
+				std::printf("!! --landmark-h expects a weight "
+											">= 0\n");
 				return false;
 			}
 		} else if(a == "--hindsight") {
 			const char* v = next("--hindsight"); if(!v) return false;
 			o.hindsight = std::atof(v);
 			if(o.hindsight < 0) {
-				std::printf("!! --hindsight attend une fraction d'alpha >= 0\n");
+				std::printf("!! --hindsight expects a "
+											"fraction of alpha >= 0\n");
 				return false;
 			}
 		} else if(a == "--hindsight-k") {
 			const char* v = next("--hindsight-k"); if(!v) return false;
 			const long k = std::atol(v);
 			if(k <= 0) {
-				std::printf("!! --hindsight-k attend un entier > 0\n");
+				std::printf("!! --hindsight-k attend un "
+											"entier > 0\n");
 				return false;
 			}
 			o.hindsight_k = static_cast<size_t>(k);
@@ -2386,7 +2515,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--assign-bias"); if(!v) return false;
 			o.assign_bias = std::atof(v);
 			if(o.assign_bias < 0) {
-				std::printf("!! --assign-bias attend un poids >= 0\n");
+				std::printf("!! --assign-bias expects a "
+											"weight >= 0\n");
 				return false;
 			}
 		} else if(a == "--reenter") {
@@ -2394,7 +2524,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--reenter"); if(!v) return false;
 			o.reenter = std::atof(v);
 			if(o.reenter < 0.0 || o.reenter > 1.0) {
-				std::printf("!! --reenter attend une probabilite dans [0, 1]\n");
+				std::printf("!! --reenter expects a "
+											"probability in [0, 1]\n");
 				return false;
 			}
 		} else if(a == "--phase-w") {
@@ -2406,7 +2537,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--op-bias"); if(!v) return false;
 			o.op_bias = std::atof(v);
 			if(o.op_bias < 0) {
-				std::printf("!! --op-bias attend un poids >= 0\n");
+				std::printf("!! --op-bias expects a weight >= "
+											"0\n");
 				return false;
 			}
 		} else if(a == "--watch") {
@@ -2414,7 +2546,6 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.watch_specs.emplace_back(v);
 		} else if(a == "--probe-repeat") {
 			o.probe_repeat = true;
-		} else if(false) {
 		} else if(a == "--no-seed-recipes") {
 			o.seed_recipes = false;
 		} else if(a == "--no-seed-quant") {
@@ -2428,8 +2559,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			const char* v = next("--nrpa-level"); if(!v) return false;
 			o.nrpa_level = std::atoi(v);
 			if(o.nrpa_level < 1 || o.nrpa_level > 4) {
-				std::printf("!! --nrpa-level attend 1..4 (recu %s) ; 2 coute "
-							"~576 tirages par appel, 3 en coute ~13 824\n", v);
+				std::printf("!! --nrpa-level expects 1..4 "
+											"(got %s); 2 costs ~576 rollouts "
+											"per call, 3 costs ~13824\n", v);
 				return false;
 			}
 		} else if(a == "--ctx-shrink") {
@@ -2449,11 +2581,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.qhat_nodes = static_cast<size_t>(std::atoll(v));
 		} else if(a == "--no-qhat-probe") {
 			o.qhat_probe = false;
-		} else if(false) {
-		} else if(false) {
 		} else if(a == "--canonical-zones") {
 			o.canonical_zones = true;
-		} else if(false) {
 		} else if(a == "--target-subset") {
 			o.target_subset = true;
 		} else if(a == "--target-exact") {
@@ -2490,14 +2619,15 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 		} else if(a == "--verbose" || a == "-v") {
 			o.verbose = true;
 		} else if(a == "--help" || a == "-h") {
+			o.help = true;
 			return false;
 		} else if(!a.empty() && a[0] == '-') {
-			std::printf("!! option inconnue : %s\n", a.c_str());
+			std::printf("!! unknown option: %s\n", a.c_str());
 			return false;
 		} else if(o.replay.empty()) {
 			o.replay = a;
 		} else {
-			std::printf("!! argument en trop : %s\n", a.c_str());
+			std::printf("!! extra argument: %s\n", a.c_str());
 			return false;
 		}
 	}
@@ -2511,8 +2641,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 			o.workdir = env;
 	}
 	if(o.workdir.empty()) {
-		std::printf("!! no EDOPro installation: pass --workdir <dir>, or set the "
-					"COMBOSOLVER_WORKDIR environment variable\n");
+		std::printf("!! no EDOPro installation: pass --workdir <dir>, "
+							"or set the COMBOSOLVER_WORKDIR environment "
+							"variable\n");
 		return false;
 	}
 	return !o.replay.empty();
@@ -2535,9 +2666,9 @@ bool ResolveCard(const std::string& item, const CardDB& db, const char* flag,
 		return true;
 	}
 	if(matches.empty()) {
-		std::printf("!! %s : aucune carte ne contient \"%s\"\n", flag, item.c_str());
+		std::printf("!! %s: no card contains \"%s\"\n", flag, item.c_str());
 	} else {
-		std::printf("!! %s : \"%s\" est ambigu (%zu cartes) :\n", flag,
+		std::printf("!! %s: \"%s\" is ambiguous (%zu cards):\n", flag,
 					item.c_str(), matches.size());
 		for(size_t i = 0; i < matches.size() && i < 8; ++i)
 			std::printf("     %9u  %s\n", matches[i].first,
@@ -2608,8 +2739,8 @@ bool ResolveCardZone(const std::string& item, const CardDB& db, const char* flag
 	std::string card = (at == std::string::npos) ? item : item.substr(0, at);
 	std::string zone = (at == std::string::npos) ? "field" : item.substr(at + 1);
 	if(!ZoneMaskOf(Trimmed(zone), zones)) {
-		std::printf("!! %s : unknown zone \"%s\" (hand field grave banished "
-					"extra)\n", flag, zone.c_str());
+		std::printf("!! %s : unknown zone \"%s\" (hand field grave "
+							"banished extra)\n", flag, zone.c_str());
 		return false;
 	}
 	return ResolveCard(Trimmed(card), db, flag, code);
@@ -2623,8 +2754,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		int n = (colon == std::string::npos)
 			? 0 : std::atoi(spec.substr(0, colon).c_str());
 		if(n <= 0) {
-			std::printf("!! --summon \"%s\" : forme attendue n:carte[|carte...], "
-						"n >= 1\n", spec.c_str());
+			std::printf("!! --summon \"%s\": expected form "
+									"n:card[|card...], n >= 1\n", spec.c_str());
 			return false;
 		}
 		std::vector<uint32_t> allowed;
@@ -2637,7 +2768,7 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 			allowed.push_back(code);
 		}
 		if(allowed.empty()) {
-			std::printf("!! --summon \"%s\" : aucune carte donnee\n", spec.c_str());
+			std::printf("!! --summon \"%s\": no card given\n", spec.c_str());
 			return false;
 		}
 		auto& slot = out.summons[static_cast<uint32_t>(n)];
@@ -2645,7 +2776,7 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 	}
 
 	if(opt.guard_specs.size() > 1) {
-		std::printf("!! --guard : une seule garde a la fois\n");
+		std::printf("!! --guard: one guard at a time\n");
 		return false;
 	}
 	for(const std::string& spec : opt.guard_specs) {
@@ -2653,7 +2784,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		int n = (colon == std::string::npos)
 			? 0 : std::atoi(spec.substr(0, colon).c_str());
 		if(n <= 0) {
-			std::printf("!! --guard \"%s\" : forme attendue n:clause[|clause...]\n",
+			std::printf("!! --guard \"%s\" : forme attendue "
+									"n:clause[|clause...]\n",
 						spec.c_str());
 			return false;
 		}
@@ -2679,8 +2811,10 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 					unsigned long v = std::strtoul(
 						trimmed.c_str() + pfx.size(), &end, 10);
 					if(!end || *end != '\0' || v == 0 || v > 0xffff) {
-						std::printf("!! --guard: \"%s\" - expected form "
-									"oppbanished>=N (N >= 1)\n",
+						std::printf("!! --guard: \"%s\" "
+															"- expected form "
+															"oppbanished>=N (N "
+															">= 1)\n",
 									trimmed.c_str());
 						return false;
 					}
@@ -2697,7 +2831,7 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 				out.guard.push_back(std::move(clause));
 		}
 		if(out.guard.empty()) {
-			std::printf("!! --guard \"%s\" : aucune clause\n", spec.c_str());
+			std::printf("!! --guard \"%s\": no clause\n", spec.c_str());
 			return false;
 		}
 	}
@@ -2720,7 +2854,7 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 
 	for(const std::string& spec : opt.resolve_specs) {
 		if(out.resolve_min.size() >= 4) {
-			std::printf("!! --resolve : au plus 4 cartes surveillees\n");
+			std::printf("!! --resolve: at most 4 cards watched\n");
 			return false;
 		}
 		// "card[:n]": the n is the suffix after the LAST ':' when it is numeric;
@@ -2744,8 +2878,9 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		size_t at = card.rfind('@');
 		if(at != std::string::npos) {
 			if(!ZoneMaskOf(Trimmed(card.substr(at + 1)), req.zones)) {
-				std::printf("!! --resolve : zone inconnue \"%s\" (main terrain "
-							"cimetiere banni extra)\n",
+				std::printf("!! --resolve: unknown zone "
+											"\"%s\" (hand field grave "
+											"banished extra)\n",
 							card.substr(at + 1).c_str());
 				return false;
 			}
@@ -2758,8 +2893,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 
 	for(const std::string& spec : opt.summon_min_specs) {
 		if(out.resolve_min.size() >= 4) {
-			std::printf("!! --resolve/--summon-min : au plus 4 cartes "
-						"surveillees\n");
+			std::printf("!! --resolve/--summon-min: at most 4 "
+									"cards watched\n");
 			return false;
 		}
 		std::string card = spec;
@@ -2789,6 +2924,13 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		out.hints.push_back(code);
 	}
 
+	for(const std::string& spec : opt.guard_keep_specs) {
+		uint32_t code = 0;
+		if(!ResolveCard(Trimmed(spec), db, "--guard-keep", code))
+			return false;
+		out.guard_keep.push_back(db.Canonical(code));
+	}
+
 	for(const std::string& spec : opt.opp_hand_specs) {
 		for(const std::string& item : SplitOn(spec, '|')) {
 			if(item.empty())
@@ -2812,7 +2954,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		if(pos == "ATK")      position = POS_FACEUP_ATTACK;
 		else if(pos == "DEF") position = POS_FACEUP_DEFENSE;
 		else {
-			std::printf("!! %s : position inconnue \"%s\" (ATK ou DEF)\n",
+			std::printf("!! %s: unknown position \"%s\" (ATK or "
+									"DEF)\n",
 						flag, pos.c_str());
 			return false;
 		}
@@ -2841,7 +2984,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 	for(const std::string& spec : opt.material_specs) {
 		size_t colon = spec.rfind(':');
 		if(colon == std::string::npos) {
-			std::printf("!! --material \"%s\" : forme attendue carte:attr[,attr]\n",
+			std::printf("!! --material \"%s\": expected form "
+									"card:attr[,attr]\n",
 						spec.c_str());
 			return false;
 		}
@@ -2860,8 +3004,9 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 			else { attrs_ok = false; break; }
 		}
 		if(!attrs_ok || !mask) {
-			std::printf("!! --material \"%s\": attributes expected after ':' "
-						"(light dark earth water fire wind divine)\n",
+			std::printf("!! --material \"%s\": attributes "
+									"expected after ':' (light dark earth "
+									"water fire wind divine)\n",
 						spec.c_str());
 			return false;
 		}
@@ -2878,14 +3023,16 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		if(s.compare(0, plen, prefix) != 0) {
 			prefix = "mainadv<=";        // accepted alias
 			if(s.compare(0, plen, prefix) != 0) {
-				std::printf("!! --guard-off \"%s\": expected form opphand<=N\n",
+				std::printf("!! --guard-off \"%s\": expected "
+											"form opphand<=N\n",
 							s.c_str());
 				return false;
 			}
 		}
 		out.guard_opp_hand_release = std::atoi(s.c_str() + plen);
 		if(out.guard.empty()) {
-			std::printf("!! --guard-off without --guard: nothing to turn off\n");
+			std::printf("!! --guard-off without --guard: nothing "
+									"to turn off\n");
 			return false;
 		}
 	}
@@ -3172,7 +3319,8 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 				if(opt.verbose && m.size >= 4) {
 					uint32_t vc = 0;
 					std::memcpy(&vc, m.data, 4);
-					std::printf("      [chaine %lld] %s  (activation %s)\n",
+					std::printf("      [chain %lld] %s  "
+													"(activation %s)\n",
 								r.chaining,
 								duel.Db().Name(duel.Db().Canonical(vc)).c_str(),
 								ZoneMaskName(ChainingLocation(m.data, m.size))
@@ -3220,7 +3368,8 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 				if(info.dedup > 0) r.log_dedup += std::log10(double(info.dedup));
 			}
 			if(opt.verbose)
-				std::printf("  #%-4zu T%d %-8s %-22s brut=%-10.0Lf dedup=%-8.0Lf %s\n",
+				std::printf("  #%-4zu T%d %-8s %-22s "
+											"raw=%-10.0Lf dedup=%-8.0Lf %s\n",
 							r.responses_used, r.turns, PhaseName(phase),
 							PromptName(m.type), info.raw, info.dedup,
 							info.detail.c_str());
@@ -3313,7 +3462,7 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 		} else if(status == OCG_DUEL_STATUS_END) {
 			break;
 		} else if(status != OCG_DUEL_STATUS_CONTINUE) {
-			std::printf("\n!! statut de duel inattendu : %d\n", status);
+			std::printf("\n!! unexpected duel status: %d\n", status);
 			break;
 		}
 	}
@@ -3330,16 +3479,18 @@ LineResult RunLine(Duel& duel, const Replay& yrp, const Options& opt,
 
 void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 				const Options& opt) {
-	std::printf("\n=== resultats ===\n");
-	std::printf("  reponses consommees : %zu / %zu\n", r.responses_used,
+	std::printf("\nresults\n");
+	std::printf("  answers consumed    : %zu / %zu\n", r.responses_used,
 				yrp.responses.size());
 	std::printf("  MSG_RETRY           : %zu   %s\n", r.retries,
-				r.retries ? "<-- REJEU DIVERGENT, mesures invalides"
-						  : "(rejeu fidele)");
-	std::printf("  tours joues         : %d\n", r.turns);
+				r.retries ? "<-- DIVERGENT REPLAY, "
+											"measurements invalid"
+						  : "(faithful replay)");
+	std::printf("  turns played        : %d\n", r.turns);
 	if(r.have_target)
-		std::printf("  brulees             : %u au board, pic %u en cours de "
-					"ligne (marge de recuperation %d — calibre --burn-slack)\n",
+		std::printf("  burned              : %u at the board, peak %u "
+							"along the line (recovery margin %d - calibrates "
+							"--burn-slack)\n",
 					r.burned_at_target, r.burned_max,
 					static_cast<int>(r.burned_max) -
 						static_cast<int>(r.burned_at_target));
@@ -3347,8 +3498,8 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 		// A solution line stops in turn 1 without capturing a target: its peak
 		// is still the datum that calibrates --burn-slack (the slack must cover
 		// the recovery of the BEST line, not only the reference's).
-		std::printf("  brulees             : pic %u en cours de ligne (pas de "
-					"board cible capture)\n", r.burned_max);
+		std::printf("  burned              : peak %u along the line "
+							"(no target board captured)\n", r.burned_max);
 
 	int total = 0, forced = 0, binary = 0, decoded = 0;
 	for(const auto& [type, s] : r.stats) {
@@ -3360,40 +3511,48 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 	std::vector<std::pair<uint8_t, Stat>> ordered(r.stats.begin(), r.stats.end());
 	std::sort(ordered.begin(), ordered.end(),
 			  [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
+	// Per-type breakdown and elision potential: they measure the SOLVER's input,
+	// not the duel. The scale of the problem stays below, at the default level.
+	if(g_verbose) {
+		std::printf("\n--- decision points by type ---\n");
+		std::printf("  %-24s%6s%12s%11s%12s%11s\n", "type", "n", "raw avg",
+					"raw max", "dedup avg", "dedup max");
+		for(const auto& [type, s] : ordered) {
+			const int d = s.n - s.undecoded;
+			if(d > 0)
+				std::printf("  %-24s%6d%12.1Lf%11.0Lf%11.1Lf%1"
+											"1.0Lf\n",
+							PromptName(type), s.n, s.raw_sum / d, s.raw_max,
+							s.dedup_sum / d, s.dedup_max);
+			else
+				std::printf("  %-24s%6d%12s\n", PromptName(type), s.n,
+							"not decoded");
+		}
+		std::printf("  %-24s%6d\n", "TOTAL", total);
 
-	std::printf("\n--- points de decision par type ---\n");
-	std::printf("  %-24s%6s%12s%11s%12s%11s\n", "type", "n", "brut moy",
-				"brut max", "dedup moy", "dedup max");
-	for(const auto& [type, s] : ordered) {
-		int d = s.n - s.undecoded;
-		if(d > 0)
-			std::printf("  %-24s%6d%12.1Lf%11.0Lf%11.1Lf%11.0Lf\n", PromptName(type),
-						s.n, s.raw_sum / d, s.raw_max, s.dedup_sum / d, s.dedup_max);
-		else
-			std::printf("  %-24s%6d%12s\n", PromptName(type), s.n, "non decode");
+		std::printf("\n--- elision potential (a single legal answer) "
+							"---\n");
+		for(const auto& [type, s] : ordered) {
+			const int d = s.n - s.undecoded;
+			if(d > 0 && s.forced)
+				std::printf("  %-24s %4d / %-4d forced  "
+											"(%.0f%%)\n",
+							PromptName(type), s.forced, d, 100.0 * s.forced / d);
+		}
+		std::printf("  %-24s %4d / %-4d forced  (%.0f%%)\n", "TOTAL", forced,
+					decoded, decoded ? 100.0 * forced / decoded : 0.0);
+		std::printf("  => depth after elision : %d instead of %d\n",
+					decoded - forced, decoded);
 	}
-	std::printf("  %-24s%6d\n", "TOTAL", total);
 
-	std::printf("\n--- potentiel d'elision (une seule reponse legale) ---\n");
-	for(const auto& [type, s] : ordered) {
-		int d = s.n - s.undecoded;
-		if(d > 0 && s.forced)
-			std::printf("  %-24s %4d / %-4d forcees  (%.0f%%)\n", PromptName(type),
-						s.forced, d, 100.0 * s.forced / d);
-	}
-	std::printf("  %-24s %4d / %-4d forcees  (%.0f%%)\n", "TOTAL", forced, decoded,
-				decoded ? 100.0 * forced / decoded : 0.0);
-	std::printf("  => profondeur apres elision : %d au lieu de %d\n",
-				decoded - forced, decoded);
-
-	std::printf("\n--- ordre de grandeur du branchement le long de CETTE ligne ---\n");
-	std::printf("  produit des branchements bruts : 10^%.1Lf\n", r.log_raw);
-	std::printf("  apres dedup par code           : 10^%.1Lf\n", r.log_dedup);
-	std::printf("  (indicateur d'echelle, PAS un decompte de feuilles : changer un\n"
-				"   choix precoce modifie les prompts suivants.)\n");
+	std::printf("\n--- possible lines along THIS line ---\n");
+	std::printf("  raw branching product          : 10^%.1Lf\n", r.log_raw);
+	std::printf("  after dedup by code            : 10^%.1Lf\n", r.log_dedup);
+	std::printf("  (scale indicator, NOT a leaf count: changing an early\n"
+					"   choice changes the prompts that follow.)\n");
 
 	if(r.have_start) {
-		std::printf("\n--- position de depart (joueur %d) ---\n", opt.target_player);
+		std::printf("\n--- starting position (player %d) ---\n", opt.target_player);
 		for(const auto& c : r.start_self.hand_cards)
 			if(c.present)
 				std::printf("      MAIN      %9u  %s\n", c.Code(),
@@ -3402,10 +3561,10 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 					r.start_self.extra);
 	}
 
-	std::printf("\n--- cout de la ligne de reference ---\n");
-	std::printf("  invocations normales   : %lld\n", r.summon);
-	std::printf("  invocations speciales  : %lld\n", r.spsummon);
-	std::printf("  invocations flip       : %lld\n", r.flipsummon);
+	std::printf("\n--- cost of the reference line ---\n");
+	std::printf("  normal summons         : %lld\n", r.summon);
+	std::printf("  special summons        : %lld\n", r.spsummon);
+	std::printf("  flip summons           : %lld\n", r.flipsummon);
 	std::printf("  activations            : %lld\n", r.chaining);
 	std::printf("  A_ref (tier 2)         : %lld\n",
 				r.summon + r.spsummon + r.flipsummon + r.chaining);
@@ -3418,21 +3577,24 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 		size_t on_board = CountPresent(r.target_self.mzone) +
 						  CountPresent(r.target_self.szone);
 		size_t burned = r.target_self.grave + r.target_self.removed;
-		std::printf("\n--- board cible (%s, joueur %d) ---\n",
+		std::printf("\n--- target board (%s, player %d) ---\n",
 					r.target_at_is_end
-						? "FIN DE L'ENREGISTREMENT : la ligne ne passe pas le tour"
-						: "fin du tour",
+						? "END OF THE RECORDING: the "
+												"line does not get through "
+												"the turn"
+						: "end of turn",
 					opt.target_player);
-		std::printf("    capture apres la reponse #%zu\n", r.target_at);
+		std::printf("    captured after answer #%zu\n", r.target_at);
 		PrintBoard(r.target_self, db);
-		std::printf("\n  C_ref (tier 1) = cartes hors main/deck/extra\n");
-		std::printf("    total joueur %d        : %zu\n", opt.target_player, owned);
-		std::printf("    restant main+deck+xtra: %zu\n", left);
+		std::printf("\n  C_ref (tier 1) = cards outside "
+							"hand/deck/extra\n");
+		std::printf("    player %d total        : %zu\n", opt.target_player, owned);
+		std::printf("    left in hand+deck+extra: %zu\n", left);
 		std::printf("    => consommees         : %zu\n", owned - left);
-		std::printf("       dont sur le board  : %zu  (constant : impose par le "
-					"critere d'equivalence)\n", on_board);
-		std::printf("       dont brulees GY/ban: %zu  <-- c'est CELA que le "
-					"solveur doit minimiser\n", burned);
+		std::printf("       of which on the board : %zu  (constant: "
+							"fixed by the equivalence criterion)\n", on_board);
+		std::printf("       of which burned to GY/banished: %zu  <-- "
+							"THIS is what the solver minimises\n", burned);
 
 		// Itemised list of the cards consumed. Without it one cannot say whether
 		// ANOTHER deck has what it takes to rebuild this board: only the detail allows
@@ -3443,11 +3605,12 @@ void ReportLine(const LineResult& r, const Replay& yrp, const CardDB& db,
 								 &r.target_self.mzone, &r.target_self.szone })
 			for(const auto& [code, n] : CodeCounts(*zone, db))
 				spent[code] += n;
-		std::printf("\n--- cartes engagees par la ligne (board + GY + bannies) ---\n");
+		std::printf("\n--- cards the line engages (board + GY + "
+							"banished) ---\n");
 		for(const auto& [code, n] : spent)
 			std::printf("      %dx %9u  %s\n", n, code, db.Name(code).c_str());
 	} else {
-		std::printf("\n!! le tour du joueur cible ne s'est pas termine\n");
+		std::printf("\n!! the target player's turn did not end\n");
 	}
 }
 
@@ -3463,7 +3626,8 @@ void ReportDirty(const LineResult& r, const Arena& arena, double ms_per_decision
 												   size_t(q * v.size()))]; };
 	double avg = double(sum) / v.size();
 	auto kb = [&](double pages) { return pages * page / 1024.0; };
-	std::printf("\n--- pages salies pour avancer d'UNE decision (%zu mesures) ---\n",
+	std::printf("\n--- pages dirtied to advance ONE decision (%zu "
+					"measurements) ---\n",
 				v.size());
 	std::printf("  mediane : %6zu pages  (%7.0f Ko)\n", pct(0.5), kb(double(pct(0.5))));
 	std::printf("  moyenne : %6.0f pages  (%7.0f Ko)\n", avg, kb(avg));
@@ -3474,17 +3638,19 @@ void ReportDirty(const LineResult& r, const Arena& arena, double ms_per_decision
 	// restore once, at ~10 GB/s of memory bandwidth.
 	double bytes_push = 2.0 * avg * page, bytes_pop = avg * page;
 	double ms_push = bytes_push / 10e9 * 1000.0, ms_pop = bytes_pop / 10e9 * 1000.0;
-	std::printf("\n  projection d'un instantane incremental, par noeud explore :\n");
-	std::printf("    copie a l'empilement  : %7.0f Ko -> %.3f ms\n",
+	std::printf("\n  projection of an incremental snapshot, per node "
+					"explored:\n");
+	std::printf("    copy on push           : %7.0f KB -> %.3f ms\n",
 				bytes_push / 1024.0, ms_push);
-	std::printf("    copie a la restauration: %6.0f Ko -> %.3f ms\n",
+	std::printf("    copy on restore        : %6.0f KB -> %.3f ms\n",
 				bytes_pop / 1024.0, ms_pop);
 	if(r.write_watch_calls) {
 		double ww = r.ms_write_watch / r.write_watch_calls;
-		std::printf("    GetWriteWatch mesure   : %.3f ms par appel, 2 appels/noeud\n", ww);
+		std::printf("    GetWriteWatch measured : %.3f ms per call, 2 "
+							"calls/node\n", ww);
 		double total = ms_push + ms_pop + 2 * ww;
-		std::printf("    total instantane       : %.3f ms  contre %.3f ms de travail"
-					"  => %.0f%% de surcout\n", total, ms_per_decision,
+		std::printf("    snapshot total         : %.3f ms  against "
+							"%.3f ms of work  => %.0f%% overhead\n", total, ms_per_decision,
 					ms_per_decision > 0 ? 100.0 * total / ms_per_decision : 0.0);
 	}
 }
@@ -3533,7 +3699,9 @@ size_t Advance(Duel& duel, const Replay& yrp, size_t from, size_t n,
 // patience. A width that is not measured is not promised.
 uint32_t MeasureWidth(Duel& duel, const Replay& yrp, const Options& opt,
 					  Arena& arena, const LineResult& ref) {
-	std::printf("\n=== largeur effective (atomes IW) le long de la reference ===\n");
+	if(g_verbose)
+		std::printf("\n--- effective width (IW atoms) along the "
+							"reference ---\n");
 	while(arena.Depth() > 1)
 		arena.Pop();
 	if(arena.Depth() == 0)
@@ -3576,26 +3744,39 @@ uint32_t MeasureWidth(Duel& duel, const Replay& yrp, const Options& opt,
 	}
 	arena.Restore();
 
-	std::printf("  etats visites            : %u\n", states);
-	std::printf("  atomes distincts         : %zu  (%zu avec serialisation)\n",
-				flat.Size(), serial.Size());
-	std::printf("  etats muets (rien de neuf): %u (%.0f%%)  |  serialise : %u (%.0f%%)\n",
-				mute_flat, states ? 100.0 * mute_flat / states : 0.0,
-				mute_serial, states ? 100.0 * mute_serial / states : 0.0);
-	std::printf("  plus longue serie muette : %u  |  serialise : %u\n",
-				max_flat, max_serial);
+	if(g_verbose) {
+		std::printf("  states visited           : %u\n", states);
+		std::printf("  distinct atoms           : %zu  (%zu "
+							"serialised)\n",
+					flat.Size(), serial.Size());
+		std::printf("  mute states (nothing new): %u (%.0f%%)  |  "
+							"serialised: %u (%.0f%%)\n",
+					mute_flat, states ? 100.0 * mute_flat / states : 0.0,
+					mute_serial, states ? 100.0 * mute_serial / states : 0.0);
+		std::printf("  longest mute run         : %u  |  serialised: "
+							"%u\n",
+					max_flat, max_serial);
+	}
 
 	// The patience must cover the longest mute run of the known line, with a
 	// margin: another deck can be a little more talkative in silences.
 	uint32_t patience = (std::max)(12u, max_serial + 4u);
 	if(opt.novelty >= 0)
 		patience = static_cast<uint32_t>(opt.novelty);
-	std::printf("  => patience %s : %u decisions%s\n",
-				opt.novelty >= 0 ? "imposee" : "retenue", patience,
-				patience == 0 ? "  (elagage DESACTIVE)" : "");
-	if(max_flat + 4 > patience && patience)
-		std::printf("     (une ligne non serialisee aurait demande %u : la\n"
-					"      serialisation du but reduit le silence)\n", max_flat + 4);
+	char wl[80];
+	std::snprintf(wl, sizeof(wl), "novelty patience %u%s", patience,
+				  patience == 0 ? " (pruning OFF)"
+								: (opt.novelty >= 0 ? " (forced)" : ""));
+	g_width_line = wl;
+	if(g_verbose) {
+		std::printf("  => patience %s : %u decisions%s\n",
+					opt.novelty >= 0 ? "forced" : "chosen", patience,
+					patience == 0 ? "  (pruning DISABLED)" : "");
+		if(max_flat + 4 > patience && patience)
+			std::printf("     (an unserialised line would have "
+									"asked for %u: serialising the goal "
+									"shortens the silence)\n", max_flat + 4);
+	}
 	return patience;
 }
 
@@ -3662,7 +3843,6 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	cfg.levin_reroot = opt.levin_reroot;
 	cfg.reroot_h = static_cast<float>(opt.reroot_h);
 	cfg.dive_full = opt.dive_full;
-	cfg.lifo_ties = opt.lifo_ties;
 	cfg.merged_pop = opt.merged_pop;
 	cfg.finisher_post_goal = opt.finisher_post_goal;
 	cfg.finisher_options = opt.finisher_options;
@@ -3701,9 +3881,6 @@ void ApplyMechanisms(const Options& opt, SearchConfig& cfg) {
 	// Path quotas in the LP. Only bites at refinement time: with no refine_after
 	// and no model it is inert, and ReportMechanisms SAYS so.
 	cfg.quota_h = opt.quota_h;
-	// The grid (rips x overlap). Only bites without armed serialisation and with
-	// --resolve; ReportMechanisms SAYS so.
-	cfg.grid = opt.grid;
 }
 
 // THE CHECK THAT WAS MISSING, and it is the real lesson of the wiring census.
@@ -3756,20 +3933,11 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 	if(cfg.landmark_h > 0.0f)
 		dep(cfg.landmarks != nullptr, "landmark-h %.2f", cfg.landmark_h);
 	// The return to the rung requires a STRUCTURE of cells: the ladder
-	// (serial_reqs) or the grid. Without one of the two, an archive cell is a
-	// cache, not a frontier, and the mechanism is deliberately inert. Saying so
-	// here avoids a stillborn measurement.
+	// (serial_reqs). Without it an archive cell is a cache, not a frontier, and
+	// the mechanism is deliberately inert. Saying so avoids a stillborn
+	// measurement.
 	if(cfg.reenter > 0.0f)
-		dep(!cfg.serial_reqs.empty() ||
-				(cfg.grid && !cfg.resolve_min.empty()),
-			"reenter %.2f", cfg.reenter);
-	// The grid requires --resolve (the rips dimension of the cell) and a regime
-	// WITHOUT armed serialisation (under the ladder, the ladder key keeps
-	// control; the combination is a future measurement, not a default).
-	if(cfg.grid)
-		dep(!cfg.resolve_min.empty() && cfg.serial_reqs.empty() &&
-				cfg.archive_k != 0,
-			"grid");
+		dep(!cfg.serial_reqs.empty(), "reenter %.2f", cfg.reenter);
 	// The refinement requires the ladder AND the balance model to be lent.
 	if(cfg.refine_after)
 		dep(!cfg.serial_reqs.empty() && cfg.balance != nullptr,
@@ -3782,10 +3950,10 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 			"quota-h");
 
 	std::printf("  MECANISMES [%s] : %s\n", mode,
-				on.empty() ? "aucun (defauts du moteur)" : on.c_str());
+				on.empty() ? "none (engine defaults)" : on.c_str());
 	if(!inert.empty())
-		std::printf("!! DEMANDE mais INERTE ici (dependance absente dans ce "
-					"mode) : %s\n", inert.c_str());
+		std::printf("!! REQUESTED but INERT here (dependency absent "
+							"in this mode): %s\n", inert.c_str());
 }
 
 // A single test only proves one thing: Push/Pop works at depth 1. A log
@@ -3796,7 +3964,8 @@ int RunStressTest(Duel& duel, const Replay& yrp, const Options& opt, Arena& aren
 				  uint64_t expected_final) {
 	// Entry AND exit invariant of every case: depth 1, duel at the start of the
 	// line. We return there through Restore(), which preserves the level.
-	std::printf("\n=== test de stress des instantanes ===\n");
+	if(g_verbose)
+		std::printf("\n--- snapshot stress test ---\n");
 	while(arena.Depth() > 1)
 		arena.Pop();
 	if(arena.Depth() == 0)
@@ -3814,7 +3983,8 @@ int RunStressTest(Duel& duel, const Replay& yrp, const Options& opt, Arena& aren
 		uint64_t ref = Fingerprint(duel);
 		for(int step = 0; step < 12 && at + 8 < yrp.responses.size(); ++step) {
 			if(opt.verbose)
-				std::printf("    [freres] etape %d, decision %zu, profondeur %zu\n",
+				std::printf("    [siblings] step %d, decision "
+											"%zu, depth %zu\n",
 							step, at, arena.Depth());
 			arena.Push();
 			size_t k = Advance(duel, yrp, at, 8);
@@ -3868,20 +4038,24 @@ int RunStressTest(Duel& duel, const Replay& yrp, const Options& opt, Arena& aren
 		if(full.retries || full.fingerprint_final != expected_final)
 			++fail;
 		arena.Restore();
-		cases.push_back({ "ligne complete rejouee apres stress", fail, 1 });
+		cases.push_back({ "full line replayed after stress", fail, 1 });
 	}
 
 	double ms = MsSince(t0);
-	int total_fail = 0;
+	int total_fail = 0, total_checks = 0;
 	for(const auto& c : cases) {
-		std::printf("  %-42s %3d/%-3d %s\n", c.name, c.checks - c.failures,
-					c.checks, c.failures ? "<-- ECHEC" : "ok");
+		if(g_verbose)
+			std::printf("  %-42s %3d/%-3d %s\n", c.name, c.checks - c.failures,
+						c.checks, c.failures ? "<-- FAILED" : "ok");
 		total_fail += c.failures;
+		total_checks += c.checks;
 	}
-	std::printf("  duree du test : %.0f ms\n", ms);
-	std::printf("  => %s\n", total_fail == 0
-		? "les instantanes resistent a l'imbrication et aux restaurations repetees"
-		: "DEFAUT dans le mecanisme d'instantane");
+	if(g_verbose)
+		std::printf("  test duration : %.0f ms\n", ms);
+	g_stress_line = "stress " + std::to_string(total_checks - total_fail) + "/" +
+					std::to_string(total_checks) + "/" + std::to_string(total_fail);
+	if(total_fail)
+		std::printf("!! snapshot stress test: %d check(s) FAILED\n", total_fail);
 	return total_fail ? 1 : 0;
 }
 
@@ -3907,40 +4081,59 @@ bool ReportConstraints(const LineConstraints& cons, const LineResult& ref,
 					   const CardDB& db) {
 	if(!cons.Any())
 		return true;
-	std::printf("\n--- contraintes de ligne ---\n");
+	std::printf("\n--- line constraints ---\n");
 	for(const auto& [n, allowed] : cons.summons) {
-		std::printf("  invocation #%u parmi :", n);
+		std::printf("  summon #%u among:", n);
 		for(uint32_t c : allowed)
 			std::printf(" %s;", db.Name(c).c_str());
 		std::printf("\n");
 	}
 	if(!cons.guard.empty()) {
-		std::printf("  garde des l'invocation #%u, aux fenetres adverses :\n",
+		std::printf("  guard from summon #%u on, at the opponent "
+							"windows:\n",
 					cons.guard_after);
 		for(size_t i = 0; i < cons.guard.size(); ++i) {
-			std::printf("    %s", i ? "OU  " : "    ");
+			std::printf("    %s", i ? "OR  " : "    ");
 			for(size_t j = 0; j < cons.guard[i].size(); ++j)
 				std::printf("%s%s", j ? " + " : "",
 							db.Name(cons.guard[i][j].code).c_str());
 			std::printf("\n");
 		}
 		if(cons.guard_opp_hand_release >= 0)
-			std::printf("    eteinte quand la main adverse <= %d carte(s) "
-						"(handrip)\n", cons.guard_opp_hand_release);
+			std::printf("    off once the opponent hand is <= %d "
+									"card(s) (handrip)\n", cons.guard_opp_hand_release);
 	}
+	// The derived negation list is printed at load time; naming it HERE too is
+	// what makes this section the full account of the disciplines in force.
+	if(!cons.self_negate.empty())
+		std::printf("  no self-negation: %zu of the deck's own negation effect(s)"
+					" never chained onto our own links (--no-self-negate)\n",
+					cons.self_negate.size());
+	// --guard-keep OUTSIDE the guard block: with no --guard there is no clause for
+	// the resource to rest on, so the discipline is INERT. Saying it here is the
+	// difference between "the window never came up" and "the flag does nothing".
+	for(uint32_t c : cons.guard_keep)
+		std::printf("  guard resource: %s%s\n", db.Name(c).c_str(),
+					cons.guard.empty()
+						? " !! INERT: --guard-keep needs --guard, there is no"
+						  " clause for it to rest on"
+						: " never activated in the main phase while no other"
+						  " clause covers (--guard-keep)");
 	for(const auto& [code, zones] : cons.no_activate)
-		std::printf("  activation interdite : %s (masque zones 0x%x)\n",
+		std::printf("  activation forbidden: %s (zone mask 0x%x)\n",
 					db.Name(code).c_str(), zones);
 	for(const auto& rq : cons.resolve_min)
-		std::printf("  resolutions exigees  : %s x%u%s%s\n",
+		std::printf("  resolutions required : %s x%u%s%s\n",
 					db.Name(rq.code).c_str(), rq.min_count,
-					rq.zones ? ", activee depuis " : "",
+					rq.zones ? ", activated from" : "",
 					rq.zones ? ZoneMaskName(rq.zones).c_str() : "");
 	for(const auto& [code, mask] : cons.material_req)
-		std::printf("  materiau exige       : %s invoque avec >=1 attribut 0x%x\n",
+		std::printf("  material required    : %s summoned with >=1 "
+							"attribute 0x%x\n",
 					db.Name(code).c_str(), mask);
 
-	std::printf("\n  sequence de la reference (%zu invocations jusqu'au board) :\n",
+	std::printf("\n  sequence of the reference (%zu summons up to the "
+					"board):\n",
 				ref.summons_at_target);
 	for(size_t i = 0; i < ref.summons_at_target && i < ref.summon_codes.size(); ++i)
 		std::printf("      #%-3zu %s\n", i + 1,
@@ -3951,47 +4144,52 @@ bool ReportConstraints(const LineConstraints& cons, const LineResult& ref,
 			continue;   // conditional semantics: no n-th summon, no fault
 		uint32_t canon = db.Canonical(ref.summon_codes[n - 1]);
 		if(std::find(allowed.begin(), allowed.end(), canon) == allowed.end()) {
-			std::printf("\n  la reference VIOLE --summon #%u : son invocation "
-						"#%u etait %s\n", n, n, db.Name(canon).c_str());
+			std::printf("\n  the reference VIOLATES --summon #%u: "
+									"its summon #%u was %s\n", n, n, db.Name(canon).c_str());
 			ok = false;
 		}
 	}
 	if(ref.guard_violations) {
-		std::printf("\n  la reference VIOLE la garde : %zu fenetre(s) adverse(s) "
-					"decouverte(s) sur %zu sous menace\n     (la premiere apres "
-					"l'invocation #%zu, main adverse : %u carte(s))\n",
+		std::printf("\n  the reference VIOLATES the guard: %zu "
+							"opponent window(s) uncovered out of %zu under "
+							"threat\n     (the first after summon #%zu, "
+							"opponent hand: %u card(s))\n",
 					ref.guard_violations, ref.guard_checks,
 					ref.first_guard_violation_summon,
 					ref.first_guard_violation_opp_hand);
 		ok = false;
 	} else if(!cons.guard.empty()) {
-		std::printf("\n  garde : %zu fenetre(s) adverse(s) sous menace verifiee(s) "
-					"sur la reference, toutes couvertes.\n", ref.guard_checks);
+		std::printf("\n  guard: %zu opponent window(s) under threat "
+							"checked on the reference, all covered.\n", ref.guard_checks);
 	}
 	if(ref.forbidden_activations) {
-		std::printf("  la reference UTILISE une activation interdite (%zu fois)\n",
+		std::printf("  the reference USES a forbidden activation (%zu "
+							"time(s))\n",
 					ref.forbidden_activations);
 		ok = false;
 	}
 	for(size_t i = 0; i < cons.resolve_min.size(); ++i) {
 		size_t have = i < ref.resolve_counts.size() ? ref.resolve_counts[i] : 0;
 		if(have < cons.resolve_min[i].min_count) {
-			std::printf("  la reference NE RESOUT PAS assez %s : %zu/%u\n",
+			std::printf("  the reference DOES NOT RESOLVE %s "
+									"enough: %zu/%u\n",
 						db.Name(cons.resolve_min[i].code).c_str(), have,
 						cons.resolve_min[i].min_count);
 			ok = false;
 		} else {
-			std::printf("  resolutions %s : %zu/%u sur la reference\n",
+			std::printf("  resolutions %s: %zu/%u on the "
+									"reference\n",
 						db.Name(cons.resolve_min[i].code).c_str(), have,
 						cons.resolve_min[i].min_count);
 		}
 	}
 	if(ok)
-		std::printf("\n  la reference satisfait les contraintes.\n");
+		std::printf("\n  the reference satisfies the constraints.\n");
 	else
-		std::printf("  => a zero ecart la recherche ne peut PAS retrouver la "
-					"reference : 0 solution\n     y sera un resultat attendu, "
-					"pas un defaut du moteur.\n");
+		std::printf("  => at zero discrepancy the search CANNOT "
+							"recover the reference: 0 solution\n"
+							"     there is an expected result, not an engine "
+							"defect.\n");
 	return ok;
 }
 
@@ -4001,7 +4199,8 @@ bool ReportConstraints(const LineConstraints& cons, const LineResult& ref,
 // indeed among the enumerated answers.
 int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 					   Arena& arena) {
-	std::printf("\n=== couverture de l'enumerateur ===\n");
+	if(g_verbose)
+		std::printf("\n--- enumerator coverage ---\n");
 	while(arena.Depth() > 1)
 		arena.Pop();
 	if(arena.Depth() == 0)
@@ -4064,6 +4263,10 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 	int player = -1;
 	std::vector<std::string> misses;
 	std::vector<uint64_t> digests;
+	// PROBE (instrument, enters no cost, no search touched): the DECOMPOSITION
+	// of each digest, so that a fusion says WHICH component merged.
+	std::vector<DigestParts> dparts;
+	std::vector<uint8_t> dtypes;
 
 	for(;;) {
 		int status = duel.Process();
@@ -4117,26 +4320,33 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 			if(misses.size() < 8) {
 				std::string why;
 				if(!want)
-					why = " — LA REPONSE ENREGISTREE EST REJETEE ICI (defaut du "
-						  "harnais, pas de l'enumerateur)";
+					why = "  - THE RECORDED ANSWER IS "
+											"REJECTED HERE (harness defect, "
+											"not the enumerator's)";
 				else if(same_board)
-					why = " — mais une proposition atteint le MEME BOARD : ecart "
-						  "de REPRESENTATION (deduplication par code), pas un "
-						  "trou d'espace";
+					why = "  - but one proposal reaches "
+											"the SAME BOARD: a "
+											"REPRESENTATION gap (dedup by "
+											"code), not a hole in the space";
 				else
-					why = " — et aucune n'atteint meme le meme BOARD : le coup "
-						  "est REELLEMENT absent de l'espace";
+					why = "  - and none even reaches the "
+											"same BOARD: the move is "
+											"GENUINELY absent from the "
+											"space";
 				misses.push_back(std::string(PromptName(ptype)) + " #" +
-								 std::to_string(ri) + " joueur " +
-								 std::to_string(player) + " : aucune des " +
+								 std::to_string(ri) + " player" +
+								 std::to_string(player) + ": none of the" +
 								 std::to_string(choices.size()) +
-								 " propositions n'atteint l'etat enregistre" + why);
+								 " proposals reaches "
+																"the recorded state" + why);
 			}
 		}
 		// The line's 290 states are pairwise distinct by construction (the board
 		// changes at every action). If the digest merges any of them, it will cut
 		// the combo branch without signalling anything.
 		digests.push_back(StateDigest(duel, ptype, payload));
+		dparts.push_back(StateDigestParts(duel, ptype, payload));
+		dtypes.push_back(ptype);
 
 		duel.SetResponse(recorded);
 		++ri;
@@ -4154,49 +4364,111 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 				++collisions;
 			}
 		}
-		std::printf("  digest : %zu etats sur la ligne, %zu distincts, "
-					"%zu fusions\n", digests.size(), first_seen.size(), collisions);
+		if(g_verbose)
+			std::printf("  digest: %zu states on the line, %zu "
+									"distinct, %zu merges\n",
+						digests.size(), first_seen.size(), collisions);
+		// A fusion where EVERY component matches is not an under-hash: it is a
+		// CYCLE in the recorded line: the player left a menu and reopened it, and
+		// the state really is the same. The search is RIGHT to cut it; only the
+		// zero deviation replay must not (SearchConfig::no_memo).
+		auto is_cycle = [&](size_t i, size_t j) {
+			return dparts[i].zones == dparts[j].zones &&
+			       dparts[i].with_payload == dparts[j].with_payload &&
+			       dparts[i].procstate == dparts[j].procstate;
+		};
 		if(collisions)
-			std::printf("    premiere fusion : decision #%zu confondue avec #%zu"
-						"  <-- le digest sous-hache, la recherche perdra des "
-						"solutions\n", first_at, first_with);
+			std::printf("    first merge: decision #%zu conflated "
+									"with #%zu  <-- %s\n", first_at, first_with,
+						is_cycle(first_at, first_with)
+							? "CYCLE in the "
+														"recorded line: a "
+														"prunable detour, "
+														"NOT a defect"
+							: "the digest "
+														"under-hashes, the "
+														"search will lose "
+														"solutions");
+		// WHICH component merged. `full` = zones (+) prompt (+) payload (+)
+		// procstate: naming the components that ALREADY match says where the
+		// missing information sits, instead of leaving it to be guessed.
+		if(collisions) {
+			std::map<uint64_t, size_t> seen2;
+			for(size_t i = 0; i < digests.size(); ++i) {
+				auto [it, fresh] = seen2.emplace(digests[i], i);
+				if(fresh)
+					continue;
+				const DigestParts& x = dparts[i];
+				const DigestParts& y = dparts[it->second];
+				std::printf("      #%zu = #%zu : zones %s | "
+											"col.ignoree %s | +prompt %s | "
+											"procstate %s | %s / %s  => %s\n",
+						i, it->second,
+						x.zones == y.zones ? "EGAL" : "differe",
+						x.zones_sorted == y.zones_sorted ? "EGAL" : "differe",
+						x.with_payload == y.with_payload ? "EGAL" : "differe",
+						x.procstate == y.procstate ? "EGAL" : "differe",
+						PromptName(dtypes[i]), PromptName(dtypes[it->second]),
+						is_cycle(i, it->second) ? "CYCLE" : "SOUS-HACHAGE");
+			}
+		}
 	}
 
+	// The totals are ACCUMULATED whatever the output level: the verdict below is
+	// read off them, and the caller gates the search on that verdict.
 	int total = 0, covered = 0, by_board = 0;
-	std::printf("  %-24s %8s %8s %8s %10s\n", "type", "n", "couvert", "taux",
-				"m.board");
 	for(const auto& [type, c] : cov) {
-		std::printf("  %-24s %8d %8d %7.0f%% %10d%s\n", PromptName(type), c.total,
-					c.covered, c.total ? 100.0 * c.covered / c.total : 0.0,
-					c.by_board, c.empty ? "   (enumeration vide)" : "");
 		total += c.total;
 		covered += c.covered;
 		by_board += c.by_board;
 	}
-	std::printf("  %-24s %8d %8d %7.0f%% %10d\n", "TOTAL", total, covered,
-				total ? 100.0 * covered / total : 0.0, by_board);
-	// EFFECTIVE COVERAGE, the one that matters to the search: a discrepancy where a
-	// proposal carries out the same INTENT removes nothing from the space.
-	if(by_board)
-		std::printf("  %-24s %8d %8d %7.0f%%   <-- couverture EFFECTIVE "
-					"(intentions), les %d ecart(s) « m.board » sont de "
-					"REPRESENTATION\n", "TOTAL (au board)", total,
-					covered + by_board,
-					total ? 100.0 * (covered + by_board) / total : 0.0, by_board);
-	if(!misses.empty()) {
-		std::printf("\n  premiers ecarts :\n");
+	if(g_verbose) {
+		std::printf("  %-24s %8s %8s %8s %10s\n", "type", "n", "covered", "rate",
+					"board-eq");
+		for(const auto& [type, c] : cov)
+			std::printf("  %-24s %8d %8d %7.0f%% %10d%s\n", PromptName(type),
+						c.total, c.covered,
+						c.total ? 100.0 * c.covered / c.total : 0.0,
+						c.by_board, c.empty ? "   (empty "
+																	"enumeration)" : "");
+		std::printf("  %-24s %8d %8d %7.0f%% %10d\n", "TOTAL", total, covered,
+					total ? 100.0 * covered / total : 0.0, by_board);
+		// EFFECTIVE COVERAGE, the one that matters to the search: a discrepancy
+		// where a proposal carries out the same INTENT removes nothing from the
+		// space.
+		if(by_board)
+			std::printf("  %-24s %8d %8d %7.0f%%   <-- EFFECTIVE "
+									"coverage (intents); the %d \"board-eq\" "
+									"gap(s) are REPRESENTATION\n",
+						"TOTAL (at board)", total, covered + by_board,
+						total ? 100.0 * (covered + by_board) / total : 0.0, by_board);
+	}
+	if(!misses.empty() && g_verbose) {
+		std::printf("\n  first gaps:\n");
 		for(const auto& s : misses)
 			std::printf("    %s\n", s.c_str());
 	}
 	if(total == 0) {
-		std::printf("\n  => AUCUNE decision observee : la verification n'a rien "
-					"teste (bug du harnais)\n");
+		std::printf("!! enumerator coverage: NO decision observed - "
+							"the check tested nothing (harness bug)\n");
 		return 1;
 	}
-	std::printf("\n  => %s\n", covered == total
-		? "l'enumerateur reproduit integralement la ligne de reference"
-		: "L'ENUMERATEUR NE COUVRE PAS LA LIGNE : toute recherche explore un "
-		  "espace incomplet");
+	// EFFECTIVE coverage is the figure to read: a "board-eq" gap is a difference
+	// of REPRESENTATION, not a hole in the space. The exact count is named too
+	// when the two differ, so the line never flatters itself.
+	char sum[128];
+	if(by_board)
+		std::snprintf(sum, sizeof(sum),
+					  "%zu digests, coverage %d/%d (%d "
+										"exact + %d by board)",
+					  digests.size(), covered + by_board, total, covered, by_board);
+	else
+		std::snprintf(sum, sizeof(sum), "%zu digests, coverage %d/%d",
+					  digests.size(), covered, total);
+	g_enum_line = sum;
+	if(covered + by_board != total)
+		std::printf("!! ENUMERATOR DOES NOT COVER THE LINE (%d/%d): "
+							"any search explores an incomplete space\n", covered + by_board, total);
 	return covered == total ? 0 : 1;
 }
 
@@ -4205,7 +4477,7 @@ int RunEnumeratorCheck(Duel& duel, const Replay& yrp, const Options& opt,
 size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 				const LineResult& ref, CardDB& db, ScriptProvider& scripts,
 				uint32_t patience, const LineConstraints& cons) {
-	std::printf("\n=== recherche guidee vers le board cible ===\n");
+	std::printf("\n=== guided search towards the target board ===\n");
 	while(arena.Depth() > 1)
 		arena.Pop();
 	if(arena.Depth() == 0)
@@ -4256,22 +4528,23 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 			}
 		}
 		arena.Restore();
-		std::printf("  controle       : le test de but %s en rejouant la "
-					"reference%s\n",
+		std::printf("  control        : the goal test %s when "
+							"replaying the reference%s\n",
 					hit ? "SE DECLENCHE" : "NE SE DECLENCHE PAS",
-					hit ? "" : "  <-- defaut du test de but, pas de la recherche");
+					hit ? "" : "  <-- a defect of the goal test, not of the search");
 		if(hit)
-			std::printf("                   atteint a la decision #%zu\n", hit_at);
+			std::printf("                   reached at decision "
+									"#%zu\n", hit_at);
 		else
-			std::printf("                   au mieux %u des %zu cartes cibles "
-						"reunies\n", best, target.codes.size());
+			std::printf("                   at best %u of the %zu "
+									"target cards assembled\n", best, target.codes.size());
 		if(!hit)
 			return 0;
 	}
 
-	std::printf("  cible          : %zu cartes\n", target.entries.size());
-	std::printf("  reference      : %u actions, %zu decisions, %u cartes brulees"
-				"  (mesure a l'instant du board)\n",
+	std::printf("  target         : %zu cards\n", target.entries.size());
+	std::printf("  reference      : %u actions, %zu decisions, %u cards "
+					"burned  (measured at the board)\n",
 				ref_actions, ref_decisions, ref_burned);
 
 	SearchConfig cfg;
@@ -4295,15 +4568,14 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		cfg.max_solutions = 24;
 		cfg.max_actions = ref_actions + 8;
 		cfg.max_decisions = static_cast<uint32_t>(ref_decisions) + 48;
-		std::printf("  OPTIMISATION anytime : bornes relachees a %u actions / "
-					"%u decisions,\n  epuisement des passes sous borne de cout.\n",
+		std::printf("  ANYTIME OPTIMISATION: bounds relaxed to %u "
+							"actions / %u decisions,\n"
+							"  passes run to exhaustion under the cost bound.\n",
 					cfg.max_actions, cfg.max_decisions);
 	}
 	cfg.enumeration.dedup_by_code = true;
 	cfg.enumeration.max_subsets = opt.max_subsets;
-	// Two enumeration flags that existed with no dial: the phase exits (read at the
-	// idle prompt only until now) and the canonical zones (declared, enabled
-	// nowhere).
+	// Canonical zones: off unless asked, and wired identically in every mode.
 	cfg.enumeration.canonical_zones = opt.canonical_zones;
 	// POSTED target -> inclusion by default; CAPTURED target -> exact equality.
 	cfg.goal_subset = opt.target_subset ||
@@ -4311,6 +4583,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	cfg.summon_constraints = cons.summons;
 	cfg.guard_after = cons.guard_after;
 	cfg.guard_clauses = cons.guard;
+	cfg.guard_keep = cons.guard_keep.empty() ? nullptr : &cons.guard_keep;
 	cfg.guard_opp_hand_release = cons.guard_opp_hand_release;
 	cfg.resolve_min = cons.resolve_min;
 	CheckSaturations(target.codes.size(), cons.resolve_min);
@@ -4350,8 +4623,8 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		size_t known = 0;
 		for(uint64_t k : ref_keys)
 			known += k != 0;
-		std::printf("  ligne relevee  : %zu digests, %zu/%zu coups identifies "
-					"(%.0f ms)\n", ref_digests.size(), known, ref_keys.size(),
+		std::printf("  line recorded  : %zu digests, %zu/%zu moves "
+							"identified (%.0f ms)\n", ref_digests.size(), known, ref_keys.size(),
 					MsSince(t0));
 
 		// THE REFERENCE'S LIKELIHOOD, AND IT IS THE ONLY FIGURE THAT SAYS WHETHER
@@ -4387,22 +4660,23 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 				}
 				if(rls.matched[i]) ++found; else ++absent;
 			}
-			std::printf("\n  --- VRAISEMBLANCE DE LA REFERENCE (politique "
-						"NEUVE = softmax uniforme) ---\n");
-			std::printf("  decisions du joueur : %zu  (forcees %zu, a choix "
-						"%zu)\n", own, forced, branchy);
-			std::printf("  COUVERTURE : coup de la reference RETROUVE dans "
-						"l'enumeration %zu/%zu", found, own);
+			std::printf("\n  --- LIKELIHOOD OF THE REFERENCE "
+									"(FRESH policy = uniform softmax) ---\n");
+			std::printf("  player decisions: %zu  (forced %zu, "
+									"with a choice %zu)\n", own, forced, branchy);
+			std::printf("  COVERAGE: reference move FOUND in the "
+									"enumeration %zu/%zu", found, own);
 			if(absent)
-				std::printf("   <<< %zu ABSENT(S) : la ligne est HORS de "
-							"l'espace d'actions", absent);
+				std::printf("   <<< %zu MISSING: the line is "
+											"OUTSIDE the action space", absent);
 			std::printf("\n");
 			// WHICH move is missing, and at what arity. A coverage hole one cannot
 			// locate cannot be fixed, and a single one is enough to make the line
 			// unreachable at any budget.
 			for(const RefLineStats::Miss& m : rls.misses) {
-				std::printf("     decision #%zu  %s : %zu choix enumere(s), "
-							"AUCUN ne reproduit la reference\n", m.index,
+				std::printf("     decision #%zu  %s: %zu "
+											"choice(s) enumerated, NONE "
+											"reproduces the reference\n", m.index,
 							PromptName(m.prompt), m.offered.size());
 				auto hex = [](const std::vector<uint8_t>& v) {
 					std::string s;
@@ -4418,12 +4692,13 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 					std::printf("        offerte : %s\n",
 								hex(m.offered[j]).c_str());
 			}
-			std::printf("  arite max : %u (decision #%zu)   |   arite moyenne "
-						"geometrique : %.2f\n", worst, worst_at,
+			std::printf("  arite max : %u (decision #%zu)   |   "
+									"arite moyenne geometrique : %.2f\n", worst, worst_at,
 						branchy ? std::pow(10.0, -log10p / double(branchy))
 								: 1.0);
-			std::printf("  log10 P(tirage uniforme reproduit la ligne) = "
-						"%.1f   =>  UNE CHANCE SUR 10^%.0f\n", log10p, -log10p);
+			std::printf("  log10 P(a uniform rollout reproduces "
+									"the line) = %.1f   =>  ONE CHANCE IN "
+									"10^%.0f\n", log10p, -log10p);
 			// WHERE DOES THE IMPROBABILITY GO? A single number does not say, and
 			// the answer separates two opposite kinds of work: if most of it comes
 			// from decisions that CANNOT affect the goal (position, zone, order of
@@ -4447,21 +4722,16 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 				for(const auto& [t, g] : by)
 					ord.emplace_back(g.log10p, t);
 				std::sort(ord.rbegin(), ord.rend());
-				std::printf("  --- d'ou viennent les %.0f ordres de grandeur "
-							"---\n", -log10p);
+				std::printf("  --- where the %.0f orders of "
+											"magnitude come from ---\n", -log10p);
 				for(const auto& [v, t] : ord) {
 					const Agg& g = by[t];
-					std::printf("   %-24s %6.1f  (%zu decision(s), arite max "
-								"%u, moy. geo. %.2f)\n", PromptName(t), v, g.n,
+					std::printf("   %-24s %6.1f  (%zu "
+													"decision(s), arite max "
+													"%u, moy. geo. %.2f)\n", PromptName(t), v, g.n,
 								g.mx, std::pow(10.0, v / double(g.n)));
 				}
 			}
-			std::printf("  Lecture : c'est la borne SANS apprentissage. La "
-						"politique ne peut la remonter\n"
-						"  que sur les decisions qu'elle revoit — une ligne "
-						"jamais echantillonnee\n"
-						"  n'adapte rien, et c'est la l'oeuf et la poule du "
-						"dossier, enfin chiffre.\n");
 		}
 	}
 	cfg.ref_digests = &ref_digests;
@@ -4481,7 +4751,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	unsigned threads = opt.threads ? opt.threads
 								   : (std::max)(1u, std::thread::hardware_concurrency());
 	std::printf("  workers        : %u\n", threads);
-	std::printf("  nouveaute      : %s (patience %u)\n",
+	std::printf("  novelty        : %s (patience %u)\n",
 				patience ? "active" : "desactivee", patience);
 	// The `--solve` mode is the HEALTH CHECK, and it never saw a single mechanism
 	// until now. It receives them, and it SAYS which ones, which is the only way to
@@ -4524,7 +4794,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 			Arena local_arena;
 			std::string err;
 			if(!local_arena.Init(opt.arena_mb << 20, 0, err))
-				return WorkerAbort("arene (reparation)", err);
+				return WorkerAbort("arena (repair)", err);
 			// The duel lives IN the arena: it must be destroyed before it, otherwise
 			// OCG_DestroyDuel works on memory returned to the OS.
 			{
@@ -4538,6 +4808,9 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 					wcfg.time_limit_ms = budget;
 					wcfg.novelty_patience = pat;
 					wcfg.shared_tt = stt.get();
+					// The zero deviation pass replays the reference: no memoisation, or
+					// its own round trips cut it (see SearchConfig::no_memo).
+					wcfg.no_memo = (k == 0);
 					if(n > 1) {
 						// At a single deviation there is no second level: we share the first,
 						// for want of better.
@@ -4575,7 +4848,7 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		out.ms = MsSince(t0);
 		if(prof::enabled) {
 			char lbl[32];
-			std::snprintf(lbl, sizeof(lbl), "ecarts k=%u", k);
+			std::snprintf(lbl, sizeof(lbl), "discrep. k=%u", k);
 			prof::PrintPhase(lbl);
 		}
 		return out;
@@ -4593,8 +4866,8 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		return best;
 	};
 
-	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "ecarts", "solutions",
-				"etats", "transpos.", "coupures", "duree");
+	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "discrep.", "solutions",
+				"states", "transpos.", "cuts", "time");
 	uint32_t reached = 0;
 	{
 		PassOut o = run_pass(0, 0, opt.solve_ms - spent);
@@ -4608,21 +4881,25 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 			sols.push_back(x);
 		if(o.found.empty()) {
 			if(!ref_meets_cons) {
-				std::printf("       (attendu : la reference viole une contrainte "
-							"de ligne, elle ne peut pas etre retrouvee)\n");
+				std::printf("       (expected: the reference "
+											"violates a line constraint, so "
+											"it cannot be recovered)\n");
 			} else {
-				std::printf("\n  A zero ecart la reference doit etre retrouvee. "
-							"Elle ne l'est pas : defaut du moteur.\n");
+				std::printf("\n  At zero discrepancy the "
+											"reference must be recovered. It "
+											"is not: engine defect.\n");
 				return 0;
 			}
 		}
 	}
 
 	uint32_t k_start = 1;
-	if(patience && spent < opt.solve_ms) {
-		// CONTROL, required by the verification discipline: a pruning that gains
-		// 10x in states but loses solutions must SAY SO ITSELF. Same engine, same
-		// budget, k = 1, with then without novelty.
+	if(opt.novelty_ab && patience && spent < opt.solve_ms) {
+		// CONTROL (--novelty-ab), off by default: it costs two extra passes,
+		// up to 2 x 20 s taken from --solve-ms, and moves the ladder to k = 2.
+		// A pruning that gains 10x in states but loses solutions must SAY SO
+		// ITSELF, so the control stays available; it is no longer paid for by
+		// every run.
 		reached = 1;
 		double slice = (std::min)((opt.solve_ms - spent) / 4.0, 20000.0);
 		PassOut a = run_pass(1, 0, slice);
@@ -4631,12 +4908,12 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		spent += b.ms;
 		const Solution* ba = best_of(a.found);
 		const Solution* bb = best_of(b.found);
-		std::printf("\n--- controle A/B de la nouveaute (k=1, %.0f s chacun) ---\n",
+		std::printf("\n--- novelty A/B control (k=1, %.0f s each) ---\n",
 					slice / 1000.0);
-		std::printf("  sans : %10llu etats  %5zu solutions\n",
+		std::printf("  without: %10llu states  %5zu solutions\n",
 					(unsigned long long)a.nodes, a.found.size());
-		std::printf("  avec : %10llu etats  %5zu solutions  %llu coupures  "
-					"(etats %+.0f%%)\n",
+		std::printf("  with   : %10llu states  %5zu solutions  %llu "
+							"cuts  (states %+.0f%%)\n",
 					(unsigned long long)b.nodes, b.found.size(),
 					(unsigned long long)b.cuts,
 					a.nodes ? 100.0 * (double(b.nodes) - double(a.nodes)) /
@@ -4645,14 +4922,16 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 			std::tie(bb->burned, bb->actions, bb->decisions) >
 				std::tie(ba->burned, ba->actions, ba->decisions));
 		if(ba && bb)
-			std::printf("  meilleur cout : sans (%u,%u,%u)  avec (%u,%u,%u)  => %s\n",
+			std::printf("  best cost: without (%u,%u,%u)  with "
+									"(%u,%u,%u)  => %s\n",
 						ba->burned, ba->actions, ba->decisions,
 						bb->burned, bb->actions, bb->decisions,
-						lost_best ? "la nouveaute PERD le meilleur cout"
-								  : "meilleur cout conserve");
+						lost_best ? "novelty LOSES the "
+															"best cost"
+								  : "best cost preserved");
 		else if(ba && !bb)
-			std::printf("  meilleur cout : sans (%u,%u,%u)  avec AUCUN  "
-						"=> la nouveaute PERD des solutions\n",
+			std::printf("  best cost: without (%u,%u,%u)  with "
+									"NONE  => novelty LOSES solutions\n",
 						ba->burned, ba->actions, ba->decisions);
 		for(const auto& x : a.found)
 			sols.push_back(x);
@@ -4661,9 +4940,9 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 		k_start = 2;
 	}
 
-	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "ecarts", "solutions",
-				"etats", "transpos.", "coupures", "duree");
-	for(uint32_t k = k_start; k <= 12 && spent < opt.solve_ms; ++k) {
+	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "discrep.", "solutions",
+				"states", "transpos.", "cuts", "time");
+	for(uint32_t k = k_start; k <= opt.max_ecarts && spent < opt.solve_ms; ++k) {
 		reached = k;
 		PassOut o = run_pass(k, patience, opt.solve_ms - spent);
 		spent += o.ms;
@@ -4689,18 +4968,18 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	arena.Restore();
 
 	if(sols.empty()) {
-		std::printf("\n  AUCUNE solution atteinte.\n");
+		std::printf("\n  NO solution reached.\n");
 		return 0;
 	}
 
-	std::printf("\n  %zu solution(s). Classement lexicographique : cartes brulees,\n"
-				"  puis actions, puis decisions.\n\n", sols.size());
+	std::printf("\n  %zu solution(s), ranked by burned cards, then "
+					"actions, then decisions.\n\n", sols.size());
 	std::sort(sols.begin(), sols.end(), [](const Solution& a, const Solution& b) {
 		if(a.burned != b.burned) return a.burned < b.burned;
 		if(a.actions != b.actions) return a.actions < b.actions;
 		return a.decisions < b.decisions;
 	});
-	std::printf("  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "brulees", "actions",
+	std::printf("  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "burned", "actions",
 				"decisions", "main", "deck", "extra");
 	int better = 0;
 	for(size_t i = 0; i < sols.size() && i < 10; ++i) {
@@ -4713,14 +4992,16 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 			++better;
 		std::printf("  %-4zu %10u %9u %11u %8u %8u %8u%s\n", i, x.burned, x.actions,
 					x.decisions, x.hand_left, x.deck_left, x.extra_left,
-					wins ? "   <-- meilleure que la reference" : "");
+					wins ? "   <-- better than the "
+											"reference" : "");
 	}
 	std::printf("\n  %-4s %10u %9u %11zu   (reference)\n", "ref", ref_burned,
 				ref_actions, ref_decisions);
 	WriteSolutions(sols, yrp, target, opt, db, scripts, opt.outdir, cons);
 	if(!better)
-		std::printf("\n  Aucune ligne strictement meilleure trouvee.\n"
-					"  La reference resiste a %u deviation(s) simultanee(s).\n",
+		std::printf("\n  No strictly better line found.\n"
+							"  The reference resists %u simultaneous "
+							"deviation(s).\n",
 					reached);
 	(void)ref;
 	(void)db;
@@ -4741,7 +5022,7 @@ std::vector<uint32_t> OpeningHand(const Replay& yrp, uint8_t con, CardDB& db,
 		Arena a;
 		std::string err;
 		if(!a.Init(arena_mb << 20, 0, err))
-			return WorkerAbort("arene (sonde de main)", err);
+			return WorkerAbort("arena (hand probe)", err);
 		{
 			Duel d(db, scripts, &a);
 			if(d.Create(yrp.seed, yrp.duel_flags, yrp.start_lp, yrp.start_hand,
@@ -4752,7 +5033,7 @@ std::vector<uint32_t> OpeningHand(const Replay& yrp, uint8_t con, CardDB& db,
 					if(c.present)
 						out.push_back(db.Canonical(c.Code()));
 			} else {
-				WorkerAbort("duel (sonde de main)", err);
+				WorkerAbort("duel (hand probe)", err);
 			}
 		}
 		a.Shutdown();
@@ -4764,7 +5045,7 @@ std::vector<uint32_t> OpeningHand(const Replay& yrp, uint8_t con, CardDB& db,
 bool LoadYdk(const std::string& path, Deck& out, std::string& error) {
 	std::ifstream in(path);
 	if(!in) {
-		error = "decklist illisible : " + path;
+		error = "unreadable decklist: " + path;
 		return false;
 	}
 	std::vector<uint32_t>* section = nullptr;
@@ -4785,7 +5066,7 @@ bool LoadYdk(const std::string& path, Deck& out, std::string& error) {
 			section->push_back(static_cast<uint32_t>(code));
 	}
 	if(out.main.empty()) {
-		error = "aucune carte dans le main de " + path;
+		error = "no card in the main deck of " + path;
 		return false;
 	}
 	return true;
@@ -4848,8 +5129,9 @@ bool BuildSyntheticStart(const Replay& ref, const Deck& ydk,
 			}
 		}
 		if(!found) {
-			error = "la main demandee contient " + db.Name(canon) +
-					" qui n'est pas (assez) dans la decklist";
+			error = "the requested hand holds " + db.Name(canon) +
+					" which is not (sufficiently) in the "
+										"decklist";
 			return false;
 		}
 	}
@@ -4882,9 +5164,9 @@ bool BuildSyntheticStart(const Replay& ref, const Deck& ydk,
 		if(matches(got))
 			return true;
 	}
-	error = "impossible de forcer la main demandee : le core ne pioche ni la "
-			"tete ni la queue du deck dans cet ordre (verifier les drapeaux "
-			"du duel de reference)";
+	error = "cannot force the requested hand: the core draws neither the "
+				"head nor the tail of the deck in that order (check the "
+				"reference duel's flags)";
 	return false;
 }
 
@@ -4897,16 +5179,16 @@ void ReportBestBoard(const std::vector<uint32_t>& best, const BoardKey& target,
 	std::map<uint32_t, int> delta;
 	for(uint32_t c : target.codes) ++delta[c];
 	for(uint32_t c : best) --delta[c];
-	std::printf("\n--- meilleur board atteint, face a la cible ---\n");
+	std::printf("\n--- best board reached, against the target ---\n");
 	for(uint32_t c : best)
-		std::printf("      pose      %9u  %s\n", c, db.Name(c).c_str());
+		std::printf("      placed    %9u  %s\n", c, db.Name(c).c_str());
 	for(const auto& [code, n] : delta)
 		if(n > 0)
 			std::printf("      MANQUE %dx %9u  %s\n", n, code,
 						db.Name(code).c_str());
 	for(const auto& [code, n] : delta)
 		if(n < 0)
-			std::printf("      en trop%3dx %9u  %s\n", -n, code,
+			std::printf("      surplus%3dx %9u  %s\n", -n, code,
 						db.Name(code).c_str());
 }
 
@@ -4949,14 +5231,14 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 		Arena a;
 		std::string err;
 		if(!a.Init(opt.arena_mb << 20, 0, err))
-			return WorkerAbort("arene (prior par rejeu)", err);
+			return WorkerAbort("arena (corpus replay)", err);
 		{
 			Duel d(db, scripts, &a);
 			if(!d.Create(start_yrp.seed, start_yrp.duel_flags, start_yrp.start_lp,
 						 start_yrp.start_hand, start_yrp.draw_count, err) ||
 			   !d.Setup(start_yrp, err, opp_hand,
 						static_cast<uint8_t>(1 - opt.target_player)))
-				return WorkerAbort("duel (prior par rejeu)", err);
+				return WorkerAbort("duel (corpus replay)", err);
 			if(opt.stop_gc)
 				d.SetLuaGc(false);
 			a.Push();
@@ -5111,7 +5393,8 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 				if(ok) {
 					char name[64];
 					std::snprintf(name, sizeof(name),
-								  "solution_%02zu_b%u_a%u%s.yrp", i,
+								  "solution_%02zu_b%u_a"
+																"%u%s.yrp", i,
 								  sols[i].burned, sols[i].actions,
 								  full_board ? "" : "_alt");
 					std::string path = outdir + "/" + name;
@@ -5132,7 +5415,7 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 						++rej_cons;
 						if(summon_never)
 							++rej_never;
-						why = "contrainte";
+						why = "constraint";
 					}
 					else
 						++rej_board;
@@ -5140,7 +5423,8 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 					if(rej_written < 8) {
 						char name[64];
 						std::snprintf(name, sizeof(name),
-									  "but_rejete_%02zu_%s.yrp", i, why);
+									  "but_rejete_%02zu_%s."
+																		"yrp", i, why);
 						std::string werr;
 						if(WriteYrp1(outdir + "/" + name, start_yrp,
 									 sols[i].responses, werr))
@@ -5154,143 +5438,35 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 		a.Shutdown();
 	}).join();
 
-	std::printf("\n--- sortie ---\n");
-	std::printf("  %zu replay(s) ecrits dans %s  (sur %zu candidate(s))\n",
+	std::printf("\n--- output ---\n");
+	std::printf("  %zu replay(s) written to %s  (out of %zu candidate(s))\n",
 				written, outdir.c_str(), sols.size());
 	if(sols.size() > kMaxWritten)
-		std::printf("      !! %zu candidate(s) NON EXAMINEES : le plafond "
-					"d'ecriture est de %zu.\n      Si l'appelant n'a pas trie, "
-					"ce sont les premieres ARRIVEES, pas les moins cheres.\n",
+		std::printf("      !! %zu candidate(s) NOT EXAMINED: the "
+							"write ceiling is %zu.\n"
+							"      If the caller did not sort, these are the "
+							"first to ARRIVE, not the cheapest.\n",
 					sols.size() - kMaxWritten, kMaxWritten);
 	if(rejected)
-		std::printf("  %zu rejetee(s) : %zu MSG_RETRY, %zu contrainte(s), "
-					"%zu board non conforme\n", rejected, rej_retry, rej_cons,
+		std::printf("  %zu rejected: %zu MSG_RETRY, %zu "
+							"constraint(s), %zu non-conforming board\n", rejected, rej_retry, rej_cons,
 					rej_board);
 	if(rej_never)
-		std::printf("      dont %zu ou une contrainte --summon n'est JAMAIS "
-					"ATTEINTE :\n      la ligne se termine avant l'invocation "
-					"visee, la contrainte n'a donc pas ete exercee\n", rej_never);
-	if(cons.Any() && !first_summons.empty()) {
-		std::printf("\n  invocations de la meilleure solution ecrite :\n");
+		std::printf("      of which %zu where a --summon constraint "
+							"is NEVER REACHED:\n      the line ends before "
+							"the targeted summon, so the constraint was never "
+							"exercised\n", rej_never);
+	if(cons.Any() && !first_summons.empty() && g_verbose) {
+		std::printf("\n  summons of the best solution written:\n");
 		for(size_t i = 0; i < first_summons.size(); ++i) {
 			bool constrained =
 				cons.summons.count(static_cast<uint32_t>(i + 1)) != 0;
 			std::printf("      #%-3zu %s%s\n", i + 1,
 						db.Name(db.Canonical(first_summons[i])).c_str(),
-						constrained ? "   <-- contrainte" : "");
+						constrained ? "   <-- constraint" : "");
 		}
 	}
 	return written;
-}
-
-// PRIOR BY SOLUTION REPLAY (--prior; arXiv:2401.10431, "Policy Learning from
-// Solved Games"): a virgin NRPA policy does not know how to rip (measured: 1
-// rollout in ~800k does the 3 required resolutions) although the solution
-// corpus CONTAINS the complete rip sequences. We record the plan_keys of every
-// corpus line, through LiftPlan on the duel of ITS OWN header rather than a
-// replay on the starting duel (only the SEMANTIC identities carry over, being
-// invariant under deck/hand/seed), and turn them into INITIAL policy weights,
-// so every worker starts with a policy that already knows how to rip. Weight of
-// a move: prior_weight x the proportion of corpus files that play it, so the
-// moves present EVERYWHERE (the rips, the combo's spine) carry the full weight
-// and one line's idiosyncrasies a fractional one.
-void BuildPriorPolicy(const Options& opt, CardDB& db, ScriptProvider& scripts,
-					  NrpaPolicy& out) {
-	if(opt.prior_files.empty())
-		return;
-	namespace fs = std::filesystem;
-	std::vector<std::string> files;
-	for(const std::string& p : opt.prior_files) {
-		std::error_code ec;
-		if(fs::is_directory(p, ec)) {
-			for(const auto& e : fs::directory_iterator(p, ec)) {
-				const auto ext = e.path().extension();
-				if(ext == L".yrp" || ext == L".yrpX")
-					files.push_back(e.path().string());
-			}
-		} else {
-			files.push_back(p);
-		}
-	}
-	std::sort(files.begin(), files.end());
-	if(files.empty()) {
-		std::printf("!! --prior : aucun fichier .yrp/.yrpX trouve\n");
-		return;
-	}
-	std::printf("\n--- prior par rejeu : %zu ligne(s) de corpus (--prior) ---\n",
-				files.size());
-	auto t0 = Clock::now();
-	std::map<uint64_t, uint32_t> in_files;   // plan_key -> number of files
-	size_t used = 0;
-	for(const std::string& f : files) {
-		Replay holder;
-		std::string err;
-		if(!holder.Load(f, err)) {
-			std::printf("  !! %s : %s\n", f.c_str(), err.c_str());
-			continue;
-		}
-		const Replay* pr = holder.IsStreamed() ? holder.Embedded() : &holder;
-		if(!pr || pr->responses.empty()) {
-			std::printf("  !! %s : pas de reponses lisibles\n", f.c_str());
-			continue;
-		}
-		// The duel of ITS OWN header, on a dedicated thread: an arena is never
-		// initialised on a thread that already owns one.
-		std::thread([&] {
-			Arena pa;
-			std::string aerr;
-			if(!pa.Init(opt.arena_mb << 20, 0, aerr)) {
-				std::printf("  !! arene du prior : %s\n", aerr.c_str());
-				return;
-			}
-			{
-				Duel pd(db, scripts, &pa);
-				if(!pd.Create(pr->seed, pr->duel_flags, pr->start_lp,
-							  pr->start_hand, pr->draw_count, aerr) ||
-				   !pd.Setup(*pr, aerr)) {
-					std::printf("  !! %s : duel non initialisable : %s\n",
-								f.c_str(), aerr.c_str());
-				} else {
-					if(opt.stop_gc)
-						pd.SetLuaGc(false);
-					EnumOptions eo;
-					eo.dedup_by_code = true;
-					eo.max_subsets = opt.max_subsets;
-					eo.db = &db;
-					std::vector<PlanStep> steps;
-					size_t unknown = LiftPlan(pd, pa, *pr, opt.target_player,
-											  SIZE_MAX, eo, steps);
-					std::vector<uint64_t> distinct;
-					for(const PlanStep& s : steps)
-						if(s.edge)
-							distinct.push_back(s.edge);
-					std::sort(distinct.begin(), distinct.end());
-					distinct.erase(
-						std::unique(distinct.begin(), distinct.end()),
-						distinct.end());
-					for(uint64_t k : distinct)
-						++in_files[k];
-					if(!distinct.empty())
-						++used;
-					std::printf("  %-44s %4zu etapes, %3zu non identifiees, "
-								"%zu coups distincts\n",
-								fs::path(f).filename().string().c_str(),
-								steps.size(), unknown, distinct.size());
-				}
-			}
-			pa.Shutdown();
-		}).join();
-	}
-	if(in_files.empty() || !used) {
-		std::printf("  !! prior vide : aucun coup releve\n");
-		return;
-	}
-	for(const auto& [k, n] : in_files)
-		out[k] = static_cast<float>(opt.prior_weight) *
-				 static_cast<float>(n) / static_cast<float>(used);
-	std::printf("  prior : %zu coups distincts sur %zu ligne(s), poids max "
-				"%.2f (--prior-weight), %.0f ms\n",
-				in_files.size(), used, opt.prior_weight, MsSince(t0));
 }
 
 // ADAPTATION REPLAY OF THE CORPUS (--adapt), the remaining route of
@@ -5341,7 +5517,7 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	}
 	std::sort(files.begin(), files.end());
 	if(files.empty()) {
-		std::printf("!! --landmarks : aucun fichier .yrp/.yrpX trouve\n");
+		std::printf("!! --landmarks: no .yrp/.yrpX file found\n");
 		return;
 	}
 	std::unordered_map<uint64_t, size_t> repertoire;
@@ -5349,7 +5525,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		if(plan[i].edge)
 			repertoire.emplace(plan[i].edge, i);
 
-	std::printf("\n--- landmarks appris : %zu plan(s) resolu(s) (--landmarks) ---\n",
+	std::printf("\n--- landmarks appris : %zu plan(s) resolu(s) "
+					"(--landmarks) ---\n",
 				files.size());
 	auto t0 = Clock::now();
 	for(const std::string& f : files) {
@@ -5361,7 +5538,7 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		}
 		const Replay* pr = holder.IsStreamed() ? holder.Embedded() : &holder;
 		if(!pr || pr->responses.empty()) {
-			std::printf("  !! %s : pas de reponses lisibles\n", f.c_str());
+			std::printf("  !! %s: no readable answers\n", f.c_str());
 			continue;
 		}
 		// The duel of ITS OWN header, on a dedicated thread: an arena is never
@@ -5370,7 +5547,7 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 			Arena pa;
 			std::string aerr;
 			if(!pa.Init(opt.arena_mb << 20, 0, aerr)) {
-				std::printf("  !! arene des landmarks : %s\n", aerr.c_str());
+				std::printf("  !! landmark arena: %s\n", aerr.c_str());
 				return;
 			}
 			{
@@ -5378,7 +5555,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 				if(!pd.Create(pr->seed, pr->duel_flags, pr->start_lp,
 							  pr->start_hand, pr->draw_count, aerr) ||
 				   !pd.Setup(*pr, aerr)) {
-					std::printf("  !! %s : duel non initialisable : %s\n",
+					std::printf("  !! %s: duel cannot be "
+													"initialised: %s\n",
 								f.c_str(), aerr.c_str());
 				} else {
 					if(opt.stop_gc)
@@ -5392,7 +5570,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					LiftPolicyRun(pd, pa, *pr, opt.target_player, SIZE_MAX, eo,
 								  repertoire, target, run, nullptr, 0, &trace);
 					trace.Normalize();
-					std::printf("  %-44s %4u decisions, %zu fait(s) distinct(s)\n",
+					std::printf("  %-44s %4u decisions, "
+													"%zu distinct fact(s)\n",
 								fs::path(f).filename().string().c_str(),
 								trace.decisions, trace.first.size());
 					if(trace.decisions)
@@ -5403,8 +5582,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		}).join();
 	}
 	if(!graph.Plans()) {
-		std::printf("  !! aucun plan exploitable : le graphe reste VIDE et le "
-					"mecanisme sera inerte\n");
+		std::printf("  !! no usable plan: the graph stays EMPTY and "
+							"the mechanism will be inert\n");
 		return;
 	}
 	graph.Build();
@@ -5414,12 +5593,13 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	// trace of one line. Saying it here keeps a positive result from being read as
 	// a generalisation when it would only be a repertoire of states.
 	if(graph.Plans() < 2)
-		std::printf("  !! UN SEUL plan : l'intersection est ce plan. Les "
-					"landmarks ne sont PAS generalises —\n     ils decrivent une "
-					"ligne. A lire comme tel dans tout A/B.\n");
+		std::printf("  !! ONE plan only: the intersection is that "
+							"plan. The landmarks are NOT generalised -\n"
+							"     they describe one line. Read them as such "
+							"in any A/B.\n");
 	if(graph.Empty()) {
-		std::printf("  !! aucun landmark : tous les faits communs etaient deja "
-					"vrais a l'etat initial (regle 1)\n");
+		std::printf("  !! no landmark: every common fact was already "
+							"true in the initial state (rule 1)\n");
 		return;
 	}
 	// THE INSTRUMENT (quantify before letting it decide). What the graph learned,
@@ -5449,8 +5629,8 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	for(const auto& [k, m] : loops)
 		if(m > 1)
 			++nloop;
-	std::printf("  %zu landmark(s) sur %zu fait(s) distinct(s), dont %zu BOUCLE(S) "
-				"DE REPETITION\n", graph.Items().size(), loops.size(), nloop);
+	std::printf("  %zu landmark(s) over %zu distinct fact(s), of which "
+					"%zu REPETITION LOOP(S)\n", graph.Items().size(), loops.size(), nloop);
 	// Order of FIRST achievement per (code, zone): it is the graph's axis, and the
 	// table must follow it. Sorted by key, it would make the order unreadable and
 	// "ordered progression" would be nothing but a promise.
@@ -5485,7 +5665,7 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	for(const auto& [first, key] : rows) {
 		if(loops[key] < 2)
 			continue;
-		std::printf("     boucle « %s x%u » — precedee de :",
+		std::printf("     loop \"%s x%u\" - preceded by:",
 					label(key).c_str(), loops[key]);
 		std::vector<std::string> before;
 		for(const auto& [o2, k2] : rows) {
@@ -5498,7 +5678,7 @@ void BuildLandmarkGraph(const Options& opt, CardDB& db, ScriptProvider& scripts,
 						 before.end() - 4);   // the CLOSEST ones before it
 		for(size_t i = 0; i < before.size(); ++i)
 			std::printf("%s %s", i ? "," : "", before[i].c_str());
-		std::printf("%s\n", before.empty() ? " (rien)" : "");
+		std::printf("%s\n", before.empty() ? " (nothing)" : "");
 	}
 }
 
@@ -5523,7 +5703,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 	}
 	std::sort(files.begin(), files.end());
 	if(files.empty()) {
-		std::printf("!! --adapt : aucun fichier .yrp/.yrpX trouve\n");
+		std::printf("!! --adapt: no .yrp/.yrpX file found\n");
 		return;
 	}
 	// The reference's repertoire, as the sampling sees it: Adapt() must recompute
@@ -5533,7 +5713,8 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		if(plan[i].edge)
 			repertoire.emplace(plan[i].edge, i);
 
-	std::printf("\n--- rejeu d'adaptation : %zu ligne(s) de corpus (--adapt) ---\n",
+	std::printf("\n--- adaptation replay: %zu corpus line(s) (--adapt) "
+					"---\n",
 				files.size());
 	auto t0 = Clock::now();
 	size_t total_steps = 0, total_unknown = 0;
@@ -5546,7 +5727,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		}
 		const Replay* pr = holder.IsStreamed() ? holder.Embedded() : &holder;
 		if(!pr || pr->responses.empty()) {
-			std::printf("  !! %s : pas de reponses lisibles\n", f.c_str());
+			std::printf("  !! %s: no readable answers\n", f.c_str());
 			continue;
 		}
 		// The duel of ITS OWN header, on a dedicated thread: an arena is never
@@ -5555,7 +5736,7 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 			Arena pa;
 			std::string aerr;
 			if(!pa.Init(opt.arena_mb << 20, 0, aerr)) {
-				std::printf("  !! arene de l'adaptation : %s\n", aerr.c_str());
+				std::printf("  !! adaptation arena: %s\n", aerr.c_str());
 				return;
 			}
 			{
@@ -5563,7 +5744,8 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 				if(!pd.Create(pr->seed, pr->duel_flags, pr->start_lp,
 							  pr->start_hand, pr->draw_count, aerr) ||
 				   !pd.Setup(*pr, aerr)) {
-					std::printf("  !! %s : duel non initialisable : %s\n",
+					std::printf("  !! %s: duel cannot be "
+													"initialised: %s\n",
 								f.c_str(), aerr.c_str());
 				} else {
 					if(opt.stop_gc)
@@ -5579,13 +5761,16 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 					if(!run.steps.empty()) {
 						total_steps += run.steps.size();
 						total_unknown += unknown;
-						std::printf("  %-44s %4zu decisions multi-choix, "
-									"%2zu non identifiees\n",
+						std::printf("  %-44s %4zu "
+															"multi-choice "
+															"decisions, %2zu "
+															"unidentified\n",
 									fs::path(f).filename().string().c_str(),
 									run.steps.size(), unknown);
 						out.push_back(std::move(run));
 					} else {
-						std::printf("  %-44s aucune decision relevee\n",
+						std::printf("  %-44s no decision "
+															"recorded\n",
 									fs::path(f).filename().string().c_str());
 					}
 				}
@@ -5594,15 +5779,15 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		}).join();
 	}
 	if(out.empty()) {
-		std::printf("  !! adaptation vide : aucune sequence relevee\n");
+		std::printf("  !! empty adaptation: no sequence recorded\n");
 		return;
 	}
 	// INSTRUMENT BEFORE CALIBRATING: does the policy really reproduce the corpus's
 	// sequences after the passes? On a virgin policy the agreement equals the mean
 	// of -log(number of legal choices); if it does not rise, the mechanism is inert
 	// and no run is needed to say so.
-	std::printf("  adaptation : %zu ligne(s), %zu decisions (%zu non "
-				"identifiees), %.0f ms\n",
+	std::printf("  adaptation: %zu line(s), %zu decisions (%zu "
+					"unidentified), %.0f ms\n",
 				out.size(), total_steps, total_unknown, MsSince(t0));
 	// SATURATION CURVE, computed before any run (instrument BEFORE calibrating).
 	// `p(chosen)` is the mean probability the policy gives to the moves the
@@ -5618,8 +5803,8 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 			for(const PolicyStep& s : r.steps)
 				++by_ctx[s.ctx];
 		ctx_span = by_ctx.size();
-		std::printf("  contextes distincts : %zu (board cible pose x main "
-					"restante)\n", ctx_span);
+		std::printf("  distinct contexts: %zu (target cards placed x "
+							"hand left)\n", ctx_span);
 	}
 	// THE CEILING, measured before any curve. Two steps presenting the SAME set of
 	// legal moves in the SAME context are indistinguishable to a policy of this
@@ -5633,145 +5818,9 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		size_t g0 = 0, g1 = 0;
 		const double c0 = CorpusCoherence(out, false, &g0);
 		const double c1 = CorpusCoherence(out, true, &g1);
-		std::printf("  plafond de la famille : %.1f%% sans contexte (%zu points "
-					"de decision distincts) -> %.1f%% avec (%zu)\n",
+		std::printf("  family ceiling: %.1f%% without context (%zu "
+							"distinct decision points) -> %.1f%% with (%zu)\n",
 					100.0 * c0, g0, 100.0 * c1, g1);
-	}
-	// The agreement curve, in THREE dimensions: passes x adaptation step x
-	// contextual level. The step enters because the NRPA update (+alpha on the move
-	// played, -alpha*p on each) IS gradient ascent on the log-likelihood of the
-	// corpus under a softmax: too large, it oscillates around the optimum instead
-	// of reaching it. That is Montparnasse's "slow and long adaptation"
-	// (2505.02110), measurable here in milliseconds instead of a run.
-	const float alphas[] = { 1.0f, 0.5f, 0.2f, 0.1f, 0.05f };
-	for(int lvl = 0; lvl < 2; ++lvl) {
-		const float k = lvl ? 1.0f : -1.0f;
-		std::printf("  accord du corpus — niveau contextuel %s :\n",
-					lvl ? "ACTIF (k=1)" : "eteint");
-		std::printf("      %-8s", "passes");
-		for(float al : alphas)
-			std::printf("  a=%-6.2f", al);
-		std::printf("\n");
-		for(uint32_t n : { 0u, 1u, 4u, 16u, 64u, 256u }) {
-			std::printf("      %-8u", n);
-			for(float al : alphas) {
-				NrpaPolicy probe;
-				NrpaResidual res;
-				AdaptCorpus(probe, &res, out, n, al,
-					defaults.nrpa_bias_known, kReportHintBias, k,
-					kReportTemp);
-				double am = 0;
-				const double a = CorpusAgreement(probe, &res, out,
-												 defaults.nrpa_bias_known, k, &am);
-				std::printf("  %4.0f/%3.0f%%", 100.0 * std::exp(a), 100.0 * am);
-			}
-			std::printf("\n");
-		}
-	}
-	// Context pushed to the extreme: the SIGNATURE of the decision point itself
-	// (context + set of legal moves). The contextual level then becomes a
-	// quasi-table over the decision points, and it must reach the ceiling. What
-	// this arm measures is not a usable setting but an ANSWER: if it alone touches
-	// the ceiling, then reproducing the corpus requires MEMORISING it, and no
-	// representation that generalises will do it.
-	{
-		std::vector<NrpaRun> sig_runs = out;
-		std::vector<uint64_t> sorted;
-		for(NrpaRun& r : sig_runs) {
-			for(PolicyStep& s : r.steps) {
-				sorted = s.keys;
-				std::sort(sorted.begin(), sorted.end());
-				uint64_t sig = (s.cctx + 1) * 0x9e3779b97f4a7c15ull;
-				for(uint64_t k : sorted)
-					sig = (sig ^ k) * 0x100000001b3ull;
-				// Written into `cctx`, the field the contextual level READS; writing
-				// it into `ctx` would make this probe measure a conditioning nobody
-				// uses any more. And on 64 bits: truncating to uint16 made distinct
-				// decision points collide, which UNDERSTATED the memorisation ceiling
-				// it is supposed to measure.
-				s.cctx = sig;
-			}
-		}
-		std::printf("  accord du corpus — contexte = SIGNATURE du point de "
-					"decision (memorisation) :\n      %-8s", "passes");
-		for(float al : alphas)
-			std::printf("  a=%-6.2f", al);
-		std::printf("\n");
-		for(uint32_t n : { 0u, 1u, 4u, 16u, 64u, 256u }) {
-			std::printf("      %-8u", n);
-			for(float al : alphas) {
-				NrpaPolicy probe;
-				NrpaResidual res;
-				AdaptCorpus(probe, &res, sig_runs, n, al,
-							defaults.nrpa_bias_known, kReportHintBias,
-							1.0f, kReportTemp);
-				double am = 0;
-				const double a = CorpusAgreement(probe, &res, sig_runs,
-												 defaults.nrpa_bias_known, 1.0f,
-												 &am);
-				std::printf("  %4.0f/%3.0f%%", 100.0 * std::exp(a), 100.0 * am);
-			}
-			std::printf("\n");
-		}
-	}
-	// COST FORECAST: the instrument that decides whether sqrt-LTS is worth
-	// writing. The LTS bound (d/pi) is computed over the ALREADY RESOLVED lines of
-	// the corpus, then compared with the sum of the bounds per segment delimited by
-	// the hints the solver already produces (target board cards placed). The gap is
-	// the maximum gain of the rerooting, known BEFORE implementing it.
-	{
-		std::printf("  prevision de cout de recherche (borne LTS, log10 "
-					"d'expansions) :\n");
-		std::printf("      %-22s %10s %12s %8s %12s\n", "politique",
-					"monolithe", "decompose", "segments", "pire segment");
-		struct Arm { const char* name; uint32_t passes; float k; };
-		const Arm arms[] = {
-			{ "vierge (repertoire)", 0, -1.0f },
-			{ "adaptee 4 passes", 4, -1.0f },
-			{ "adaptee + contexte", 4, 1.0f },
-		};
-		for(const Arm& a : arms) {
-			NrpaPolicy probe;
-			NrpaResidual res;
-			AdaptCorpus(probe, &res, out, a.passes, defaults.nrpa_alpha,
-						defaults.nrpa_bias_known, kReportHintBias, a.k,
-						kReportTemp);
-			const CostForecast f = ForecastSearchCost(
-				probe, &res, out, defaults.nrpa_bias_known, a.k);
-			std::printf("      %-22s %9.1f  %11.1f  %7.1f  %11.1f\n", a.name,
-						f.log10_mono, f.log10_decomp, f.segments,
-						f.worst_seg_log10);
-		}
-		std::printf("      (le decompose est le MEILLEUR cas du rerooting : le "
-					"papier ajoute\n       un facteur pour l'incertitude du "
-					"rerooter — c'est un plafond.)\n");
-	}
-	// OPTION GAIN FORECAST. The only identified lever that touches the EXPONENT
-	// rather than the base, and, like alpha for sqrt-LTS, it can be quantified
-	// BEFORE writing the mechanism.
-	{
-		std::printf("  prevision du gain des OPTIONS (macros minees dans le "
-					"corpus, politique uniforme) :\n");
-		std::printf("      %-10s %-9s %-6s %10s %11s %10s %9s\n", "catalogue",
-					"support", "long.", "decisions", "avec macros",
-					"log10 d/pi", "absorbe");
-		for(const auto& [cat, sup] : { std::pair<size_t, uint32_t>{ 16, 4 },
-									   std::pair<size_t, uint32_t>{ 64, 3 },
-									   std::pair<size_t, uint32_t>{ 256, 2 } }) {
-			const OptionForecast f = ForecastOptionGain(out, cat, sup, 8);
-			if(!f.lines || !f.options) {
-				std::printf("      %-10zu %-9u  (aucune macro de ce support)\n",
-							cat, sup);
-				continue;
-			}
-			std::printf("      %-10zu %-9u %-6zu %9.0f %10.0f  %5.1f -> %-5.1f "
-						"%7.0f%%\n", f.options, sup, f.max_len, f.depth_flat,
-						f.depth_opt, f.log10_flat, f.log10_opt,
-						100.0 * f.covered);
-		}
-		std::printf("      (borne BASSE : le catalogue entier est suppose "
-					"propose a chaque decision,\n       et aucune macro n'est "
-					"creditee de raccourcir une ligne que le corpus a jouee.)\n");
 	}
 	{
 		NrpaPolicy probe;
@@ -5779,14 +5828,16 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 		AdaptCorpus(probe, &res, out, opt.adapt_passes, defaults.nrpa_alpha,
 					defaults.nrpa_bias_known, kReportHintBias,
 					static_cast<float>(opt.ctx_shrink), kReportTemp);
-		std::printf("  retenu : %u passe(s), retenue k=%.1f%s, %zu poids "
-					"globaux + %zu contextuels\n",
+		std::printf("  kept: %u pass(es), shrink k=%.1f%s, %zu global "
+							"weights + %zu contextual\n",
 					opt.adapt_passes, opt.ctx_shrink,
-					opt.ctx_shrink < 0 ? " (niveau contextuel ETEINT)" : "",
+					opt.ctx_shrink < 0 ? " (niveau contextuel "
+															"ETEINT)" : "",
 					probe.size(), res.size());
 		if(!opt.adapt_passes)
-			std::printf("  (--adapt-passes 0 : releve fait, adaptation "
-						"DESACTIVEE — bras temoin de l'A/B)\n");
+			std::printf("  (--adapt-passes 0: recording done, "
+									"adaptation DISABLED - the A/B control "
+									"arm)\n");
 	}
 }
 
@@ -5813,7 +5864,8 @@ void BuildAdaptRuns(const Options& opt, CardDB& db, ScriptProvider& scripts,
 void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 				 const Options& opt, const LineResult& ref, CardDB& db,
 				 ScriptProvider& scripts, const LineConstraints& cons) {
-	std::printf("\n=== test adverse : l'adversaire JOUE la menace (--fire) ===\n");
+	std::printf("\n=== opponent test: the opponent PLAYS the threat "
+					"(--fire) ===\n");
 	uint32_t fire_code = 0;
 	if(!ResolveCard(opt.fire_spec, db, "--fire", fire_code))
 		return;
@@ -5824,14 +5876,25 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 			return;
 		spare_codes.push_back(c);
 	}
+
+	// The mechanism report, on this path too. The per-window config comes from the
+	// same ApplyMechanisms, so a lever whose dependency this mode does not serve
+	// (recipe graph, landmarks, ladder) is named INERT once here instead of being
+	// silently dropped in every window.
+	{
+		SearchConfig probe;
+		ApplyMechanisms(opt, probe);
+		probe.resolve_min = cons.resolve_min;
+		ReportMechanisms(probe, "fire");
+	}
 	if(!ref.have_target) {
-		std::printf("!! pas de board cible (la ligne n'atteint pas la fin du "
-					"tour 1)\n");
+		std::printf("!! no target board (the line does not reach the "
+							"end of turn 1)\n");
 		return;
 	}
 	const auto con = static_cast<uint8_t>(opt.target_player);
-	std::printf("  menace : %s — ajoutee a la main adverse, JOUEE a chaque "
-				"fenetre legale\n", db.Name(fire_code).c_str());
+	std::printf("  threat: %s - added to the opponent hand, PLAYED at "
+					"every legal window\n", db.Name(fire_code).c_str());
 	// No-chain specific to the continuation (--fire-no-chain): staging a precise
 	// answer. Must outlive the search threads.
 	std::vector<uint32_t> fire_no_chain;
@@ -5840,7 +5903,8 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		if(!ResolveCard(spec, db, "--fire-no-chain", c))
 			return;
 		fire_no_chain.push_back(c);
-		std::printf("  continuation : %s ne chaine JAMAIS (--fire-no-chain)\n",
+		std::printf("  continuation: %s NEVER chains "
+							"(--fire-no-chain)\n",
 					db.Name(c).c_str());
 	}
 
@@ -5865,7 +5929,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 	std::vector<BoardKey> alts;
 	if(!spare_codes.empty()) {
 		if(spare_codes.size() > 3) {
-			std::printf("!! --fire-spare : au plus 3 cartes\n");
+			std::printf("!! --fire-spare: at most 3 cards\n");
 			return;
 		}
 		const size_t n = spare_codes.size();
@@ -5900,11 +5964,12 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 			if(!all_removed)
 				continue;
 			alts.push_back(MakeBoardKey(mz, sz, db));
-			std::printf("  but alternatif : le board SANS %s\n", names.c_str());
+			std::printf("  alternative goal: the board WITHOUT %s\n", names.c_str());
 		}
 		if(alts.empty())
-			std::printf("  !! --fire-spare : aucune des cartes n'est sur le "
-						"board cible — buts alternatifs ignores\n");
+			std::printf("  !! --fire-spare: none of the cards is "
+									"on the target board - alternative goals "
+									"ignored\n");
 	}
 	const bool have_alt = !alts.empty();
 
@@ -5941,13 +6006,15 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 					in_hand = true;
 		}
 		if(!in_hand) {
-			std::printf("!! --fire-bake : la carte n'arrive pas en main "
-						"adverse par la donne (sonde) — abandon\n");
+			std::printf("!! --fire-bake: the card does not reach "
+									"the opponent hand through the deal "
+									"(probe) - abandoned\n");
 			return;
 		}
-		std::printf("  --fire-bake : %s cuit dans l'en-tete (deck adverse), "
-					"verifie en main par sonde ;\n  les replays produits se "
-					"visionnent dans EDOPro tels quels.\n",
+		std::printf("  --fire-bake: %s baked into the header "
+							"(opponent deck), verified in hand by probe;\n"
+							"  the replays produced play in EDOPro as they "
+							"are.\n",
 					db.Name(fire_code).c_str());
 		fyrp = &baked;
 		extra = nullptr;
@@ -5966,10 +6033,11 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		// blamed on the search.
 		const size_t unknown = LiftPlan(duel, arena, yrp, opt.target_player,
 										ref.target_at, eo, plan);
-		std::printf("  repertoire de refermeture : %zu etape(s), "
-					"%zu non identifiee(s)%s\n", plan.size(), unknown,
+		std::printf("  recovery repertoire: %zu step(s), %zu "
+							"unidentified%s\n", plan.size(), unknown,
 					(plan.size() && unknown * 2 > plan.size())
-						? "   <-- le repertoire est majoritairement aveugle"
+						? "   <-- the repertoire is "
+												"mostly blind"
 						: "");
 		arena.Restore();
 	}
@@ -5977,8 +6045,6 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 	// measured wall of the early windows is the re-derivation of the three rips
 	// from the post-injection state, which is exactly what the corpus encodes.
 	// Must outlive the search threads.
-	NrpaPolicy prior_policy;
-	BuildPriorPolicy(opt, db, scripts, prior_policy);
 	// Adaptation replay (--adapt): same corpus, same injection point, a
 	// discriminative signal instead of a per-move bonus.
 	std::vector<NrpaRun> adapt_runs;
@@ -6016,12 +6082,12 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		}
 		arena.Restore();
 		if(retry) {
-			std::printf("!! etiquetage : MSG_RETRY sur le rejeu de base — "
-						"abandon\n");
+			std::printf("!! labelling: MSG_RETRY on the baseline "
+									"replay - abandoned\n");
 			return;
 		}
-		std::printf("  ligne de base : %zu reponses a nous, %zu passes "
-					"adverses, board a la reponse %zu\n",
+		std::printf("  baseline: %zu answers of ours, %zu opponent "
+							"passes, board at answer %zu\n",
 					ours.size(), theirs.size(), ref.target_at);
 	}
 
@@ -6045,7 +6111,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		Arena fa;
 		std::string err;
 		if(!fa.Init(opt.arena_mb << 20, 0, err))
-			return WorkerAbort("arene (test adverse)", err);
+			return WorkerAbort("arena (opponent test)", err);
 		{
 			Duel fd(db, scripts, &fa);
 			if(fd.Create(fyrp->seed, fyrp->duel_flags, fyrp->start_lp,
@@ -6194,7 +6260,8 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 					aligned = fin == target;
 				}
 			} else {
-				std::printf("  !! duel augmente non initialisable : %s\n",
+				std::printf("  !! augmented duel cannot be "
+											"initialised: %s\n",
 							err.c_str());
 			}
 		}
@@ -6203,28 +6270,31 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 	}).join();
 
 	if(!aligned) {
-		std::printf("!! la passe de decouverte n'atteint pas le board sur le "
-					"duel augmente\n   (desalignement du rejeu par joueur) — "
-					"aucune injection tentee.\n");
+		std::printf("!! the discovery pass does not reach the board "
+							"on the augmented duel\n"
+							"   (per-player replay misalignment) - no "
+							"injection attempted.\n");
 		return;
 	}
-	std::printf("  alignement PROUVE : la ligne de base refait le board sur le "
-				"duel augmente.\n");
-	std::printf("  %zu fenetre(s) ou %s est jouable%s", windows.size(),
+	std::printf("  alignment PROVEN: the baseline redoes the board on the "
+					"augmented duel.\n");
+	std::printf("  %zu window(s) where %s is playable%s", windows.size(),
 				db.Name(fire_code).c_str(),
-				opt.fire_open ? " EN OUVERTURE DE CHAINE (--fire-open)" : "");
+				opt.fire_open ? " EN OUVERTURE DE CHAINE "
+												"(--fire-open)" : "");
 	{
 		size_t open_n = 0;
 		for(const FireWindow& w : windows)
 			open_n += w.over ? 0 : 1;
-		std::printf(" (%zu chaine vide, %zu par-dessus un effet)\n",
+		std::printf(" (%zu on an empty chain, %zu on top of an "
+							"effect)\n",
 					open_n, windows.size() - open_n);
 	}
 	if(windows.empty())
 		return;
 
 	// --- 5. One injection per window, rooted search towards the goal(s).
-	std::printf("\n--- injections : %.0f s de recherche par fenetre ---\n",
+	std::printf("\n--- injections: %.0f s of search per window ---\n",
 				opt.fire_ms / 1000.0);
 	uint64_t base_seed = opt.seed;
 	if(!base_seed) {
@@ -6254,7 +6324,8 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 			Arena fa;
 			std::string err;
 			if(!fa.Init(opt.arena_mb << 20, 0, err))
-				return WorkerAbort("arene (continuation --fire)", err);
+				return WorkerAbort("arena (--fire "
+												"continuation)", err);
 			{
 				Duel fd(db, scripts, &fa);
 				if(fd.Create(fyrp->seed, fyrp->duel_flags, fyrp->start_lp,
@@ -6285,8 +6356,10 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						}
 						if(retry || used < W.prefix.size()) {
 							std::lock_guard<std::mutex> lk(mx);
-							std::printf("  fenetre %2zu : !! prefixe non "
-										"rejouable (%zu/%zu)\n", w, used,
+							std::printf("  window %2zu: !! "
+																	"prefix not "
+																	"replayable "
+																	"(%zu/%zu)\n", w, used,
 										W.prefix.size());
 							continue;
 						}
@@ -6308,8 +6381,10 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 							} while(st == OCG_DUEL_STATUS_CONTINUE && !retry);
 							if(retry || st != OCG_DUEL_STATUS_AWAITING) {
 								std::lock_guard<std::mutex> lk(mx);
-								std::printf("  fenetre %2zu : !! la fenetre de "
-											"tir ne s'ouvre pas au rejeu\n", w);
+								std::printf("  window %2zu: !! "
+																			"the firing window "
+																			"does not open on "
+																			"replay\n", w);
 								continue;
 							}
 						}
@@ -6364,8 +6439,9 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 											names += " [muselee]";
 								}
 								std::lock_guard<std::mutex> lk(mx);
-								std::printf("  fenetre %2zu : reponses a la "
-											"menace : %s\n", w,
+								std::printf("  window %2zu: "
+																			"answers to the "
+																			"threat: %s\n", w,
 											names.empty() ? "(passer seulement)"
 														  : names.c_str());
 							}
@@ -6373,14 +6449,20 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						}
 						if(inj_retry) {
 							std::lock_guard<std::mutex> lk(mx);
-							std::printf("  fenetre %2zu (dec. %3zu, inv. %2u) "
-										": injection REJETEE par le core "
-										"(activation illegale ici)\n",
+							std::printf("  window %2zu (dec. "
+																	"%3zu, summon %2u): "
+																	"injection REJECTED "
+																	"by the core "
+																	"(activation illegal "
+																	"here)\n",
 										w, W.our_at, W.summons);
 							continue;
 						}
 						SearchConfig fcfg;
-						fcfg.target_player = opt.target_player;
+						// ONE SINGLE WIRING POINT, here too. This config used to be hand-wired
+						// field by field, which left every mechanism absent from that list
+						// silently inert under --fire while the report said nothing.
+						ApplyMechanisms(opt, fcfg);
 						fcfg.max_decisions = FinisherDepth(
 							static_cast<uint32_t>(ref.target_at * 3 / 2 + 32),
 							W.prefix.size());
@@ -6416,29 +6498,15 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						if(have_alt)
 							fcfg.target_alts = &alts;
 						// Prior: the policy starts knowing how to rip.
-						if(!prior_policy.empty())
-							fcfg.nrpa_init = &prior_policy;
 						// Adaptation replay: it starts knowing which move the
 						// solution took at each junction.
 						if(!adapt_runs.empty()) {
 							fcfg.nrpa_adapt_runs = &adapt_runs;
-							fcfg.nrpa_adapt_passes = opt.adapt_passes;
 						}
-						// Two-level policy.
-						fcfg.ctx_shrink = static_cast<float>(opt.ctx_shrink);
-						// Path conditioning (MCPS) and the contextual table's cap: the
-						// two must travel TOGETHER, otherwise the context is computed
-						// and never bounded.
-						fcfg.qhat_depth = opt.qhat_depth;
-						fcfg.qhat_window = opt.qhat_window;
-						fcfg.qhat_rho = opt.qhat_rho;
-						fcfg.qhat_max_nodes = opt.qhat_nodes;
 						fcfg.enumeration.canonical_zones = opt.canonical_zones;
 						fcfg.goal_subset =
 							opt.target_subset ||
 							(!opt.target_specs.empty() && !opt.target_exact);
-						fcfg.ctx_max = opt.ctx_max;
-						fcfg.nrpa_temp = static_cast<float>(opt.nrpa_temp);
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
 								   base_seed + w * 0x9E3779B97F4A7C15ull + 1);
@@ -6491,15 +6559,20 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 								miss = "  manque : " + miss;
 						}
 						const std::string wpos =
-							W.over ? "sur " + db.Name(W.over)
+							W.over ? "over " + db.Name(W.over)
 								   : std::string("OUVERTE");
-						std::printf("  fenetre %2zu (dec. %3zu, inv. %2u, %s) : "
-									"%s  [%llu tirages, best %u/%zu]%s\n", w,
+						std::printf("  window %2zu (dec. "
+															"%3zu, summon %2u, "
+															"%s): %s  [%llu "
+															"rollouts, best "
+															"%u/%zu]%s\n", w,
 									W.our_at, W.summons, wpos.c_str(),
 									r.converted
-										? (r.alt ? "CONVERTIE (board SANS "
-												   "carte(s) sacrifiee(s))"
-												 : "CONVERTIE (board COMPLET)")
+										? (r.alt ? "CONVERTED (board "
+																						"WITHOUT the "
+																						"sacrificed card(s))"
+												 : "CONVERTIE (board "
+																								"COMPLET)")
 										: "pas convertie",
 									(unsigned long long)r.rollouts,
 									st.best_overlap, target.codes.size(),
@@ -6561,21 +6634,24 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 											listed = true;
 											break;
 										}
-									std::printf("  fenetre %2zu : !! "
-												"auto-controle DIVERGE a la "
-												"reponse %zu/%zu (prefixe %zu, "
-												"injection %zu) — prompt %u "
-												"joueur %d, %zu choix a froid, "
-												"reponse du chemin %s\n", w,
+									std::printf("  window %2zu: !! "
+																					"self-check DIVERGED "
+																					"at answer %zu/%zu "
+																					"(prefix %zu, "
+																					"injection %zu) - "
+																					"prompt %u player "
+																					"%d, %zu cold "
+																					"choices, path "
+																					"answer %s\n", w,
 												fed, full.size(),
 												W.prefix.size(),
 												W.prefix.size() + 1,
 												sc_ptype, sc_player,
 												cold.size(),
-												listed ? "LISTEE (etat "
-														 "divergent)"
-													   : "NON LISTEE (decalage "
-														 "de fenetres)");
+												listed ? "LISTED (divergent "
+																										"state)"
+													   : "NOT LISTED (window "
+																											"offset)");
 								}
 							}
 							s.responses = std::move(full);
@@ -6585,7 +6661,8 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						}
 					}
 				} else {
-					WorkerAbort("duel (continuation --fire)", err);
+					WorkerAbort("duel (continuation "
+													"--fire)", err);
 				}
 			}
 			ReportPoison("continuation --fire", fa);
@@ -6607,24 +6684,26 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		else
 			++full_n;
 	}
-	std::printf("\n=== verdict --fire : %zu fenetre(s) sur %zu converties "
-				"(%zu board complet, %zu sans la carte sacrifiee) ===\n",
+	std::printf("\n=== --fire verdict: %zu window(s) out of %zu converted "
+					"(%zu full board, %zu without the sacrificed card) ===\n",
 				converted, windows.size(), full_n, alt_n);
 	if(converted < windows.size())
-		std::printf("  les fenetres non converties ne sont PAS des preuves "
-					"d'absence : budget %0.f s\n  d'echantillonnage par "
-					"fenetre — approfondir avec --fire-ms.\n", opt.fire_ms / 1000.0);
+		std::printf("  unconverted windows are NOT proofs of absence: "
+							"%0.f s of sampling\n"
+							"  budget per window - go deeper with --fire-ms.\n", opt.fire_ms / 1000.0);
 	if(!all_sols.empty()) {
 		LineConstraints fcons = cons;
 		fcons.guard.clear();
 		fcons.guard_after = 0;
 		fcons.guard_opp_hand_release = -1;
 		if(opt.fire_bake)
-			std::printf("\n  replays des refermetures (en-tete CUIT : "
-						"rejouables depuis leur fichier, EDOPro compris) :\n");
+			std::printf("\n  replays of the recoveries (header "
+									"BAKED: replayable from their own file, "
+									"EDOPro included):\n");
 		else
-			std::printf("\n  replays des refermetures (rejouables en mode juge "
-						"avec --opp-hand \"%u\") :\n", fire_code);
+			std::printf("\n  replays of the recoveries "
+									"(replayable in judge mode with "
+									"--opp-hand \"%u\"):\n", fire_code);
 		WriteSolutions(all_sols, *fyrp, target, opt, db, scripts, opt.outdir,
 					   fcons, extra, have_alt ? &alts : nullptr);
 	}
@@ -6672,14 +6751,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						const LineConstraints& cons,
 						TransplantOutcome* outres = nullptr,
 						RoundCarry* carry = nullptr) {
-	std::printf("\n=== transplantation du combo sur un autre deck ===\n");
+	std::printf("\n=== transplanting the combo onto another deck ===\n");
 	if(!cons.opp_hand.empty()) {
-		std::printf("  main adverse   : +%zu carte(s) (--opp-hand) :",
+		std::printf("  opponent hand  : +%zu card(s) (--opp-hand):",
 					cons.opp_hand.size());
 		for(uint32_t c : cons.opp_hand)
 			std::printf(" %s;", db.Name(c).c_str());
-		std::printf("\n                   les replays produits ne se rejouent "
-					"qu'avec le meme --opp-hand\n");
+		std::printf("\n                   the replays produced only "
+							"replay with the same --opp-hand\n");
 	}
 	while(arena.Depth() > 1)
 		arena.Pop();
@@ -6724,8 +6803,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									  : ref.target_self.szone;
 		bool edit_ok = true;
 		if(cons.target_scratch && !cons.board_remove.empty()) {
-			std::printf("!! --target et --board-remove sont exclusifs : le board "
-						"cible est deja construit de zero\n");
+			std::printf("!! --target and --board-remove are "
+									"exclusive: the target board is already "
+									"built from scratch\n");
 			return;
 		}
 		for(uint32_t code : cons.board_remove) {
@@ -6742,8 +6822,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					break;
 			}
 			if(!found) {
-				std::printf("!! --board-remove : %s n'est pas sur le board "
-							"cible\n", db.Name(code).c_str());
+				std::printf("!! --board-remove: %s is not on "
+											"the target board\n", db.Name(code).c_str());
 				edit_ok = false;
 			}
 		}
@@ -6757,16 +6837,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(!edit_ok)
 			return;
 		if(cons.target_scratch && mz.empty() && sz.empty()) {
-			std::printf("!! --target : cible vide, rien a atteindre\n");
+			std::printf("!! --target: empty target, nothing to "
+									"reach\n");
 			return;
 		}
 		target = MakeBoardKey(mz, sz, db);
 		posed_mz = mz;
 		posed_sz = sz;
 		posed = true;
-		std::printf("\n--- board cible %s ---\n",
-					cons.target_scratch ? "POSE (--target, sans reference)"
-										: "EDITE");
+		std::printf("\n--- target board %s ---\n",
+					cons.target_scratch ? "POSTED (--target, "
+															"no reference)"
+										: "EDITED");
 		for(const auto& c : mz)
 			if(c.present)
 				std::printf("      MZONE %9u  %-36.36s %s\n", c.Code(),
@@ -6776,12 +6858,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				std::printf("      SZONE %9u  %-36.36s %s\n", c.Code(),
 							db.Name(c.Code()).c_str(), PosName(c.position));
 		if(target.mzone_count > 6)
-			std::printf("  !! %u monstres exiges : PLUS que les 6 zones "
-						"utilisables, cible inatteignable\n", target.mzone_count);
+			std::printf("  !! %u monsters required: MORE than the "
+									"6 usable zones, target unreachable\n", target.mzone_count);
 	}
 
-	std::printf("  cible          : %zu cartes\n", target.entries.size());
-	std::printf("  reference      : %u actions, %zu decisions, %u cartes brulees\n",
+	std::printf("  target         : %zu cards\n", target.entries.size());
+	std::printf("  reference      : %u actions, %zu decisions, %u cards "
+					"burned\n",
 				ref_actions, ref_decisions, ref_burned);
 
 	// --- 2. Feasibility. A board card must come from the player's main deck or
@@ -6804,15 +6887,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(have < n)
 				missing.emplace_back(code, n - have);
 		}
-		std::printf("\n--- faisabilite : les cartes du board sont-elles dans ce deck ? ---\n");
+		std::printf("\n--- feasibility: are the board's cards in this "
+							"deck? ---\n");
 		if(missing.empty()) {
-			std::printf("  les %zu cartes du board cible sont presentes.\n",
+			std::printf("  all %zu target board cards are "
+									"present.\n",
 						need.size());
 		} else {
 			for(const auto& [code, n] : missing)
 				std::printf("  MANQUE %dx %9u  %s\n", n, code, db.Name(code).c_str());
-			std::printf("\n  Ce deck ne contient pas les cartes du board : la cible est\n"
-						"  hors d'atteinte, quelle que soit la ligne. Recherche annulee.\n");
+			std::printf("\n  This deck does not hold the board's "
+									"cards: the target is out of\n"
+									"  reach whatever the line. Search "
+									"cancelled.\n");
 			return;
 		}
 	}
@@ -6840,16 +6927,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(have < n)
 				gone.emplace_back(code, n - have);
 		}
-		std::printf("\n--- cartes empruntees par la ligne, absentes de ce deck ---\n");
+		std::printf("\n--- cards the line borrows, absent from this "
+							"deck ---\n");
 		if(gone.empty()) {
-			std::printf("  aucune : le deck de depart peut fournir les %zu cartes "
-						"que la ligne engage.\n", engaged.size());
+			std::printf("  none: the starting deck can supply the "
+									"%zu cards the line engages.\n", engaged.size());
 		} else {
 			for(const auto& [code, n] : gone)
 				std::printf("  MANQUE %dx %9u  %s\n", n, code, db.Name(code).c_str());
-			std::printf("\n  Le board est atteignable en principe, mais la ligne de\n"
-						"  reference passait par ces cartes-la : son plan ne peut pas\n"
-						"  etre suivi tel quel, il faudra un autre chemin.\n");
+			std::printf("\n  The board is reachable in principle, "
+									"but the reference line went\n"
+									"  through those cards: its plan cannot "
+									"be followed as it stands,\n"
+									"  another route is needed.\n");
 		}
 
 		// The opening hand decides everything: two similar decks with different hands
@@ -6859,7 +6949,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		for(const auto& c : ref.start_self.hand_cards)
 			if(c.present)
 				std::printf(" %s;", db.Name(db.Canonical(c.Code())).c_str());
-		std::printf("\n  depart    :");
+		std::printf("\n  start     :");
 		for(uint32_t code : OpeningHand(start_yrp, con, db, scripts, opt.arena_mb))
 			std::printf(" %s;", db.Name(code).c_str());
 		std::printf("\n");
@@ -6879,10 +6969,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						   eo, plan);
 		double ms = MsSince(t0);
 		arena.Restore();
-		std::printf("\n--- plan releve sur la ligne de reference ---\n");
+		std::printf("\n--- plan recorded from the reference line ---\n");
 		std::printf("  etapes            : %zu  (%.0f ms)\n", plan.size(), ms);
 		std::printf("  non identifiees   : %zu%s\n", unknown,
-					unknown ? "   <-- autant de trous dans le guide" : "");
+					unknown ? "   <-- that many holes in "
+												"the guide" : "");
 		std::map<uint8_t, size_t> by_type;
 		for(const auto& s : plan)
 			++by_type[s.prompt_type];
@@ -6891,7 +6982,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 
 		// The line's opening says what the new deck must be able to reproduce. It is
 		// the part of the plan that fails first.
-		std::printf("\n  ouverture de la ligne :\n");
+		std::printf("\n  opening of the line:\n");
 		size_t shown = 0;
 		for(const auto& s : plan) {
 			if(shown >= 18)
@@ -6914,25 +7005,26 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// printed. The recording stays, so the measurement says exactly WHAT IS BEING
 	// REMOVED; a mechanism neutralised in silence cannot be judged.
 	if(opt.no_plan) {
-		std::printf("\n  --no-plan : les %zu etapes ci-dessus sont ECARTEES.\n"
-					"  La politique NRPA demarre uniforme : plus de biais "
-					"`known`, ni aux tirages\n  ni au finisseur. C'est le mode "
-					"BUT SEUL — la reference ne sert plus que de\n  gabarit de "
-					"duel%s.\n", plan.size(),
-					opt.no_ref ? " (--no-ref : board cible et ligne ecartes aussi)"
+		std::printf("\n  --no-plan: the %zu steps above are SET "
+							"ASIDE.\n  The NRPA policy starts uniform: no "
+							"`known` bias, in the rollouts or in the\n"
+							"  finisher. This is GOAL-ONLY mode - the "
+							"reference now serves only as a duel\n"
+							"  template%s.\n", plan.size(),
+					opt.no_ref ? " (--no-ref: target "
+													"board and line set "
+													"aside too)"
 							   : "");
 		plan.clear();
 	}
 	if(plan.empty() && !opt.no_plan) {
-		std::printf("\n  Plan vide : rien a transplanter.\n");
+		std::printf("\n  Empty plan: nothing to transplant.\n");
 		return;
 	}
 
 	// Prior by replay (--prior): INITIAL weights of the rollouts' policy, recorded
 	// from the solution corpus (each line on ITS own duel). Must outlive every
 	// phase (rollouts, finisher).
-	NrpaPolicy prior_policy;
-	BuildPriorPolicy(opt, db, scripts, prior_policy);
 	// RECIPE GRAPH. Created BEFORE the adaptation replay, so that the corpus's
 	// summons feed it with OBSERVED recipes: real materials and zones, exception
 	// routes included. That is what breaks the chicken-and-egg of the
@@ -6948,14 +7040,17 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// The QUOTA hosts: poured into cfg at the same point as serial_from_balance.
 	std::vector<uint32_t> quota_hosts_wiring;
 	if(opt.probe_repeat && cons.resolve_min.empty())
-		std::printf("!! --probe-repeat sans --summon-min ni --resolve : aucune "
-					"carte a surveiller, la sonde restera MUETTE\n");
+		std::printf("!! --probe-repeat without --summon-min or "
+							"--resolve: no card to watch, the probe will stay "
+							"MUTE\n");
 	if(opt.recipes >= 0) {
-		std::printf("  graphe de recettes : ACTIF, poids %.2f%s\n",
+		std::printf("  recipe graph: ACTIVE, weight %.2f%s\n",
 					static_cast<float>(opt.recipes),
 					opt.recipes == 0.0
-						? "  (alimente et MESURE, n'entre pas dans le cout)"
-						: "  (la distance de recettes pese dans h)");
+						? "  (fed and MEASURED, does "
+												"not enter the cost)"
+						: "  (the recipe distance "
+												"weighs in h)");
 		std::vector<uint32_t> watched;
 		for(const ResolveReq& rq : cons.resolve_min)
 			watched.push_back(rq.code);
@@ -6968,8 +7063,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					? opt.target_player : 0];
 			const size_t n = SeedRecipesFromText(db, sd, target, recipe_graph,
 												 opt.seed_cardinal, watched);
-			std::printf("  amorce par le texte : %zu recette(s) posee(s), "
-						"%zu produit(s) connus\n", n, recipe_graph.Products());
+			std::printf("  seeded from card text: %zu recipe(s) "
+									"posted, %zu known product(s)\n", n, recipe_graph.Products());
 			ReportSeededDistances(target, recipe_graph, db, watched);
 		}
 		// SEEDING FROM THE DECLARED OPERATORS.
@@ -6985,9 +7080,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				codes.push_back(c);
 			ConstantTable kt;
 			if(!kt.Load(scripts)) {
-				std::printf("!! --op-recipes : aucune constante lue (constant.lua "
-							"absent des --scriptdir). L'amorce serait VIDE : elle "
-							"est sautee plutot que de se declarer active.\n");
+				std::printf("!! --op-recipes: no constant "
+											"read (constant.lua missing from "
+											"--scriptdir). The seeding would "
+											"be EMPTY: it is skipped rather "
+											"than declared active.\n");
 			} else {
 				OperatorTable tbl;
 				tbl.Build(db, scripts, kt, codes);
@@ -7060,21 +7157,25 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					mats.push_back(Requirement{ a.code, src, kReqCard, 1 });
 					recipe_graph.Observe(a.code, mats, /*primed=*/true);
 				}
-				std::printf("  amorce par les OPERATEURS : %zu recette(s) "
-							"declaree(s) (%zu route(s) morte(s)), %zu arete(s) "
-							"d'ACQUISITION de code, %zu produit(s) connus\n",
+				std::printf("  seeded from the OPERATORS: %zu "
+											"declared recipe(s) (%zu dead "
+											"route(s)), %zu code ACQUISITION "
+											"edge(s), %zu known product(s)\n",
 							nrec, dead, acq.size(), recipe_graph.Products());
 				// The mechanism's LIVENESS, and it is by name: without it, a seeding
 				// with zero edges would read as an active seeding.
 				for(const AcquirableCode& a : acq)
-					std::printf("      %s peut ACQUERIR le code de %s  (%s, hote "
-								"@%s, source @%s)\n", db.Name(a.host).c_str(),
+					std::printf("      %s can ACQUIRE the "
+													"code of %s  (%s, host "
+													"@%s, source @%s)\n", db.Name(a.host).c_str(),
 								db.Name(a.code).c_str(), a.grant.c_str(),
 								ZoneMaskName(static_cast<uint32_t>(a.host_range)).c_str(),
 								ZoneMaskName(static_cast<uint32_t>(a.source_zone)).c_str());
 				if(acq.empty())
-					std::printf("      (aucune arete d'acquisition : aucune carte "
-								"du deck n'accorde EFFECT_ADD_CODE)\n");
+					std::printf("      (no acquisition "
+													"edge: no card in the "
+													"deck grants EFFECT_ADD_CO"
+													"DE)\n");
 				ReportSeededDistances(target, recipe_graph, db, watched);
 
 				// --- SERIALISATION BY x* --------------------------------------
@@ -7116,27 +7217,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				// with 12.9 of life left, and a conjunction of ~2e-8 per rollout).
 				// ONE presence demand @AVAILABLE per code (never N: the same body
 				// coming back is legal, and requiring 1 keeps h admissible).
-				// Control: --resolve-legacy replays the older wiring identically.
 				std::vector<std::pair<uint32_t, uint32_t>> gtr;
-				if(!opt.resolve_legacy)
-					for(const ResolveReq& rr : cons.resolve_min) {
-						const uint32_t cc = db.Canonical(rr.code);
-						if(std::find_if(gtr.begin(), gtr.end(),
-										[&](const auto& g) {
-											return g.first == cc;
-										}) == gtr.end())
-							gtr.emplace_back(cc, 1u);
-					}
+				for(const ResolveReq& rr : cons.resolve_min) {
+					const uint32_t cc = db.Canonical(rr.code);
+					if(std::find_if(gtr.begin(), gtr.end(),
+									[&](const auto& g) {
+										return g.first == cc;
+									}) == gtr.end())
+						gtr.emplace_back(cc, 1u);
+				}
 				if(!cons.resolve_min.empty()) {
 					std::string vie;
 					for(const auto& g : gtr)
 						vie += "x1 " + db.Name(g.first) + " @DISPO ; ";
-					std::printf("  RESOLUTIONS -> BILAN : %s(cablage : "
-								"%s — temoin via --resolve-legacy)\n",
-								vie.c_str(),
-								opt.resolve_legacy ? "LEGACY s22quater, demandes "
-													 "NON posees"
-												   : "demandes transitoires s23");
+					std::printf("  RESOLUTIONS -> "
+													"BALANCE: %s\n", vie.c_str());
 				}
 				BalanceModel& bm = g_balance_model;
 				g_balance_armed = false;
@@ -7188,126 +7283,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							rq.count = 15;
 							serial_from_balance.push_back(rq);
 						}
-						// THE ENABLERS AND THE QUOTAS: TWO DERIVATIONS, one COMPUTED
-						// (from the duals, the default), the other by effect CLASSES
-						// (the alternative, behind --quota-legacy).
-						std::vector<uint32_t> quota_legacy;
-						std::vector<SearchConfig::SerialReq> presence_legacy;
+						// THE ENABLERS AND THE QUOTAS, derived from the LP duals.
 						std::unordered_map<uint32_t, uint32_t> dcop;
 						for(uint32_t c : deck_mult)
 							++dcop[db.Canonical(c)];
-						uint64_t k_add = 0, k_efm = 0;
-						kt.Lookup("EFFECT_ADD_CODE", k_add);
-						kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL", k_efm);
-						// (a) THE CONTROL: every host of an EFFECT_ADD_CODE or of an
-						// EFFECT_EXTRA_FUSION_MATERIAL present in the deck becomes an
-						// IN-PLAY presence rung and a quota host.
-						// quota.
-						{
-							for(const auto& kvv : tbl.All()) {
-								const uint32_t host = db.Canonical(kvv.first);
-								auto dit = dcop.find(host);
-								if(dit == dcop.end())
-									continue;
-								bool enabler = false;
-								for(const DeclaredEffect& g :
-									kvv.second.grants)
-									enabler = enabler ||
-											  (g.code_is_effect &&
-											   ((k_add &&
-												 g.code_value == k_add) ||
-												(k_efm &&
-												 g.code_value == k_efm)));
-								if(!enabler)
-									continue;
-								SearchConfig::SerialReq rq;
-								rq.code = host;
-								rq.zone = 6;   // IN PLAY (MZONE + SZONE)
-								rq.count = (std::min)(dit->second, 3u);
-								presence_legacy.push_back(rq);
-								// An enabler is also a QUOTA host.
-								quota_legacy.push_back(host);
-							}
-						}
-						// THE QUOTA HOSTS: to the enablers are added the hosts of a
-						// SPECIAL SUMMON product whose range touches the goal's
-						// archetype (Wolf's fusion: a once-per-turn ignition, the
-						// invisible member of the conjunction). The activation count
-						// along the path enters the cell key.
-						// cle de cellule.
-						{
-							// THE CRITERION IS THE GOAL'S ROUTE, not the archetype: the
-							// goal is a FUSION, so the quotas that matter are the
-							// Fusion IGNITERS (CATEGORY_FUSION_SUMMON, i.e. Wolf's
-							// fusion, once per turn from the PZONE). The first version
-							// took every SPECIAL_SUMMON product of the archetype and
-							// the cap of 6 cut off... Wolf exactly.
-							uint64_t c_fu = 0;
-							kt.Lookup("CATEGORY_FUSION_SUMMON", c_fu);
-							std::vector<uint64_t> goal_archs;
-							for(const auto& [gc0, gn0] : gc2) {
-								(void)gn0;
-								if(const CardRow* row =
-									   db.Find(db.Canonical(gc0)))
-									for(uint16_t sc : row->setcodes)
-										if(sc)
-											goal_archs.push_back(sc & 0x0fffu);
-							}
-							for(const auto& kvv : tbl.All()) {
-								const uint32_t host = db.Canonical(kvv.first);
-								// (i) a declared FUSION product; or (ii) a BOUNDED effect
-								// (SetCountLimit) of a host whose listed series cross the
-								// goal's archetype. Wolf's fusion lives in a shared
-								// Fusion.lua, out of reach of per-card extraction: it is
-								// its once-per-turn + SET_LUNALIGHT that designate it.
-								bool fu = false;
-								for(const DeclaredProduct& pr :
-									kvv.second.products)
-									fu = fu ||
-										 (c_fu && (pr.category & c_fu));
-								bool capped_goal = false;
-								bool series_goal = false;
-								for(uint64_t s0 : kvv.second.listed_series)
-									for(uint64_t ga : goal_archs)
-										series_goal =
-											series_goal ||
-											((s0 & 0x0fffull) == ga);
-								if(series_goal)
-									for(const std::vector<DeclaredEffect>* set :
-										{ &kvv.second.operators,
-										  &kvv.second.grants })
-										for(const DeclaredEffect& e0 : *set)
-											capped_goal = capped_goal ||
-														  e0.has_count_limit;
-								if(!fu && !capped_goal)
-									continue;
-								// A PRINCIPLED FILTER: a one-shot spell leaves a VISIBLE
-								// trace in a zone (it goes to the graveyard, and the
-								// digest and the ladder see it). The ignition of a card
-								// THAT STAYS in play (a monster, a continuous spell)
-								// leaves no trace: that is the one the key must carry.
-								// And never a card OF THE GOAL (its quota is the product,
-								// not a resource).
-								bool is_goal = false;
-								for(const auto& [gc0, gn0] : gc2) {
-									(void)gn0;
-									is_goal = is_goal ||
-											  db.Canonical(gc0) == host;
-								}
-								if(is_goal)
-									continue;
-								uint64_t t_cont = 0;
-								kt.Lookup("TYPE_CONTINUOUS", t_cont);
-								const CardRow* hrow = db.Find(host);
-								const bool persists =
-									hrow && ((hrow->type & 0x1u) ||
-											 (t_cont &&
-											  (hrow->type & t_cont)));
-								if(!persists)
-									continue;
-								quota_legacy.push_back(host);
-							}
-						}
+						uint64_t k_efm = 0;
+						kt.Lookup("EFFECT_EXTRA_FUSION_"
+														"MATERIAL", k_efm);
 						// (b) THE DERIVATION FROM THE DUALS: the default. Quotas:
 						// hosts with a FINITE bound fired by x*, saturated, with a
 						// positive dual, or producing a place x* consumes
@@ -7377,7 +7359,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							if(v.size() > 12)
 								v.resize(12);
 						};
-						finish_hosts(quota_legacy);
 						finish_hosts(quota_duals);
 						// THE LIVENESS OF BOTH DERIVATIONS, always printed: the
 						// three wrong derivations were seen ONLY through this line.
@@ -7386,47 +7367,36 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 													 v) {
 							std::printf("  %s : ", tag);
 							if(v.empty())
-								std::printf("(aucun)");
+								std::printf("(none)");
 							for(uint32_t qh : v)
 								std::printf("%s ; ", db.Name(qh).c_str());
 							std::printf("\n");
 						};
-						print_hosts("QUOTAS suivis (duaux)", quota_duals);
-						print_hosts("QUOTAS (temoin s21, classes)",
-									quota_legacy);
+						print_hosts("QUOTAS tracked "
+															"(duals)", quota_duals);
 						{
 							std::string ph;
 							for(const auto& rq : presence_duals)
 								ph += db.Name(rq.code) + " ; ";
-							std::printf("  PRESENCE @EN JEU (x*) : %s\n",
-										ph.empty() ? "(aucune)" : ph.c_str());
-							std::string pl;
-							for(const auto& rq : presence_legacy)
-								pl += db.Name(rq.code) + " ; ";
-							std::printf("  PRESENCE (temoin s21) : %s\n",
-										pl.empty() ? "(aucune)" : pl.c_str());
+							std::printf("  PRESENCE @EN JEU "
+																	"(x*) : %s\n",
+										ph.empty() ? "(none)" : ph.c_str());
 						}
-						if(opt.quota_legacy) {
-							quota_hosts_wiring = quota_legacy;
-							for(const auto& rq : presence_legacy)
-								serial_from_balance.push_back(rq);
-							std::printf("  (cablage : TEMOIN s21 — "
-										"--quota-legacy)\n");
-						} else {
 							quota_hosts_wiring = quota_duals;
 							for(const auto& rq : presence_duals)
 								serial_from_balance.push_back(rq);
-							std::printf("  (cablage : DUAUX s22 — temoin via "
-										"--quota-legacy)\n");
-						}
-						std::printf("  SERIALISATION par le bilan matiere : "
-									"h(depart) = %.0f, %zu sous-but(s)\n",
+						std::printf("  SERIALISATION "
+															"from the material "
+															"balance: h(start) = "
+															"%.0f, %zu "
+															"subgoal(s)\n",
 									h0, serial_from_balance.size());
 						for(const SearchConfig::SerialReq& rq :
 							serial_from_balance)
-							std::printf("      x%-2u %-34s @%s\n", rq.count,
+							std::printf("      x%-2u %-34s "
+																	"@%s\n", rq.count,
 										rq.zone == 5
-											? "(departs de reserve)"
+											? "(from reserve)"
 											: rq.code
 												  ? db.Name(rq.code).c_str()
 												  : "(archetype)",
@@ -7440,9 +7410,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						// An infinite `h` HERE would mean the goal is proved out of
 						// reach from this deck: we SAY so, we do not serialise on
 						// nothing.
-						std::printf("!! SERIALISATION : le bilan matiere ne rend "
-									"aucun plan (h = INFINI ou solveur en "
-									"defaut) — aucun sous-but pose.\n");
+						std::printf("!! SERIALISATION: "
+															"the material "
+															"balance returns no "
+															"plan (h = INFINITE "
+															"or solver at fault) "
+															"- no subgoal "
+															"posted.\n");
 					}
 				}
 			}
@@ -7458,17 +7432,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			std::vector<Requirement> reqs;
 			std::vector<uint32_t> prods;
 			recipe_graph.Expand(roots, 3, reqs, prods);
-			std::printf("  decomposition a rebours (ordre de FABRICATION, "
-						"%zu sous-produit(s)) :\n", prods.size());
+			std::printf("  backward decomposition (BUILD order, "
+									"%zu subproduct(s)):\n", prods.size());
 			for(uint32_t p : prods)
 				std::printf("      %s\n", db.Name(p).c_str());
 			std::printf("  exigences rencontrees : %zu\n", reqs.size());
 			for(const Requirement& q : reqs)
 				if(q.kind == kReqCard)
 					std::printf("      NOMMEE   %s @%s\n", db.Name(q.code).c_str(),
-								q.zone ? ZoneMaskName(q.zone).c_str() : "toute zone jouable");
+								q.zone ? ZoneMaskName(q.zone).c_str() : "any playable zone");
 				else
-					std::printf("      CARDINAL %s 0x%x x%u\n",
+					std::printf("      CARDINAL %s 0x%x "
+													"x%u\n",
 								q.kind == kReqLevel ? "niveau" : "archetype",
 								q.code, q.count);
 		}
@@ -7498,19 +7473,22 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	if(options_n) {
 		if(adapt_runs.empty()) {
 			if(opt.options_online)
-				std::printf("\n  options : aucun corpus externe (--adapt) — le run "
-							"part NU et minera ses propres lignes toutes les %u s "
-							"(--options-online).\n", opt.options_online);
+				std::printf("\n  options: no external corpus "
+											"(--adapt) - the run starts BARE "
+											"and will mine its own lines "
+											"every %u s (--options-online).\n", opt.options_online);
 			else
-				std::printf("\n!! --options %u : aucun corpus releve (--adapt "
-							"manquant ou vide) — catalogue VIDE, mecanisme eteint.\n",
+				std::printf("\n!! --options %u: no corpus "
+											"recorded (--adapt missing or "
+											"empty) - EMPTY catalogue, "
+											"mechanism off.\n",
 							options_n);
 		} else {
 			option_catalog = MineOptionCatalog(adapt_runs, options_n,
 											   opt.options_support,
-											   opt.options_len,
-											   opt.options_window,
-											   opt.options_ctx);
+											   Options::kOptionsMaxLen,
+											   Options::kOptionsWindow,
+											   Options::kOptionsCtxTol);
 			size_t max_len = 0, sum_len = 0;
 			for(const auto& s : option_catalog.seqs) {
 				max_len = (std::max)(max_len, s.size());
@@ -7518,21 +7496,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			}
 			// The size is a RESULT of the selection by Levin loss (it stops when
 			// nothing improves any more), not the parameter.
-			char ctxdesc[40] = "off";
-			if(opt.options_ctx >= 0)
-				std::snprintf(ctxdesc, sizeof(ctxdesc),
-							  "pose exact, main +/-%d", opt.options_ctx);
-			std::printf("\n  options : %zu macro(s) retenue(s) sur plafond %u "
-						"(support >= %u, longueur 2-%zu, moyenne %.1f, fenetre "
-						"%s%u, ctx %s) ; perte modele %.1f -> %.1f log10\n",
+			std::printf("\n  options: %zu macro(s) kept under a "
+									"ceiling of %u (support >= %u, length "
+									"2-%zu, mean %.1f); model loss %.1f -> "
+									"%.1f log10\n",
 						option_catalog.Size(), options_n,
 						opt.options_support, max_len,
 						option_catalog.Size()
 							? double(sum_len) / double(option_catalog.Size())
 							: 0.0,
-						opt.options_window ? "+/-" : "",
-						opt.options_window,
-						ctxdesc,
 						option_catalog.model_flat, option_catalog.model_opt);
 		}
 	}
@@ -7545,7 +7517,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// At equal progress, the archive score prefers the cell with FRESH quotas.
 	// Part of the "duals" package; the --quota-legacy control replays the older
 	// behaviour identically (a key with no preference).
-	cfg.quota_fresh_pref = !opt.quota_legacy;
+	cfg.quota_fresh_pref = true;
 	// The self-refining ladder. The model is only lent when serialisation has
 	// armed: with no ladder there is nothing to refine, and the mechanism
 	// announces itself inert through ReportMechanisms.
@@ -7574,17 +7546,23 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.max_decisions = opt.max_decisions ? opt.max_decisions
 										  : static_cast<uint32_t>(derived);
 	if(opt.max_decisions)
-		std::printf("  plafond de decisions : %u (--max-decisions ; le defaut "
-					"aurait ete %zu, %s)\n",
+		std::printf("  decision ceiling: %u (--max-decisions; the "
+							"default would have been %zu, %s)\n",
 					opt.max_decisions, derived,
-					opt.no_ref ? "derive de la decklist" : "derive de la reference");
+					opt.no_ref ? "derived from the "
+													"decklist" : "derived from the reference");
 	else
-		std::printf("  plafond de decisions : %zu (%s)\n", derived,
+		std::printf("  decision ceiling: %zu (%s)\n", derived,
 					opt.no_ref
-						? (deck_span ? "derive de la decklist : 12 par carte + 32"
-									 : "aucune decklist lisible : defaut fixe — "
-									   "poser --max-decisions")
-						: "derive de la reference : 1,5x + 32");
+						? (deck_span ? "derived from the "
+															"decklist: 12 per "
+															"card + 32"
+									 : "no readable "
+																		"decklist: fixed "
+																		"default - set "
+																		"--max-decisions")
+						: "derived from the "
+												"reference: 1.5x + 32");
 	cfg.max_actions = 0;         // no bound: we first look for a way TO reach it
 	cfg.max_nodes = 50000000;
 	cfg.max_solutions = 16;
@@ -7599,6 +7577,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.summon_constraints = cons.summons;
 	cfg.guard_after = cons.guard_after;
 	cfg.guard_clauses = cons.guard;
+	cfg.guard_keep = cons.guard_keep.empty() ? nullptr : &cons.guard_keep;
 	cfg.guard_opp_hand_release = cons.guard_opp_hand_release;
 	cfg.resolve_min = cons.resolve_min;
 	CheckSaturations(target.codes.size(), cons.resolve_min);
@@ -7628,11 +7607,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	if(opt.options_online) {
 		online.max_options = options_n;
 		online.support = opt.options_support;
-		online.max_len = opt.options_len;
-		online.window = opt.options_window;
-		online.ctx_tol = opt.options_ctx;
+		online.max_len = Options::kOptionsMaxLen;
+		online.window = Options::kOptionsWindow;
+		online.ctx_tol = Options::kOptionsCtxTol;
 		online.period_ms = opt.options_online * 1000.0;
-		online.max_pool = opt.options_pool ? opt.options_pool : 1;
+		online.max_pool = Options::kOptionsPool ? Options::kOptionsPool : 1;
 		online.per_worker = opt.options_per_worker ? opt.options_per_worker : 1;
 		if(!adapt_runs.empty())
 			online.seed = &adapt_runs;
@@ -7640,29 +7619,32 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			online.cat = std::make_shared<const OptionCatalog>(option_catalog);
 			online.gen = 1;   // the workers adopt it from the first round
 		}
-		std::printf("  options EN LIGNE : re-minage toutes les %u s, corpus "
-					"vivant %zu ligne(s) max (%zu par worker)%s\n",
+		std::printf("  ONLINE options: re-mined every %u s, living "
+							"corpus %zu line(s) max (%zu per worker)%s\n",
 					opt.options_online, online.max_pool, online.per_worker,
-					online.seed ? ", corpus --adapt en amorce" : "");
+					online.seed ? ", corpus --adapt en "
+													"amorce" : "");
 	}
-	std::printf("  biais des indices : %.2f (%s)\n", cfg.hint_bias,
-				opt.hint_bias >= 0 ? "--hint-bias" : "defaut du moteur");
+	std::printf("  hint bias         : %.2f (%s)\n", cfg.hint_bias,
+				opt.hint_bias >= 0 ? "--hint-bias" : "engine default");
 	// DETERMINISTIC MODE. Printed, because a budget that is no longer time changes
 	// how EVERY throughput counter of the report reads.
 	if(opt.max_nodes)
 		cfg.max_nodes = opt.max_nodes;
 	if(opt.max_rollouts || opt.max_nodes) {
-		std::printf("  BUDGET EN COMPTE : %llu tirage(s), %llu noeud(s) par "
-					"worker\n",
+		std::printf("  BUDGET IN COUNT: %llu rollout(s), %llu node(s) "
+							"per worker\n",
 					(unsigned long long)opt.max_rollouts,
 					(unsigned long long)cfg.max_nodes);
 		if(opt.threads != 1)
-			std::printf("     !! plusieurs workers : le budget est deterministe, "
-						"l'ORDRE des echanges ne l'est pas. Ajouter "
-						"--threads 1 pour un run reproductible.\n");
+			std::printf("     !! several workers: the budget is "
+									"deterministic, the ORDER of exchanges is "
+									"not. Add --threads 1 for a reproducible "
+									"run.\n");
 	}
 	if(opt.adapt_to_peak)
-		std::printf("  gradient TRONQUE AU PIC du score (--adapt-to-peak)\n");
+		std::printf("  gradient TRUNCATED AT THE PEAK of the score "
+							"(--adapt-to-peak)\n");
 	// `--elide-forced` must be wired on the SEARCH path, not only in `--growth`.
 	// Wired only there it does nothing here, provably: in deterministic mode
 	// `--no-elide-forced` returns "3000 rollouts, 149334 states, 3002 adaptations"
@@ -7672,8 +7654,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// What is debatable is its DEFAULT VALUE, and that stays "off", because the
 	// +61 % throughput was measured on the `--growth` path, never on this one.
 	if(opt.elide_forced)
-		std::printf("  coups FORCES joues en ligne (--elide-forced) — NON JUGE "
-					"sur ce chemin : il y etait inerte jusqu'a la s19\n");
+		std::printf("  FORCED moves played inline (--elide-forced) - "
+							"NOT JUDGED on this path\n");
 	// The recipe graph is created and seeded HIGHER UP (before the adaptation
 	// replay, which feeds it); here, only the wiring into cfg.
 	if(opt.recipes >= 0) {
@@ -7688,33 +7670,37 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// mechanism that is off while declaring itself on makes one measure the
 		// same arm twice.
 		if(opt.recipes < 0.0)
-			std::printf("!! --op-bias sans --recipes : le mecanisme lit "
-						"`snap_operators`, que seul l'instantane du graphe "
-						"remplit. Il serait INERTE.\n");
+			std::printf("!! --op-bias without --recipes: the "
+									"mechanism reads `snap_operators`, which "
+									"only the graph snapshot fills. It would "
+									"be INERT.\n");
 		else if(!opt.op_recipes)
-			std::printf("!! --op-bias sans --op-recipes : la decomposition n'a "
-						"aucune arete d'ACQUISITION, donc aucune exigence de "
-						"presence sur le TERRAIN, donc la liste sera VIDE.\n");
+			std::printf("!! --op-bias without --op-recipes: the "
+									"decomposition has no ACQUISITION edge, "
+									"hence no on-field presence requirement, "
+									"hence the list will be EMPTY.\n");
 		else
-			std::printf("  biais d'OPERATEUR : %.2f sur les coups qui jouent une "
-						"carte exigee EN JEU par la decomposition a rebours\n",
+			std::printf("  OPERATOR bias: %.2f on the moves that "
+									"play a card the backward decomposition "
+									"requires IN PLAY\n",
 						opt.op_bias);
 	}
 	if(opt.assign_bias > 0.0) {
-		std::printf("  --assign-bias %.2f : les choix engageant un MATERIAU du "
-					"graphe de recettes sont favorises\n"
-					"                     (prompts de selection compris — "
-					"l'identite de carte y est inconditionnelle)\n",
+		std::printf("  --assign-bias %.2f: choices engaging a "
+							"MATERIAL of the recipe graph are favoured\n"
+							"                     (selection prompts included "
+							"- card identity is unconditional there)\n",
 					opt.assign_bias);
 		// THE MECHANISM READS `snap_useful`, WHICH COMES FROM THE GRAPH. With no
 		// graph it can read nothing and the flag is INERT; it was, silently, while
 		// printing the line above. The report now says so, and the "graph
 		// snapshots" line of the rollout summary gives the mechanism's liveness.
 		if(!cfg.recipes)
-			std::printf("!! --assign-bias SANS graphe de recettes : le "
-						"mecanisme est INERTE (il lit `snap_useful`).\n"
-						"   Ajouter --recipes 0 — le graphe est alors alimente "
-						"et lu sans entrer dans aucun cout.\n");
+			std::printf("!! --assign-bias WITHOUT a recipe graph: "
+									"the mechanism is INERT (it reads "
+									"`snap_useful`).\n"
+									"   Add --recipes 0 - the graph is then "
+									"fed and read without entering any cost.\n");
 	}
 	// The transposition key does NOT conflate the COLUMNS. On benchmark A that
 	// divides placements by 2 and by 12, and the cause is NAMED: that deck carries
@@ -7723,18 +7709,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// (x1.67, +4 depths) and it does not convert.
 	if(opt.assign || opt.backward) {
 		if(!cfg.recipes)
-			std::printf("!! --assign / --backward sans graphe de "
-						"recettes : les mecanismes sont INERTES.\n");
+			std::printf("!! --assign / --backward without a "
+									"recipe graph: the mechanisms are INERT.\n");
 		else
-			std::printf("  assign %s, backward %s "
-						"(instantane du graphe tous les %llu tirages)\n",
+			std::printf("  assign %s, backward %s (graph snapshot "
+									"every %llu rollouts)\n",
 						opt.assign ? "OUI" : "non",
 						opt.backward ? "OUI" : "non",
 						(unsigned long long)cfg.recipe_snap_period);
 	}
 	if(opt.hindsight > 0.0)
-		std::printf("  hindsight %.2f x alpha, au plus %zu but(s) de "
-					"substitution par worker\n",
+		std::printf("  hindsight %.2f x alpha, at most %zu substitute "
+							"goal(s) per worker\n",
 					opt.hindsight, opt.hindsight_k);
 	// THE "OFFER -> CHOICE CONVERSION" JUDGE needs to know which card the move
 	// kept engages. There is nothing to turn on: `Choice::card` is filled
@@ -7747,8 +7733,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// by name or by code, like the others.
 	for(const std::string& spec : opt.watch_specs) {
 		if(cfg.probe_watch.size() >= 4) {
-			std::printf("!! --watch : au plus 4 cartes (compteurs empaquetes) — "
-						"« %s » ignoree\n", spec.c_str());
+			std::printf("!! --watch: at most 4 cards (packed "
+									"counters) - \"%s\" ignored\n", spec.c_str());
 			continue;
 		}
 		uint32_t code = 0;
@@ -7757,8 +7743,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		cfg.probe_watch.push_back(db.Canonical(code));
 	}
 	if(!cfg.probe_watch.empty()) {
-		std::printf("  --watch : %zu carte(s) OBSERVEE(S) sans contrainte ni "
-					"biais —", cfg.probe_watch.size());
+		std::printf("  --watch: %zu card(s) OBSERVED with no "
+							"constraint and no bias -", cfg.probe_watch.size());
 		for(uint32_t c : cfg.probe_watch)
 			std::printf(" %s;", db.Name(c).c_str());
 		std::printf("\n");
@@ -7769,16 +7755,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// said, otherwise the two are conflated in the logs.
 	if(!landmark_graph.Empty()) {
 		cfg.landmarks = &landmark_graph;
-		std::printf("  landmarks : ACTIFS, %zu accomplissement(s), poids tirages "
-					"%.2f, poids finisseur %.2f%s\n",
+		std::printf("  landmarks: ACTIVE, %zu achievement(s), rollout "
+							"weight %.2f, finisher weight %.2f%s\n",
 					landmark_graph.Items().size(), opt.landmark_weight,
 					opt.landmark_h,
 					(opt.landmark_weight == 0.0 && opt.landmark_h == 0.0)
-						? "  (appris et MESURES, n'entrent dans aucun cout)"
+						? "  (learned and MEASURED, "
+												"enter no cost)"
 						: "");
 	} else if(opt.landmark_weight > 0.0 || opt.landmark_h > 0.0) {
-		std::printf("!! --landmark-w/--landmark-h sans graphe de landmarks : "
-					"le poids est INERTE (il manque --landmarks)\n");
+		std::printf("!! --landmark-w/--landmark-h without a landmark "
+							"graph: the weight is INERT (--landmarks is "
+							"missing)\n");
 	}
 	// The pointers are wired: the report can say what is ACTIVE and what is
 	// requested but INERT. Read BEFORE the first rollout, it makes a measurement
@@ -7790,11 +7778,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	if(opt.optimize) {
 		cfg.anytime = true;
 		cfg.max_solutions = 24;
-		std::printf("\n  OPTIMISATION anytime : cout lexicographique (brulees, "
-					"actions, decisions),\n  la reference coute %u/%u/%zu — la "
-					"borne a battre.%s\n", ref_burned, ref_actions, ref_decisions,
+		std::printf("\n  ANYTIME OPTIMISATION: lexicographic cost "
+							"(burned, actions, decisions),\n"
+							"  the reference costs %u/%u/%zu - the bound to "
+							"beat.%s\n", ref_burned, ref_actions, ref_decisions,
 					opt.burn_limit
-						? "  (borne brulees ensemencee)" : "");
+						? "  (burned bound seeded)" : "");
 	}
 	// The cards to resolve (--resolve) receive the hint bias AUTOMATICALLY: the
 	// line MUST engage them, and the measurement is unambiguous, since the policy
@@ -7827,19 +7816,22 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			for(uint32_t c : *list)
 				++avail[db.Canonical(c)];
 		bool impossible = false;
-		std::printf("\n--- faisabilite des resolutions exigees ---\n");
+		std::printf("\n--- feasibility of the required resolutions "
+							"---\n");
 		for(const ResolveReq& req : cons.resolve_min) {
 			uint32_t have = avail.count(req.code) ? avail[req.code] : 0;
-			std::printf("  %-40s x%u exigee(s), %u copie(s) au deck%s\n",
+			std::printf("  %-40s x%u required, %u copy/copies in "
+									"the deck%s\n",
 						db.Name(req.code).c_str(), req.min_count, have,
 						have ? "" : "   <-- ABSENTE");
 			if(!have)
 				impossible = true;
 		}
 		if(impossible) {
-			std::printf("\n  Une carte a resoudre n'existe pas dans ce deck : la "
-						"contrainte est\n  INSATISFIABLE — aucune ligne n'existe. "
-						"Recherche annulee.\n");
+			std::printf("\n  A card to resolve does not exist in "
+									"this deck: the constraint is\n"
+									"  UNSATISFIABLE - no line exists. Search "
+									"cancelled.\n");
 			return;
 		}
 	}
@@ -7912,9 +7904,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		global_archive = std::move(carry->archive);
 		merged_policy = std::move(carry->policy);
 		policy_workers = carry->policy_workers;
-		std::printf("  ARCHIVE PORTEE (s24, --carry) : %zu cellule(s), "
-					"politique %zu poids (%u worker(s)) reprises du round "
-					"precedent\n",
+		std::printf("  ARCHIVE CARRIED (--carry): %zu cell(s), policy "
+							"%zu weight(s) (%u worker(s)) taken from the "
+							"previous round\n",
 					global_archive.size(), merged_policy.size(),
 					policy_workers);
 	}
@@ -7983,7 +7975,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// hundreds. The guided descent, on the other hand, goes all the way down: it
 	// says how far this deck can get, which no LDS failure reveals.
 	{
-		std::printf("\n--- sonde : jusqu'ou ce deck va-t-il depuis cette main ? ---\n");
+		std::printf("\n--- probe: how far does this deck go from this "
+							"hand? ---\n");
 		auto t0 = Clock::now();
 		// Dedicated thread, for the same reason as OpeningHand: an arena is never
 		// initialised on a thread that already owns one.
@@ -8008,14 +8001,17 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					// Seeding from the previous round (--carry): the probe starts again
 					// from yesterday's frontier.
 					if(!carry_seed.empty())
-						std::printf("  semis d'archive (s24, --carry) : %zu "
-									"cellule(s) -> sonde\n",
+						std::printf("  archive seeding "
+															"(--carry): %zu "
+															"cell(s) -> probe\n",
 									s.SeedArchive(carry_seed));
 					s.RunGuided(target);
 					merge_archive(s.Archive());
 					const SearchStats& st = s.Stats();
-					std::printf("  %llu etats, %.1f s : au mieux %u des %zu cartes "
-								"cibles, %u monstre(s)\n",
+					std::printf("  %llu states, %.1f s: "
+													"at best %u of the %zu "
+													"target cards, %u "
+													"monster(s)\n",
 								(unsigned long long)st.nodes, st.ms / 1000.0,
 								st.best_overlap, target.codes.size(),
 								st.best_monsters);
@@ -8031,7 +8027,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					for(const auto& x : s.Solutions())
 						sols.push_back(x);
 				} else {
-					std::printf("  !! duel de depart non initialisable : %s\n",
+					std::printf("  !! starting duel "
+													"cannot be initialised: "
+													"%s\n",
 								err.c_str());
 				}
 			}
@@ -8039,7 +8037,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		}).join();
 		spent += MsSince(t0);
-		prof::PrintPhase("sonde");
+		prof::PrintPhase("probe");
 	}
 
 	// --- 4b. Deep rollouts. This is the pass that has a chance of going all the
@@ -8050,7 +8048,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	//     as a bias, and NO child evaluation, so each decision costs several times
 	//     less and the policy concentrates the rollouts.
 	{
-		std::printf("\n--- tirages profonds guides par le repertoire ---\n");
+		std::printf("\n--- deep rollouts guided by the repertoire ---\n");
 		// BUDGET SPLIT BETWEEN PHASES. Seven judgement-picked constants decide the
 		// relative volume of the three passes whose yields are compared, and none was
 		// printed: two runs with the same --solve-ms could give very different volumes
@@ -8086,7 +8084,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// where `PrintCuts` already displayed them at zero. Wiring them into
 			// the rollout phase line is the only way to answer the open question:
 			// does the guard prune usefully, or does it raze the space?
-			uint64_t constraint_cuts = 0, guard_cuts = 0, self_negate_cuts = 0;
+			uint64_t constraint_cuts = 0, guard_cuts = 0, self_negate_cuts = 0,
+					 guard_keep_cuts = 0;
 			// Options: picks / decisions absorbed / aborted.
 			uint64_t macro_taken = 0, macro_absorbed = 0, macro_aborted = 0;
 			size_t ctx_entries = 0;
@@ -8184,7 +8183,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(!base_seed)
 				base_seed = 1;
 		}
-		std::printf("  graine : %llu  (--seed %llu pour rejouer)\n",
+		std::printf("  seed: %llu  (--seed %llu to replay)\n",
 					(unsigned long long)base_seed, (unsigned long long)base_seed);
 		{
 			const int lvl = opt.nrpa_level > 0 ? opt.nrpa_level
@@ -8197,18 +8196,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			double rollouts = 1;
 			for(int k = 0; k < lvl; ++k)
 				rollouts *= it;
-			std::printf("  niveau NRPA : %d  (%s ; ~%.0f tirages par appel de "
-						"niveau, iters %u)\n", lvl,
+			std::printf("  NRPA level: %d  (%s; ~%.0f rollouts "
+									"per level call, iters %u)\n", lvl,
 						opt.nrpa_level > 0 ? "--nrpa-level"
-										   : "defaut, seuil de 180 s sur le "
-											 "budget des tirages",
+										   : "default, 180 s "
+																					"threshold on the "
+																					"rollout budget",
 						rollouts, it);
 			// The adaptation dial, printed as soon as it leaves the default: a setting
 			// that changes the algorithm without naming itself is a hidden variable.
 			// cachee (C15).
 			if(opt.nrpa_alpha > 0)
-				std::printf("  adaptation  : alpha %.3f (%s), sortie de niveau "
-							"sur stagnation seule\n",
+				std::printf("  adaptation  : alpha %.3f (%s), "
+											"level exit on stagnation alone\n",
 							opt.nrpa_alpha,
 							"--nrpa-alpha");
 		}
@@ -8232,7 +8232,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			Arena la;
 			std::string err;
 			if(!la.Init(opt.arena_mb << 20, 0, err))
-				return WorkerAbort("arene (tirages NRPA)", err);
+				return WorkerAbort("arena (NRPA rollouts)", err);
 			{
 				Duel local(db, scripts, &la);
 				if(local.Create(start_yrp.seed, start_yrp.duel_flags,
@@ -8282,8 +8282,6 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						wcfg.shared_burn = &shared_burn;
 					// Prior by replay: the policy starts knowing how to rip
 					// (attenuated afterwards like the learned weights).
-					if(!prior_policy.empty())
-						wcfg.nrpa_init = &prior_policy;
 					// Adaptation replay: same injection, a gradient instead of a
 					// bonus.
 					if(!adapt_runs.empty()) {
@@ -8312,8 +8310,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					if(!carry_seed.empty()) {
 						const size_t sown = s.SeedArchive(carry_seed);
 						if(id == 0)
-							std::printf("  semis d'archive (s24, --carry) : "
-										"%zu cellule(s) par worker\n", sown);
+							std::printf("  archive seeding "
+																	"(--carry): %zu "
+																	"cell(s) per worker\n", sown);
 					}
 					// A distinct seed per worker: without it the sixteen draw
 					// exactly the same sequence of lines.
@@ -8349,6 +8348,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					m.constraint_cuts += s.Stats().constraint_cuts;
 					m.guard_cuts += s.Stats().guard_cuts;
 					m.self_negate_cuts += s.Stats().self_negate_cuts;
+					m.guard_keep_cuts += s.Stats().guard_keep_cuts;
 					m.adapts += s.Stats().nrpa_adapts;
 					m.ctx_entries = (std::max)(m.ctx_entries,
 											   s.Stats().ctx_entries);
@@ -8429,10 +8429,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					best_monsters = (std::max)(best_monsters, s.Stats().best_monsters);
 					merge_joint(s.Stats(), {});
 				} else {
-					WorkerAbort("duel (tirages NRPA)", err);
+					WorkerAbort("duel (NRPA rollouts)", err);
 				}
 			}
-			ReportPoison("tirages NRPA", la);
+			ReportPoison("NRPA rollouts", la);
 			la.Shutdown();
 		};
 
@@ -8446,19 +8446,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(policy_workers > 1)
 			for(auto& [k2, w] : merged_policy)
 				w /= static_cast<float>(policy_workers);
-		prof::PrintPhase("tirages");
+		prof::PrintPhase("rollouts");
 		double secs = MsSince(t0) / 1000.0;
 		spent += secs * 1000.0;
 		if(greedy.rollouts)
-			std::printf("  glouton+nouveaute : %8llu tirages %10llu etats  "
-						"%7llu coupures nouveaute  best %u/%zu, %u mon.\n",
+			std::printf("  greedy+novelty    : %8llu rollouts "
+									"%10llu states  %7llu novelty cuts      "
+									"best %u/%zu, %u mon.\n",
 						(unsigned long long)greedy.rollouts,
 						(unsigned long long)greedy.nodes,
 						(unsigned long long)greedy.cuts, greedy.overlap,
 						target.codes.size(), greedy.monsters);
 		if(nrpa.rollouts)
-			std::printf("  NRPA              : %8llu tirages %10llu etats  "
-						"%7llu adaptations         best %u/%zu, %u mon.\n",
+			std::printf("  NRPA              : %8llu rollouts "
+									"%10llu states  %7llu adaptations         "
+									"best %u/%zu, %u mon.\n",
 						(unsigned long long)nrpa.rollouts,
 						(unsigned long long)nrpa.nodes,
 						(unsigned long long)nrpa.adapts, nrpa.overlap,
@@ -8469,8 +8471,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// mean length - 1).
 		if(greedy.macro_taken + nrpa.macro_taken + greedy.macro_aborted +
 		   nrpa.macro_aborted)
-			std::printf("      options : %llu prises, %llu decisions absorbees "
-						"(%.1f/prise), %llu avortees\n",
+			std::printf("      options : %llu prises, %llu "
+									"decisions absorbees (%.1f/prise), %llu "
+									"avortees\n",
 						(unsigned long long)(greedy.macro_taken +
 											 nrpa.macro_taken),
 						(unsigned long long)(greedy.macro_absorbed +
@@ -8487,11 +8490,13 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// towards the global weight, and what is then measured is not the paper's
 		// mechanism but a truncated version of it.
 		if(opt.ctx_shrink >= 0 && nrpa.ctx_entries)
-			std::printf("      niveau contextuel : %zu case(s) au plus grand "
-						"worker%s  (conditionnement : %s)\n",
+			std::printf("      niveau contextuel : %zu case(s) au "
+									"plus grand worker%s  (conditionnement : "
+									"%s)\n",
 						nrpa.ctx_entries,
-						nrpa.ctx_capped ? "  !! PLAFOND ATTEINT (--ctx-max)" : "",
-"posees+main");
+						nrpa.ctx_capped ? "  !! CEILING "
+																"REACHED (--ctx-max)" : "",
+"placed+hand");
 		// --- THE HEAD BANDIT'S LIVENESS, AND ITS PROBE (--qhat) ---
 		//
 		// Three readings before any other. (1) `decisions` at zero = the bandit
@@ -8502,22 +8507,23 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// per worker: it is the mechanism's only cost and it must not be tuned
 		// blind.
 		if(opt.qhat_depth && nrpa.qhat_playouts) {
-			std::printf("      bandit Q^ (--qhat %u) : %llu decisions dont "
-						"%llu a la 1re, %llu tirages en fenetre, recompense "
-						"moyenne %.3f\n",
+			std::printf("      Q^ bandit (--qhat %u): %llu "
+									"decisions of which %llu at the 1st, %llu "
+									"rollouts in window, mean reward %.3f\n",
 						opt.qhat_depth,
 						(unsigned long long)nrpa.qhat_decisions,
 						(unsigned long long)nrpa.qhat_first,
 						(unsigned long long)nrpa.qhat_playouts,
 						nrpa.qhat_reward_sum /
 							double(nrpa.qhat_playouts ? nrpa.qhat_playouts : 1));
-			std::printf("                       arbre %zu noeud(s) au plus "
-						"grand worker, %zu code(s) en fenetre, %.1f Mo au "
-						"total%s\n",
+			std::printf("                       tree %zu node(s) "
+									"in the largest worker, %zu code(s) in "
+									"window, %.1f MB total%s\n",
 						nrpa.qhat_nodes, nrpa.qhat_codes,
 						double(nrpa.qhat_bytes) / (1024.0 * 1024.0),
 						nrpa.qhat_fallback
-							? "  !! PLAFOND DE NOEUDS (--qhat-nodes)" : "");
+							? "  !! NODE CEILING "
+														"(--qhat-nodes)" : "");
 		}
 		// THE PROBE. The corpus agreement curve CANNOT judge Q^: it measures the
 		// reproduction of a corpus containing ONLY good lines, whereas Q^ draws
@@ -8537,7 +8543,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				std::string name = b.code ? db.Name(b.code) : std::string("-");
 				if(name.empty())
 					name = std::to_string(b.code);
-				std::printf("      %-38.38s %9u %6.3f %9u %6.3f %6.3f\n",
+				std::printf("      %-38.38s %9u %6.3f %9u "
+											"%6.3f %6.3f\n",
 							name.c_str(), b.n,
 							b.n ? b.w / double(b.n) : 0.0, b.nhat,
 							b.nhat ? b.qhat_sum / double(b.nhat) : 0.0,
@@ -8545,8 +8552,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			};
 			auto entete = [&](const char* titre) {
 				std::printf("\n  --- %s ---\n", titre);
-				std::printf("      %-38.38s %9s %6s %9s %6s %6s\n",
-							"coup", "n", "Q", "n^", "Q^", "val");
+				std::printf("      %-38.38s %9s %6s %9s %6s "
+											"%6s\n",
+							"move", "n", "Q", "n^", "Q^", "val");
 			};
 			// TABLE 1: WHAT THE BANDIT DECIDES at the first decision. It is short
 			// by nature (the openings of an idle prompt) and mostly serves to
@@ -8559,7 +8567,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					  [&](const BanditProbe& a, const BanditProbe& b) {
 						  return val(a) > val(b);
 					  });
-			entete("sonde du bandit : DECISIONS A LA RACINE (s = {})");
+			entete("bandit probe: DECISIONS AT THE ROOT (s = {})");
 			for(size_t i = 0; i < dec.size() && i < 8; ++i)
 				ligne(dec[i]);
 			// TABLE 2: THE PERMUTATION STATISTIC ITSELF, Q^({}, a), i.e. the mean
@@ -8585,16 +8593,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							  b.nhat ? b.qhat_sum / double(b.nhat) : 0.0;
 						  return qa > qb;
 					  });
-			std::printf("\n  --- sonde du bandit : PERMUTATION Q^({}, a) sur "
-						"%zu coup(s) d'effectif >= %u ---\n",
+			std::printf("\n  --- bandit probe: PERMUTATION Q^({}, "
+									"a) over %zu move(s) with sample >= %u "
+									"---\n",
 						perm.size(), seuil);
 			std::printf("      %-38.38s %9s %6s %9s %6s %6s\n",
-						"coup", "n", "Q", "n^", "Q^", "val");
+						"move", "n", "Q", "n^", "Q^", "val");
 			const size_t show = perm.size() < 24 ? perm.size() : size_t(24);
 			for(size_t i = 0; i < show; ++i)
 				ligne(perm[i]);
 			if(perm.size() > show) {
-				std::printf("      ... %zu de plus, dont les PIRES :\n",
+				std::printf("      ... %zu more, including "
+											"the WORST:\n",
 							perm.size() - show);
 				for(size_t i = perm.size() < 4 ? 0 : perm.size() - 4;
 					i < perm.size(); ++i)
@@ -8609,18 +8619,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// period longer.
 		if(opt.options_online) {
 			std::lock_guard<std::mutex> lock(online.mu);
-			std::printf("      options en ligne : %u tour(s) de minage, corpus "
-						"vivant %zu ligne(s) (%llu offertes, %llu retenues, "
-						"%llu doublons)\n",
+			std::printf("      online options: %u mining "
+									"round(s), living corpus %zu line(s) "
+									"(%llu offered, %llu kept, %llu "
+									"duplicates)\n",
 						online.rounds, online.pool.size(),
 						(unsigned long long)online.offered,
 						(unsigned long long)online.kept,
 						(unsigned long long)online.dups);
 			if(online.rounds)
-				std::printf("                       dernier catalogue : %zu macro(s) "
-							"(moyenne %.1f, max %zu) sur %zu ligne(s), perte modele "
-							"%.1f -> %.1f log10 ; minage %.0f ms en moyenne, %.0f ms "
-							"au pire\n",
+				std::printf("                       last "
+											"catalogue: %zu macro(s) (avg "
+											"%.1f, max %zu) over %zu line(s), "
+											"model loss %.1f -> %.1f log10; "
+											"mining %.0f ms average, %.0f ms "
+											"worst\n",
 							online.last_size, online.last_avglen,
 							online.last_maxlen, online.last_lines,
 							online.last_flat, online.last_opt,
@@ -8645,9 +8658,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			const ModeStats& m = mi ? nrpa : greedy;
 			if(!m.rollouts)
 				continue;
-			std::printf("      %-7s coupures : contrainte %llu, garde %llu, "
-						"tour %llu   (%.0f%% des tirages)\n",
-						mi ? "NRPA" : "glouton",
+			std::printf("      %-7s cuts: constraint %llu, guard "
+									"%llu, turn %llu   (%.0f%% of rollouts)\n",
+						mi ? "NRPA" : "greedy",
 						(unsigned long long)m.constraint_cuts,
 						(unsigned long long)m.guard_cuts,
 						(unsigned long long)m.turn_cuts,
@@ -8655,9 +8668,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									   m.turn_cuts) / double(m.rollouts));
 			// Liveness of --no-self-negate.
 			if(m.self_negate_cuts)
-				std::printf("      %-7s discipline : %llu negation(s) sur soi "
-							"retiree(s)\n", mi ? "NRPA" : "glouton",
+				std::printf("      %-7s discipline: %llu "
+											"self-negation(s) removed\n", mi ? "NRPA" : "greedy",
 							(unsigned long long)m.self_negate_cuts);
+			// Liveness of --guard-keep on the rollout phase.
+			if(m.guard_keep_cuts)
+				std::printf("      %-7s discipline: %llu "
+											"guard-resource activation(s) "
+											"removed\n",
+							mi ? "NRPA" : "greedy",
+							(unsigned long long)m.guard_keep_cuts);
 		}
 		// PER-ROLLOUT PROGRESS PROFILE, and the verdict it returns is binary: a
 		// single PEAK in the histogram = every rollout dies at the same rung of the
@@ -8674,9 +8694,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				--hi;
 			int mode_k = 0;
 			uint64_t mode_n = 0;
-			std::printf("      %-7s profil de progression (max de SerialProgress "
-						"par tirage, %llu mesures) :\n",
-						mi ? "NRPA" : "glouton",
+			std::printf("      %-7s progress profile (max "
+									"SerialProgress per rollout, %llu "
+									"measurements):\n",
+						mi ? "NRPA" : "greedy",
 						(unsigned long long)m.sp_lines);
 			for(int k = 0; k <= hi; ++k) {
 				if(!m.sp_final[k])
@@ -8685,16 +8706,21 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					mode_n = m.sp_final[k];
 					mode_k = k;
 				}
-				std::printf("        %2d unite(s) : %8llu  (%5.1f %%)\n", k,
+				std::printf("        %2d unite(s) : %8llu  "
+											"(%5.1f %%)\n", k,
 							(unsigned long long)m.sp_final[k],
 							100.0 * double(m.sp_final[k]) / double(m.sp_lines));
 			}
-			std::printf("        derniere decision de progres : %.1f en "
-						"moyenne ; verdict : %s\n",
+			std::printf("        last decision that made "
+									"progress: %.1f on average; verdict: %s\n",
 						double(m.sp_at_sum) / double(m.sp_lines),
 						2 * mode_n > m.sp_lines
-							? "PIC UNIQUE — verrou nommable a ce barreau"
-							: "DISPERSION — l'arite tue, couper plus fin");
+							? "SINGLE PEAK - a "
+														"nameable lock at "
+														"this rung"
+							: "DISPERSION  -  "
+														"l'arite tue, couper "
+														"plus fin");
 		}
 		// THE LIVENESS OF THE RETURN TO THE RUNG (--reenter). At zero re-entries
 		// with the flag armed, the mechanism is inert (an empty archive or no
@@ -8705,10 +8731,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			const ModeStats& m = mi ? nrpa : greedy;
 			if(!m.reenter_rollouts && !m.reenter_fail)
 				continue;
-			std::printf("      %-7s retour au barreau : %llu tirage(s) "
-						"re-entre(s) (%.1f %% des tirages), base moyenne "
-						"%.1f unite(s)%s",
-						mi ? "NRPA" : "glouton",
+			std::printf("      %-7s return to the rung: %llu "
+									"rollout(s) re-entered (%.1f %% of "
+									"rollouts), mean base %.1f unit(s)%s",
+						mi ? "NRPA" : "greedy",
 						(unsigned long long)m.reenter_rollouts,
 						m.rollouts ? 100.0 * double(m.reenter_rollouts) /
 										 double(m.rollouts)
@@ -8719,56 +8745,63 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							: 0.0,
 						m.reenter_fail ? "" : "\n");
 			if(m.reenter_fail)
-				std::printf(", %llu rejeu(x) ECHOUE(S) <-- defaut\n",
+				std::printf(", %llu replay(s) FAILED <-- "
+											"defect\n",
 							(unsigned long long)m.reenter_fail);
 		}
 		// Liveness of the refinement. `top_hits` at zero with refined workers = the
 		// sub-ladder is posted but never walked.
 		if(greedy.refine_done + nrpa.refine_done)
-			std::printf("      raffinement : %llu worker(s) re-serialise(s), "
-						"%llu sous-barreau(x) au total, %llu etat(s) "
-						"archive(s) au-dela de la porte\n",
+			std::printf("      refinement: %llu worker(s) "
+									"re-serialised, %llu sub-rung(s) in "
+									"total, %llu state(s) archived beyond the "
+									"door\n",
 						(unsigned long long)(greedy.refine_done +
 											 nrpa.refine_done),
 						(unsigned long long)(greedy.refine_subrungs +
 											 nrpa.refine_subrungs),
 						(unsigned long long)(greedy.refine_top_hits +
 											 nrpa.refine_top_hits));
-		std::printf("  total : %.1f s, au mieux %u des %zu cartes cibles, "
-					"%u monstre(s)\n", secs, best_overlap, target.codes.size(),
+		std::printf("  total: %.1f s, at best %u of the %zu target "
+							"cards, %u monster(s)\n", secs, best_overlap, target.codes.size(),
 					best_monsters);
 		if(!cfg.hint_cards.empty()) {
 			const uint64_t hs = nrpa.hint_seen + greedy.hint_seen;
 			const uint64_t hx = nrpa.hint_exact + greedy.hint_exact;
 			const uint64_t hl = nrpa.hint_sel + greedy.hint_sel;
-			std::printf("  visibilite des indices : legaux dans %llu etat(s), "
-						"pris %llu fois%s\n",
+			std::printf("  hint visibility: legal in %llu "
+									"state(s), taken %llu time(s)%s\n",
 						(unsigned long long)hs,
 						(unsigned long long)(nrpa.hint_taken + greedy.hint_taken),
-						hs == 0 ? "  <-- JAMAIS LEGAL : le probleme est la "
-								  "disponibilite des materiaux, pas la recherche"
+						hs == 0 ? "  <-- NEVER LEGAL: "
+														"the problem is "
+														"material availabilit"
+														"y, not the search"
 								: "");
 			// BREAKDOWN: without it this counter had THREE causes (the
 			// subset-prompt identity, the run's quality and the volume of work) and
 			// could therefore judge none of them. Only the `exact move` column talks
 			// about a move; the `subsets` column designates the first code of a
 			// selection, not the card engaged.
-			std::printf("     dont coup EXACT (idle/chaine/position) %llu, "
-						"sous-ensemble (identite approximative) %llu\n",
+			std::printf("     of which EXACT move "
+									"(idle/chain/position) %llu, subset "
+									"(approximate identity) %llu\n",
 						(unsigned long long)hx, (unsigned long long)hl);
 		}
 		// LIVENESS OF --adapt-to-peak: at zero the mechanism is INERT and no search
 		// judge concerns it.
 		if(cfg.adapt_to_peak)
-			std::printf("  gradient tronque au pic : %llu pas retires\n",
+			std::printf("  gradient tronque au pic : %llu pas "
+									"retires\n",
 						(unsigned long long)(nrpa.peak_trunc +
 											 greedy.peak_trunc));
 		// WORK REDONE BY THE TRANSPOSITION: states already seen but with a smaller
 		// budget, hence RE-EXPANDED. Counting only the cut would not say whether the
 		// mechanism pays.
 		if(nrpa.tt_reexplored + greedy.tt_reexplored)
-			std::printf("  transposition : %llu etat(s) RE-EXPLORES faute de "
-						"budget a la premiere visite\n",
+			std::printf("  transposition: %llu state(s) "
+									"RE-EXPLORED for want of budget on the "
+									"first visit\n",
 						(unsigned long long)(nrpa.tt_reexplored +
 											 greedy.tt_reexplored));
 		// THE handrip diagnosis: do any rollouts reach even ONE required
@@ -8776,19 +8809,22 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// matter); some >=1 without >=3 = the complete sequence is out of the
 		// sampling's reach (a search matter).
 		if(!cons.resolve_min.empty()) {
-			std::printf("  resolutions atteintes par tirage : >=1 %llu  >=2 %llu"
-						"  >=3 %llu  >=4 %llu%s\n",
+			std::printf("  resolutions reached per rollout: >=1 "
+									"%llu  >=2 %llu  >=3 %llu  >=4 %llu%s\n",
 						(unsigned long long)(nrpa.rr[0] + greedy.rr[0]),
 						(unsigned long long)(nrpa.rr[1] + greedy.rr[1]),
 						(unsigned long long)(nrpa.rr[2] + greedy.rr[2]),
 						(unsigned long long)(nrpa.rr[3] + greedy.rr[3]),
 						(nrpa.rr[0] + greedy.rr[0]) == 0
-							? "  <-- JAMAIS : rip illegal ou hors de portee "
-							  "depuis ce depart"
+							? "  <-- NEVER: rip "
+														"illegal or out of "
+														"reach from this "
+														"start"
 							: "");
 			// The measurement that separates search from resources: how far do the lines
 			// WITH COMPLETE RESOLUTIONS climb?
-			std::printf("  meilleure crete AUX resolutions completes : %u/%zu\n",
+			std::printf("  best peak AT complete resolutions: "
+									"%u/%zu\n",
 						(std::max)(nrpa.overlap_ripped, greedy.overlap_ripped),
 						target.codes.size());
 		}
@@ -8800,8 +8836,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(nrpa.lm_h_count + greedy.lm_h_count) {
 			const double s0 = nrpa.lm_h_sum + greedy.lm_h_sum;
 			const uint64_t n0 = nrpa.lm_h_count + greedy.lm_h_count;
-			std::printf("  landmarks : h moyen %.2f sur %zu appris, %llu "
-						"evaluation(s) dans les tirages\n",
+			std::printf("  landmarks: mean h %.2f over %zu "
+									"learned, %llu evaluation(s) in the "
+									"rollouts\n",
 						s0 / double(n0),
 						landmark_graph.Items().size(),
 						(unsigned long long)n0);
@@ -8811,8 +8848,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// and "is the decomposition advancing": a mechanism that is live and inert
 		// is the mistake to avoid.
 		if(nrpa.recipe_snaps + greedy.recipe_snaps) {
-			std::printf("  recettes : instantane %llu fois — %llu produit(s), "
-						"%llu code(s) utile(s), %llu sous-produit(s) a rebours\n",
+			std::printf("  recipes: snapshot taken %llu time(s) - "
+									"%llu product(s), %llu useful code(s), "
+									"%llu backward subproduct(s)\n",
 						(unsigned long long)(nrpa.recipe_snaps +
 											 greedy.recipe_snaps),
 						(unsigned long long)(std::max)(nrpa.snap_products,
@@ -8828,14 +8866,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(opt.op_bias > 0.0) {
 			const uint64_t off = nrpa.op_offered + greedy.op_offered;
 			const uint64_t tak = nrpa.op_taken + greedy.op_taken;
-			std::printf("  biais d'OPERATEUR : %llu carte(s) designee(s) par la "
-						"decomposition ; %llu decision(s) en offraient une, "
-						"%llu l'ont prise (%.2f %%)%s\n",
+			std::printf("  OPERATOR bias: %llu card(s) designated "
+									"by the decomposition; %llu decision(s) "
+									"offered one, %llu took it (%.2f %%)%s\n",
 						(unsigned long long)(std::max)(nrpa.op_listed,
 													   greedy.op_listed),
 						(unsigned long long)off, (unsigned long long)tak,
 						off ? 100.0 * double(tak) / double(off) : 0.0,
-						off ? "" : "   <-- INERTE : aucun juge ne le concerne");
+						off ? "" : "   <-- INERT: no judge concerns it");
 		}
 		if(nrpa.rec_roll_count + greedy.rec_roll_count) {
 			const uint64_t n1 = nrpa.rec_roll_count + greedy.rec_roll_count;
@@ -8843,15 +8881,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							 double(n1);
 			const double d0 = (nrpa.rec_roll_d0_sum + greedy.rec_roll_d0_sum) /
 							  double(n1);
-			std::printf("  recettes : distance moyenne %.2f contre %.2f au "
-						"depart (%llu evaluation(s) dans les tirages)%s\n",
+			std::printf("  recipes: mean distance %.2f against "
+									"%.2f at the start (%llu evaluation(s) in "
+									"the rollouts)%s\n",
 						d, d0, (unsigned long long)n1,
 						d >= d0 ? "  <-- N'A PAS DECRU" : "");
 		}
 		if(nrpa.backward_count + greedy.backward_count) {
 			const uint64_t n2 = nrpa.backward_count + greedy.backward_count;
-			std::printf("  rebours : %.2f sous-produit(s) fabrique(s) en moyenne "
-						"sur %llu (%llu evaluation(s))\n",
+			std::printf("  backward: %.2f subproduct(s) built on "
+									"average out of %llu (%llu evaluation(s))\n",
 						(nrpa.backward_sum + greedy.backward_sum) / double(n2),
 						(unsigned long long)(std::max)(nrpa.snap_backward,
 													   greedy.snap_backward),
@@ -8859,14 +8898,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		if(nrpa.hindsight_goals + greedy.hindsight_goals ||
 		   opt.hindsight > 0.0) {
-			std::printf("  hindsight : %llu but(s) de substitution retenu(s), "
-						"%llu adaptation(s)%s\n",
+			std::printf("  hindsight: %llu substitute goal(s) "
+									"kept, %llu adaptation(s)%s\n",
 						(unsigned long long)(nrpa.hindsight_goals +
 											 greedy.hindsight_goals),
 						(unsigned long long)(nrpa.hindsight_adapts +
 											 greedy.hindsight_adapts),
 						(nrpa.hindsight_goals + greedy.hindsight_goals) == 0
-							? "  <-- AUCUN : aucun monstre d'extra deck invoque"
+							? "  <-- NONE: no "
+														"extra-deck monster "
+														"summoned"
 							: "");
 			// Breakdown: does hindsight reinforce the fusions that SPENT a tracked
 			// quota? A measurement, not a fix.
@@ -8875,8 +8916,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			const uint64_t hq_fr = nrpa.hindsight_quota_fresh +
 								   greedy.hindsight_quota_fresh;
 			if(hq_sp + hq_fr)
-				std::printf("      ventiles par quota suivi : %llu commis "
-							"quota DEPENSE (%.0f %%), %llu quotas frais\n",
+				std::printf("      broken down by tracked "
+											"quota: %llu committed with quota "
+											"SPENT (%.0f %%), %llu fresh "
+											"quotas\n",
 							(unsigned long long)hq_sp,
 							100.0 * double(hq_sp) / double(hq_sp + hq_fr),
 							(unsigned long long)hq_fr);
@@ -8916,7 +8959,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			}
 			PrintRepeatProbe(both, nrpa.rollouts + greedy.rollouts, db,
 							 true, true,
-							 "phase TIRAGES");
+							 "ROLLOUT phase");
 		}
 		// The B&B bound no longer runs blind: goal reaches (post-goal re-reaches
 		// included) and cuts.
@@ -8924,18 +8967,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint32_t bb = opt.burn_limit ? opt.burn_limit : UINT32_MAX;
 			for(const Solution& s : sols)
 				bb = (std::min)(bb, s.burned);
-			char bstr[32] = "aucune";
+			char bstr[32] = "none";
 			if(bb != UINT32_MAX)
 				std::snprintf(bstr, sizeof(bstr), "%u (marge +%u)", bb,
 							  opt.burn_slack);
-			std::printf("  anytime : %llu atteinte(s) du but, %llu coupure(s) "
-						"borne brulees, meilleures brulees %s%s\n",
+			std::printf("  anytime: %llu goal hit(s), %llu "
+									"burned-bound cut(s), best burned %s%s\n",
 						(unsigned long long)(nrpa.goal_hits + greedy.goal_hits),
 						(unsigned long long)(nrpa.burn_cuts + greedy.burn_cuts),
 						bstr, opt.burn_share ? "" : "  [partage OFF]");
 		}
 		if(!sols.empty())
-			std::printf("  %zu ligne(s) atteignant le board.\n", sols.size());
+			std::printf("  %zu line(s) reaching the board.\n", sols.size());
 	}
 
 	// --- 4c. FINISHER. The rollouts know how to CLIMB (measured: three runs out
@@ -9042,14 +9085,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 
 	// The mono finisher, kept behind --finisher mono|ab.
 	auto run_mono = [&](double budget) {
-		std::printf("\n--- finisseur mono : fouille guidee depuis le meilleur "
-					"etat (%u/%zu, %zu decisions) ---\n", best_overlap,
+		std::printf("\n--- mono finisher: guided search from the best "
+							"state (%u/%zu, %zu decisions) ---\n", best_overlap,
 					target.codes.size(), best_path.size());
 		std::thread([&] {
 			Arena fa;
 			std::string err;
 			if(!fa.Init(opt.arena_mb << 20, 0, err))
-				return WorkerAbort("arene (finisseur mono guide)", err);
+				return WorkerAbort("arena (guided mono "
+												"finisher)", err);
 			{
 				Duel fd(db, scripts, &fa);
 				if(!fd.Create(start_yrp.seed, start_yrp.duel_flags,
@@ -9058,13 +9102,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				   !fd.Setup(start_yrp, err,
 							 cons.opp_hand.empty() ? nullptr : &cons.opp_hand,
 							 static_cast<uint8_t>(1 - opt.target_player)))
-					return WorkerAbort("duel (finisseur mono guide)", err);
+					return WorkerAbort("duel (guided mono "
+														"finisher)", err);
 				if(opt.stop_gc)
 					fd.SetLuaGc(false);
 				PrefixCount pc = replay_prefix(fd, best_path);
 				if(!pc.ok) {
-					std::printf("  !! le prefixe ne se rejoue pas (%zu/%zu) : "
-								"finisseur annule\n", pc.used, best_path.size());
+					std::printf("  !! the prefix does not "
+													"replay (%zu/%zu): "
+													"finisher cancelled\n", pc.used, best_path.size());
 				} else {
 					SearchConfig fcfg = cfg;
 					fcfg.time_limit_ms = budget;
@@ -9076,7 +9122,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					fcfg.max_solutions = 8;
 					Search fs(fd, fa, start_yrp, fcfg);
 					fs.RunGuided(target);
-					std::printf("  %llu etats en %.1f s, au mieux %u/%zu  (%s)\n",
+					std::printf("  %llu states in %.1f s, "
+													"at best %u/%zu  (%s)\n",
 								(unsigned long long)fs.Stats().nodes,
 								fs.Stats().ms / 1000.0,
 								fs.Stats().best_overlap, target.codes.size(),
@@ -9098,10 +9145,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					}
 				}
 			}
-			ReportPoison("finisseur mono guide", fa);
+			ReportPoison("guided mono finisher", fa);
 			fa.Shutdown();
 		}).join();
-		prof::PrintPhase("finisseur mono");
+		prof::PrintPhase("mono finisher");
 	};
 
 	// The archive + LTS finisher: roots = the archive sorted by score, then the
@@ -9137,7 +9184,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				ents.resize(opt.archive_k);
 			char lbl[48];
 			for(size_t i = 0; i < ents.size(); ++i) {
-				std::snprintf(lbl, sizeof(lbl), "archive %02zu %u/%zu r%u", i,
+				std::snprintf(lbl, sizeof(lbl), "archive %02zu "
+																"%u/%zu r%u", i,
 							  ents[i]->overlap, target.codes.size(),
 							  ents[i]->resolves);
 				add_root(lbl, ents[i]->overlap, ents[i]->path);
@@ -9159,7 +9207,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			for(size_t i = 0; i < ents.size() && i < 12; ++i)
 				for(uint32_t back : { 15u, 30u, 45u, 60u })
 					if(ents[i]->path.size() > back) {
-						std::snprintf(lbl, sizeof(lbl), "arch%02zu recul %u", i,
+						std::snprintf(lbl, sizeof(lbl), "arch%02zu back %u", i,
 									  back);
 						add_root(lbl, 0,
 								 std::vector<std::vector<uint8_t>>(
@@ -9167,10 +9215,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									 ents[i]->path.end() - back));
 					}
 		}
-		add_root("meilleur", best_overlap, best_path);
+		add_root("best", best_overlap, best_path);
 		for(uint32_t back : { 5u, 10u, 20u, 40u, 60u, 90u })
 			if(best_path.size() > back)
-				add_root("recul " + std::to_string(back), 0,
+				add_root("back " + std::to_string(back), 0,
 						 std::vector<std::vector<uint8_t>>(
 							 best_path.begin(), best_path.end() - back));
 		// Optimisation: the prefixes of the CHEAPEST solutions are the best roots,
@@ -9199,7 +9247,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			for(size_t i = 0; i < cheap.size() && i < 3; ++i)
 				for(uint32_t back : { 30u, 60u, 90u, 120u })
 					if(cheap[i]->responses.size() > back) {
-						std::snprintf(slbl, sizeof(slbl), "sol%zu(b%u) recul %u",
+						std::snprintf(slbl, sizeof(slbl), "sol%zu(b%u) back %u",
 									  i, cheap[i]->burned, back);
 						add_root(slbl, 0,
 								 std::vector<std::vector<uint8_t>>(
@@ -9209,8 +9257,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		if(roots.empty() && opt.approach_files.empty())
 			return;
-		std::printf("\n--- finisseur : LTS sur %zu racine(s) + %zu approche(s) "
-					"(archive %zu cellules, politique %zu poids) ---\n",
+		std::printf("\n--- finisher: LTS over %zu root(s) + %zu "
+							"approach(es) (archive %zu cells, policy %zu "
+							"weights) ---\n",
 					roots.size(), opt.approach_files.size(),
 					global_archive.size(), merged_policy.size());
 		auto t0 = Clock::now();
@@ -9250,15 +9299,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		const double a1_deadline = budget * 0.2;
 		const double a2_deadline = budget * 0.75;
-		std::printf("  partage des phases d'approche : A1 %.0f s (0,20), "
-					"A2 %.0f s (0,75), reste %.0f s\n", a1_deadline / 1000.0,
+		std::printf("  approach phase split: A1 %.0f s (0.20), A2 "
+							"%.0f s (0.75), rest %.0f s\n", a1_deadline / 1000.0,
 					a2_deadline / 1000.0, (budget - a2_deadline) / 1000.0);
 		for(size_t a = 0; a < approach_runs.size(); ++a) {
 			ApproachSols& AR = approach_runs[a];
 			const Replay* ap = AR.holder->IsStreamed() ? AR.holder->Embedded()
 													   : AR.holder.get();
 			if(!ap || ap->responses.empty()) {
-				std::printf("  !! --approach %s : pas de reponses lisibles\n",
+				std::printf("  !! --approach %s: no readable "
+											"answers\n",
 							AR.file.c_str());
 				continue;
 			}
@@ -9274,7 +9324,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					Arena fa;
 					std::string err;
 					if(!fa.Init(opt.arena_mb << 20, 0, err))
-						return WorkerAbort("arene (finisseur --approach)", err);
+						return WorkerAbort("arena (--approach "
+																"finisher)", err);
 					{
 						Duel fd(db, scripts, &fa);
 						if(fd.Create(ap->seed, ap->duel_flags, ap->start_lp,
@@ -9304,11 +9355,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								PrefixCount pc = replay_prefix(fd, pre);
 								char lbl[48];
 								std::snprintf(lbl, sizeof(lbl),
-											  "appr%zu recul %u", a, back);
+											  "appr%zu back %u", a, back);
 								if(!pc.ok) {
 									std::lock_guard<std::mutex> lk(fmx);
-									std::printf("  %-14s !! prefixe non "
-												"rejouable (%zu/%zu)\n", lbl,
+									std::printf("  %-14s !! prefixe "
+																					"non rejouable "
+																					"(%zu/%zu)\n", lbl,
 												pc.used, pre.size());
 									continue;
 								}
@@ -9328,62 +9380,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								fin_goal_hits += st.goal_hits;
 								fin_burn_cuts += st.burn_cuts;
 								std::lock_guard<std::mutex> lk(fmx);
-								// The re-rooting counter is PRINTED: without it, a
-								// rerooter that never bites is indistinguishable from
-								// a rerooter that is useless.
-								char rr[64] = "";
-								if((cfg.levin_reroot || cfg.reroot_h > 0) &&
-								   st.nodes)
-									std::snprintf(rr, sizeof(rr),
-												  " rr=%llu h0=%.0f%s",
-												  (unsigned long long)st.reroots,
-												  st.h_root,
-												  (st.levin_overflow ||
-												   st.lam_saturated)
-													  ? " !!NUM" : "");
-								char rf[32] = "";
-								if(st.levin_children && st.reroots)
-									std::snprintf(rf, sizeof(rf), " rr/ar=%.2f",
-											  double(st.reroots) /
-												  double(st.levin_children));
-								char rg[48] = "";
-								if(st.recipe_h_count)
-									std::snprintf(rg, sizeof(rg),
-												  " rec=%llu hR=%.1f",
-												  (unsigned long long)
-													  st.recipes_seen,
-												  st.recipe_h_sum /
-													  double(st.recipe_h_count));
-								// Replay rate (the cost IS the REPLAY): replayed
-								// edges / chain edges, per expansion. Equal, the
-								// stack absorbs nothing; 0.0, it absorbs
-								// everything.
-								char rj[48] = "";
-								if(st.replay_chain && st.nodes)
-									std::snprintf(rj, sizeof(rj),
-												  " rj=%.1f/%.1f",
-												  double(st.replay_decisions) /
-													  double(st.nodes),
-												  double(st.replay_chain) /
-													  double(st.nodes));
-								// MACRO EDGES: queued/absorbed/aborted, PER ROOT. Without this
-								// column, a finisher where no macro is ever offerable would be
-								// indistinguishable from one where they are useless.
-								char mc[64] = "";
-								if(cfg.finisher_options && (st.macro_taken || st.macro_aborted))
-									std::snprintf(mc, sizeof(mc), " mac=%llu/%llu/%llu",
-												  (unsigned long long)st.macro_taken,
-												  (unsigned long long)st.macro_absorbed,
-												  (unsigned long long)st.macro_aborted);
-								std::printf("  %-14s %9llu exp. %7.1f s  best "
-											"%u/%zu%s%s%s%s%s  b=%llu  %s%s\n", lbl,
+								std::printf("  %-14s %9llu exp. "
+																			"%7.1f s  best "
+																			"%u/%zu  b=%llu  "
+																			"%s%s\n", lbl,
 											(unsigned long long)st.nodes,
 											st.ms / 1000.0, st.best_overlap,
-											target.codes.size(), rr, rf, rg, rj, mc,
+											target.codes.size(),
 											(unsigned long long)st.edges_skipped,
 											SearchOutcome(st),
-											fs.Solutions().empty()
-												? "" : "  <-- BUT");
+											fs.Solutions().empty() ? "" : "  <-- GOAL");
 								for(Solution x : fs.Solutions()) {
 									std::vector<std::vector<uint8_t>> full =
 										pre;
@@ -9412,17 +9418,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							fa.Pop();
 						} else {
 							std::lock_guard<std::mutex> lk(fmx);
-							std::printf("  !! duel de l'approche %zu non "
-										"initialisable : %s\n", a, err.c_str());
+							std::printf("  !! duel of "
+																	"approach %zu cannot "
+																	"be initialised: %s\n", a, err.c_str());
 						}
 					}
-					ReportPoison("finisseur --approach", fa);
+					ReportPoison("finisher --approach", fa);
 					fa.Shutdown();
 				});
 			}
 			for(auto& t : apool)
 				t.join();
-			prof::PrintPhase("finisseur approches");
+			prof::PrintPhase("finisher approaches");
 		}
 
 		// --- phase A2: NRPA rollouts rooted on the DEEP backtracks of the
@@ -9466,19 +9473,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						  [](const ArchiveEntry* x, const ArchiveEntry* y) {
 							  return x->score > y->score;
 						  });
-				// UNDER THE GRID: ALL the ripped cells are roots. There are at
-				// most 21 of them (3 rip rungs x 7 of overlap), the work queue
-				// serves them all, and the top-3 by score was exactly the
-				// re-scalarisation that hid the closable family (2r at high
-				// overlap).
-				if(!opt.grid) {
-					if(ripped.size() > 3)
-						ripped.resize(3);
-					if(deepest &&
-					   std::find(ripped.begin(), ripped.end(), deepest) ==
-						   ripped.end())
-						ripped.push_back(deepest);
-				}
+				if(ripped.size() > 3)
+					ripped.resize(3);
+				if(deepest &&
+				   std::find(ripped.begin(), ripped.end(), deepest) ==
+					   ripped.end())
+					ripped.push_back(deepest);
 				for(size_t i = 0; i < ripped.size(); ++i) {
 					// Backtracks DERIVED from the length of the archived path,
 					// plus a benchmark constant ({0,20,40}: below the detour's
@@ -9497,7 +9497,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						prev = back;
 						if(ripped[i]->path.size() > back) {
 							std::snprintf(rlbl, sizeof(rlbl),
-										  "rip%zu(%u/%zu r%u) recul %u", i,
+										  "rip%zu(%u/%zu r%u) "
+																				"back %u", i,
 										  ripped[i]->overlap,
 										  target.codes.size(),
 										  ripped[i]->resolves, back);
@@ -9521,7 +9522,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				// per worker), so the grid covers the point of no return.
 				for(uint32_t back : { 60u, 70u, 80u, 90u, 110u, 150u })
 					if(ap->responses.size() > back) {
-						std::snprintf(rlbl, sizeof(rlbl), "appr%zu recul %u",
+						std::snprintf(rlbl, sizeof(rlbl), "appr%zu back %u",
 									  a, back);
 						roots2.push_back(
 							{ static_cast<int64_t>(a), back, rlbl,
@@ -9549,7 +9550,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					for(uint32_t back : { 60u, 90u, 120u, 150u })
 						if(cheap[i]->responses.size() > back) {
 							std::snprintf(rlbl, sizeof(rlbl),
-										  "sol%zu(b%u) recul %u", i,
+										  "sol%zu(b%u) back %u", i,
 										  cheap[i]->burned, back);
 							roots2.push_back(
 								{ -1, back, rlbl,
@@ -9636,7 +9637,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						Arena fa;
 						std::string err;
 						if(!fa.Init(opt.arena_mb << 20, 0, err))
-							return WorkerAbort("arene (finisseur, racines de recul)", err);
+							return WorkerAbort("arena (finisher, "
+																		"backtrack roots)", err);
 						{
 							Duel fd(db, scripts, &fa);
 							if(fd.Create(src->seed, src->duel_flags,
@@ -9667,8 +9669,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 									PrefixCount pc = replay_prefix(fd, R.pre);
 									if(!pc.ok) {
 										std::lock_guard<std::mutex> lk(fmx);
-										std::printf("  %-22s !! prefixe non "
-													"rejouable (%zu/%zu)\n",
+										std::printf("  %-22s !! prefixe "
+																							"non rejouable "
+																							"(%zu/%zu)\n",
 													R.label.c_str(), pc.used,
 													R.pre.size());
 									} else {
@@ -9746,9 +9749,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 											}
 										}
 										std::printf(
-											"  %-22s w%-2u %8llu tirages %9llu "
-											"etats  best %u/%zu  rips "
-											"%llu/%llu/%llu  crete-rip %u/%zu%s\n",
+											"  %-22s w%-2u %8llu "
+																						"rollouts %9llu "
+																						"states  best %u/%zu "
+																						" rips %llu/%llu/%llu"
+																						"  rip peak %u/%zu%s\n",
 											R.label.c_str(), w,
 											(unsigned long long)st.rollout_count,
 											(unsigned long long)st.nodes,
@@ -9826,16 +9831,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 								}
 								fa.Pop();
 							} else {
-								WorkerAbort("duel (finisseur, racines de recul)", err);
+								WorkerAbort("duel (finisher, "
+																			"backtrack roots)", err);
 							}
 						}
-						ReportPoison("finisseur, racines de recul", fa);
+						ReportPoison("finisher, backtrack "
+															"roots", fa);
 						fa.Shutdown();
 					});
 				}
 				for(auto& t : npool)
 					t.join();
-				prof::PrintPhase("tirages A2 (reculs)");
+				prof::PrintPhase("A2 rollouts (backtracks)");
 			}
 		}
 
@@ -9848,7 +9855,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				Arena fa;
 				std::string err;
 				if(!fa.Init(opt.arena_mb << 20, 0, err))
-					return WorkerAbort("arene (finisseur, phase 2)", err);
+					return WorkerAbort("arena (finisher, "
+														"phase 2)", err);
 				{
 					Duel fd(db, scripts, &fa);
 					if(fd.Create(start_yrp.seed, start_yrp.duel_flags,
@@ -9881,8 +9889,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							PrefixCount pc = replay_prefix(fd, roots[i].pre);
 							if(!pc.ok) {
 								std::lock_guard<std::mutex> lk(fmx);
-								std::printf("  %-14s !! prefixe non rejouable "
-											"(%zu/%zu)\n",
+								std::printf("  %-14s !! prefixe "
+																			"non rejouable "
+																			"(%zu/%zu)\n",
 											roots[i].label.c_str(), pc.used,
 											roots[i].pre.size());
 								continue;
@@ -9930,63 +9939,18 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 							fin_goal_hits += st.goal_hits;
 							fin_burn_cuts += st.burn_cuts;
 							std::lock_guard<std::mutex> lk(fmx);
-							// The rerooter is instrumented HERE TOO: the fix had only been
-							// made in the --approach table, hence mute in goal-only mode
-							// WITHOUT --approach, the very mode that had just been built.
-							char rr[64] = "";
-							if((cfg.levin_reroot || cfg.reroot_h > 0) && st.nodes)
-								std::snprintf(rr, sizeof(rr), " rr=%llu h0=%.0f%s",
-											  (unsigned long long)st.reroots,
-											  st.h_root,
-											  (st.levin_overflow ||
-											   st.lam_saturated) ? " !!NUM" : "");
-							// FRACTION of the edges that re-root. `rr` alone does
-							// not separate "the rerooter bites sometimes" from "it
-							// re-roots EVERYWHERE", two opposite failures, and the
-							// second degenerates the cost into a local measure.
-							char rf[32] = "";
-							if(st.levin_children && st.reroots)
-								std::snprintf(rf, sizeof(rf), " rr/ar=%.2f",
-											  double(st.reroots) /
-												  double(st.levin_children));
-							char rg[48] = "";
-							if(st.recipe_h_count)
-								std::snprintf(rg, sizeof(rg), " rec=%llu hR=%.1f",
-											  (unsigned long long)st.recipes_seen,
-											  st.recipe_h_sum /
-												  double(st.recipe_h_count));
-							// Replay rate, here too (the same trap had already
-							// happened on this table, for the rerooter).
-							char rj[48] = "";
-							if(st.replay_chain && st.nodes)
-								std::snprintf(rj, sizeof(rj), " rj=%.1f/%.1f",
-											  double(st.replay_decisions) /
-												  double(st.nodes),
-											  double(st.replay_chain) /
-												  double(st.nodes));
-							// MACRO EDGES: queued/absorbed/aborted, PER ROOT.
-							// Without this column, a finisher where no macro is
-							// ever offerable would be indistinguishable from one
-							// where they are useless.
-							char mc[64] = "";
-							if(cfg.finisher_options &&
-							   (st.macro_taken || st.macro_aborted))
-								std::snprintf(mc, sizeof(mc),
-											  " mac=%llu/%llu/%llu",
-											  (unsigned long long)st.macro_taken,
-											  (unsigned long long)st.macro_absorbed,
-											  (unsigned long long)st.macro_aborted);
-							std::printf("  %-14s %9llu exp. %7.1f s  best %u/%zu"
-										"%s%s%s%s%s%s  b=%llu  %s%s\n",
+							std::printf("  %-14s %9llu exp. "
+																	"%7.1f s  best "
+																	"%u/%zu%s  b=%llu  "
+																	"%s%s\n",
 										roots[i].label.c_str(),
 										(unsigned long long)st.nodes,
 										st.ms / 1000.0, st.best_overlap,
-										target.codes.size(), rr, rf, rg, rj, mc,
+										target.codes.size(),
 										spv,
 										(unsigned long long)st.edges_skipped,
 										SearchOutcome(st),
-										fs.Solutions().empty() ? ""
-															   : "  <-- BUT");
+										fs.Solutions().empty() ? "" : "  <-- GOAL");
 							for(Solution x : fs.Solutions()) {
 								std::vector<std::vector<uint8_t>> full =
 									roots[i].pre;
@@ -10020,22 +9984,24 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						}
 						fa.Pop();
 					} else {
-						WorkerAbort("duel (finisseur, phase 2)", err);
+						WorkerAbort("duel (finisher, "
+															"phase 2)", err);
 					}
 				}
-				ReportPoison("finisseur, phase 2", fa);
+				ReportPoison("finisher, phase 2", fa);
 				fa.Shutdown();
 			});
 		}
 		for(auto& t : pool)
 			t.join();
-		prof::PrintPhase("finisseur duel de depart");
+		prof::PrintPhase("finisher starting duel");
 		// The merge's liveness (--archive-fin): ALWAYS stated when the
 		// mechanism is armed, "+0" included. A finisher that brings no cell is
 		// information (empty archives? template refused?), not silence.
 		if(opt.archive_fin)
-			std::printf("  ARCHIVE DU FINISSEUR (s24) : +%zu cellule(s) "
-						"nouvelle(s), %zu amelioree(s) — archive globale %zu\n",
+			std::printf("  ARCHIVE DU FINISSEUR (s24) : +%zu "
+									"cellule(s) nouvelle(s), %zu amelioree(s) "
+									" -  archive globale %zu\n",
 						fin_cells_new, fin_cells_upd, global_archive.size());
 		// REPETITION PROBE, FINISHER side: the ROOTED rollouts are invisible in
 		// the rollout phase's table, and that is precisely where a second Liger
@@ -10044,11 +10010,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(opt.probe_repeat && fin_rollouts)
 			PrintRepeatProbe(fin_rep, fin_rollouts, db,
 							 true, true,
-							 "tirages ENRACINES du finisseur");
+							 "ROOTED finisher "
+														"rollouts");
 		// Summary of the finisher's B&B bound.
 		if(opt.optimize)
-			std::printf("  finisseur : %llu atteinte(s) du but, %llu coupure(s) "
-						"borne brulees%s\n",
+			std::printf("  finisher: %llu goal hit(s), %llu "
+									"burned-bound cut(s)%s\n",
 						(unsigned long long)fin_goal_hits.load(),
 						(unsigned long long)fin_burn_cuts.load(),
 						opt.burn_share ? "" : "  [partage OFF]");
@@ -10064,10 +10031,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		double budget = opt.finisher_min > 0
 			? (std::max)(opt.finisher_min, (opt.solve_ms - spent) * 0.8)
 			: (std::min)((opt.solve_ms - spent) * 0.8, 240000.0);
-		std::printf("  budget finisseur : %.0f s sur %.0f s restantes (0,8x%s)\n",
+		std::printf("  finisher budget: %.0f s out of %.0f s left "
+							"(0.8x%s)\n",
 					budget / 1000.0, (opt.solve_ms - spent) / 1000.0,
-					opt.finisher_min > 0 ? ", plancher --finisher-min"
-										 : ", plafond 240 s");
+					opt.finisher_min > 0 ? ", plancher "
+															"--finisher-min"
+										 : ", capped at 240 s");
 		auto t0 = Clock::now();
 		if(opt.finisher == "mono") {
 			if(!best_path.empty())
@@ -10088,7 +10057,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		}
 		spent += MsSince(t0);
 		if(!sols.empty())
-			std::printf("  %zu ligne(s) atteignant le board via le finisseur.\n",
+			std::printf("  %zu line(s) reaching the board through "
+									"the finisher.\n",
 						sols.size());
 	}
 
@@ -10108,10 +10078,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				  });
 		const Replay* ap = AR.holder->IsStreamed() ? AR.holder->Embedded()
 												   : AR.holder.get();
-		std::printf("\n  %zu ligne(s) via l'approche %s\n"
-					"  (rejouables sur CE fichier, avec le meme --opp-hand) :\n",
+		std::printf("\n  %zu line(s) through approach %s\n"
+							"  (replayable on THIS file, with the same "
+							"--opp-hand):\n",
 					AR.sols.size(), AR.file.c_str());
-		std::printf("  %-4s %10s %9s %11s\n", "#", "brulees", "actions",
+		std::printf("  %-4s %10s %9s %11s\n", "#", "burned", "actions",
 					"decisions");
 		for(size_t i = 0; i < AR.sols.size() && i < 8; ++i)
 			std::printf("  %-4zu %10u %9u %11u\n", i, AR.sols[i].burned,
@@ -10141,8 +10112,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					uniq.push_back(std::move(s));
 			}
 			if(uniq.size() < sols.size())
-				std::printf("\n  %zu ligne(s) distinctes (%zu doublons de "
-							"chemin fusionnes)\n", uniq.size(),
+				std::printf("\n  %zu distinct line(s) (%zu "
+											"duplicate paths merged)\n", uniq.size(),
 							sols.size() - uniq.size());
 			sols = std::move(uniq);
 		}
@@ -10151,7 +10122,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(a.actions != b.actions) return a.actions < b.actions;
 			return a.decisions < b.decisions;
 		});
-		std::printf("\n  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "brulees",
+		std::printf("\n  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "burned",
 					"actions", "decisions", "main", "deck", "extra");
 		for(size_t i = 0; i < sols.size() && i < 10; ++i) {
 			const Solution& x = sols[i];
@@ -10159,7 +10130,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						x.actions, x.decisions, x.hand_left, x.deck_left,
 						x.extra_left);
 		}
-		std::printf("\n  %-4s %10u %9u %11zu   (reference, sur son propre deck)\n",
+		std::printf("\n  %-4s %10u %9u %11zu   (reference, on its own "
+							"deck)\n",
 					"ref", ref_burned, ref_actions, ref_decisions);
 		WriteSolutions(sols, start_yrp, target, opt, db, scripts, opt.outdir,
 					   cons, cons.opp_hand.empty() ? nullptr : &cons.opp_hand);
@@ -10173,15 +10145,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		return;
 	}
 
-	std::printf("\n--- recherche a ecarts bornes autour du plan ---\n");
-	std::printf("  workers        : %u,  profondeur max %u decisions,  "
-				"nouveaute %s (patience %u, stricte)\n", threads,
+	std::printf("\n--- bounded-discrepancy search around the plan ---\n");
+	std::printf("  workers        : %u,  max depth %u decisions,  novelty "
+					"%s (patience %u, strict)\n", threads,
 				cfg.max_decisions, patience ? "active" : "desactivee", patience);
-	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "ecarts", "solutions",
-				"etats", "transpos.", "coupures", "duree");
+	std::printf("\n  %-8s %10s %12s %11s %10s %9s\n", "discrep.", "solutions",
+				"states", "transpos.", "cuts", "time");
 
 	uint32_t reached = 0;
-	for(uint32_t k = 0; k <= 12 && spent < opt.solve_ms && sols.empty(); ++k) {
+	for(uint32_t k = 0; k <= opt.max_ecarts && spent < opt.solve_ms && sols.empty(); ++k) {
 		reached = k;
 		double budget = opt.solve_ms - spent;
 		auto t0 = Clock::now();
@@ -10213,7 +10185,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			Arena local_arena;
 			std::string err;
 			if(!local_arena.Init(opt.arena_mb << 20, 0, err))
-				return WorkerAbort("arene (transplantation)", err);
+				return WorkerAbort("arena (transplantation)", err);
 			{
 				Duel local(db, scripts, &local_arena);
 				if(local.Create(start_yrp.seed, start_yrp.duel_flags,
@@ -10262,7 +10234,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					merge_joint(s.Stats(), {});
 				} else {
 					std::lock_guard<std::mutex> lock(merge);
-					std::printf("  !! duel de depart non initialisable : %s\n",
+					std::printf("  !! starting duel "
+													"cannot be initialised: "
+													"%s\n",
 								err.c_str());
 				}
 			}
@@ -10277,13 +10251,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			t.join();
 		if(prof::enabled) {
 			char lbl[40];
-			std::snprintf(lbl, sizeof(lbl), "ecarts plan k=%u", k);
+			std::snprintf(lbl, sizeof(lbl), "plan discrep. k=%u", k);
 			prof::PrintPhase(lbl);
 		}
 
 		double ms = MsSince(t0);
 		spent += ms;
-		std::printf("  %-8u %10zu %12llu %11llu %10llu %8.1f s   %u/%zu %u mon.%s\n",
+		std::printf("  %-8u %10zu %12llu %11llu %10llu %8.1f s   "
+							"%u/%zu %u mon.%s\n",
 					k, found.size(), (unsigned long long)nodes,
 					(unsigned long long)transpos, (unsigned long long)cuts,
 					ms / 1000.0, best_overlap,
@@ -10291,8 +10266,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 					timed_out ? "  (budget epuise)" : "");
 		PrintCuts(cut);
 		if(claims.Overflow())
-			std::printf("           !! partition saturee %llu fois : les workers "
-						"refont le meme travail\n",
+			std::printf("           !! partition saturated %llu "
+									"time(s): the workers redo the same work\n",
 						(unsigned long long)claims.Overflow());
 		for(const auto& x : found)
 			sols.push_back(x);
@@ -10300,13 +10275,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	arena.Restore();
 
 	if(sols.empty()) {
-		std::printf("\n  AUCUNE ligne trouvee jusqu'a %u ecart(s).\n", reached);
-		std::printf("  Meilleure approche : %u des %zu cartes du board reunies, "
-					"%u monstre(s) poses.\n", best_overlap, target.codes.size(),
+		std::printf("\n  NO line found up to %u discrepancy(ies).\n", reached);
+		std::printf("  Best approach: %u of the %zu board cards "
+							"assembled, %u monster(s) placed.\n", best_overlap, target.codes.size(),
 					best_monsters);
 		if(best_monsters < 2)
-			std::printf("  Cette main ne pose presque rien : le blocage est a "
-						"l'ouverture, pas\n  dans la profondeur de recherche.\n");
+			std::printf("  This hand places almost nothing: the "
+									"blockage is at the opening, not\n"
+									"  in the search depth.\n");
 		ReportBestBoard(best_board, target, db);
 
 		// All the codes are there but the goal does not fire: the difference is a
@@ -10324,13 +10300,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						extra += " +" + std::to_string(c.overlay.size()) + " mat";
 					if(!c.counters.empty())
 						extra += " +compteurs";
-					std::printf("      %s %9u  %-36.36s %-8s%s\n", label,
+					std::printf("      %s %9u  %-36.36s "
+													"%-8s%s\n", label,
 								c.Code(), db.Name(c.Code()).c_str(),
 								PosName(c.position), extra.c_str());
 				}
 			};
-			std::printf("\n  tous les codes y sont : le but ne differe que par "
-						"le DETAIL.\n  meilleur etat :\n");
+			std::printf("\n  every code is there: the goal "
+									"differs only in DETAIL.\n  best state:\n");
 			dump("MZONE", best_mzone);
 			dump("SZONE", best_szone);
 			std::printf("  cible :\n");
@@ -10338,8 +10315,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			// what it is: a requirement of ABSENCE, which --target-subset lifts.
 			// --target-subset leve.
 			if(posed)
-				std::printf("      (cible POSEE : une zone S/T absente ci-dessous est \n"
-							"      EXIGEE VIDE, sauf sous --target-subset)\n");
+				std::printf("      (POSTED target: an S/T "
+											"zone missing below is REQUIRED "
+											"EMPTY,\n      unless "
+											"--target-subset)\n");
 			dump("MZONE", posed ? posed_mz : ref.target_self.mzone);
 			dump("SZONE", posed ? posed_sz : ref.target_self.szone);
 		}
@@ -10350,13 +10329,14 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			std::error_code ec;
 			std::filesystem::create_directories(opt.outdir, ec);
 			char name[64];
-			std::snprintf(name, sizeof(name), "best_approach_%uof%zu.yrp",
+			std::snprintf(name, sizeof(name), "best_approach_%uof%z"
+														"u.yrp",
 						  best_overlap, target.codes.size());
 			std::string apath = opt.outdir + "/" + name;
 			std::string werr;
 			if(WriteYrp1(apath, start_yrp, best_path, werr))
-				std::printf("\n  meilleure approche ecrite : %s (%zu decisions, "
-							"PAS une solution)\n", apath.c_str(),
+				std::printf("\n  best approach written: %s "
+											"(%zu decisions, NOT a solution)\n", apath.c_str(),
 							best_path.size());
 			else
 				std::printf("  !! %s\n", werr.c_str());
@@ -10369,15 +10349,16 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			std::error_code ec;
 			std::filesystem::create_directories(opt.outdir, ec);
 			char name[64];
-			std::snprintf(name, sizeof(name), "best_joint_%ur_%uof%zu.yrp",
+			std::snprintf(name, sizeof(name), "best_joint_%ur_%uof%"
+														"zu.yrp",
 						  best_joint_rp, best_joint_overlap,
 						  target.codes.size());
 			std::string jpath = opt.outdir + "/" + name;
 			std::string werr;
 			if(WriteYrp1(jpath, start_yrp, best_joint_path, werr)) {
-				std::printf("  meilleure ligne JOINTE ecrite : %s (%u rip(s), "
-							"%u/%zu au board, %zu decisions, PAS une "
-							"solution)\n",
+				std::printf("  best JOINT line written: %s "
+											"(%u rip(s), %u/%zu at the board, "
+											"%zu decisions, NOT a solution)\n",
 							jpath.c_str(), best_joint_rp, best_joint_overlap,
 							target.codes.size(), best_joint_path.size());
 				if(outres)
@@ -10411,15 +10392,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		if(a.actions != b.actions) return a.actions < b.actions;
 		return a.decisions < b.decisions;
 	});
-	std::printf("\n  %zu ligne(s) atteignant le board depuis ce deck.\n\n", sols.size());
-	std::printf("  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "brulees", "actions",
+	std::printf("\n  %zu line(s) reaching the board from this deck.\n\n", sols.size());
+	std::printf("  %-4s %10s %9s %11s %8s %8s %8s\n", "#", "burned", "actions",
 				"decisions", "main", "deck", "extra");
 	for(size_t i = 0; i < sols.size() && i < 10; ++i) {
 		const Solution& x = sols[i];
 		std::printf("  %-4zu %10u %9u %11u %8u %8u %8u\n", i, x.burned, x.actions,
 					x.decisions, x.hand_left, x.deck_left, x.extra_left);
 	}
-	std::printf("\n  %-4s %10u %9u %11zu   (reference, sur son propre deck)\n", "ref",
+	std::printf("\n  %-4s %10u %9u %11zu   (reference, on its own deck)\n", "ref",
 				ref_burned, ref_actions, ref_decisions);
 	WriteSolutions(sols, start_yrp, target, opt, db, scripts, opt.outdir,
 				   cons, cons.opp_hand.empty() ? nullptr : &cons.opp_hand);
@@ -10434,9 +10415,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 // watching the curve.
 void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 						  Arena& arena, const LineResult& ref) {
-	std::printf("\n=== courbe de croissance du graphe d'etats ===\n");
-	std::printf("  Le nombre d'etats distincts par profondeur decide si\n"
-				"  \"exhaustif\" est realiste. C'est une mesure, pas une estimation.\n\n");
+	std::printf("\n=== growth curve of the state graph ===\n");
+	std::printf("  The number of distinct states per depth decides "
+					"whether\n  \"exhaustive\" is realistic. This is a "
+					"measurement, not an estimate.\n\n");
 
 	// Target board: the one at the end of the reference's turn.
 	while(arena.Depth() > 1)
@@ -10453,7 +10435,7 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		target = ComputeBoardKey(duel, static_cast<uint8_t>(opt.target_player));
 		arena.Restore();
 	}
-	std::printf("  board cible : %zu cartes, empreinte %016llx\n\n",
+	std::printf("  target board: %zu cards, fingerprint %016llx\n\n",
 				target.entries.size(), (unsigned long long)target.hash);
 
 	// BOARDS AND NOT STATES. `states` is what the transposition distinguishes
@@ -10468,8 +10450,8 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 	// prompt). It is THEIR ratio that measures the price of the transposition
 	// key; elsewhere we are in mid-resolution and two states with the same board
 	// are legitimately distinct.
-	std::printf("  %-6s %10s %8s %8s %9s %8s %9s %7s\n", "prof.", "etats",
-				"b.exact", "b.codes", "et.idle", "b.idle", "duree", "statut");
+	std::printf("  %-6s %10s %8s %8s %9s %8s %9s %7s\n", "prof.", "states",
+				"b.exact", "b.codes", "et.idle", "b.idle", "time", "statut");
 	uint64_t prev = 0;
 	for(uint32_t depth = 2; depth <= opt.growth_max; depth += 2) {
 		SearchConfig cfg;
@@ -10495,7 +10477,7 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 
 		const SearchStats& s = search.Stats();
 		const char* status = s.hit_time_limit ? "temps"
-							 : s.hit_node_limit ? "noeuds" : "epuise";
+							 : s.hit_node_limit ? "nodes" : "epuise";
 		std::printf("  %-6u %10llu %8zu %8zu %9llu %8zu %6.0f ms %7s",
 					depth, (unsigned long long)s.nodes, s.boards_entries,
 					s.boards_codes, (unsigned long long)s.states_idle,
@@ -10507,8 +10489,8 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 		if(depth == opt.growth_max || s.hit_time_limit || s.hit_node_limit) {
 			// Profile per depth: shows where the exploration really stops, and hence
 			// whether saturation comes from a closed space or from a bound that bites.
-			std::printf("\n  profil du dernier passage (etats nouveaux par "
-						"profondeur) :\n   ");
+			std::printf("\n  profile of the last pass (new states "
+									"by depth):\n");
 			for(size_t i = 0; i < s.distinct_by_depth.size(); ++i)
 				if(s.distinct_by_depth[i])
 					std::printf(" %zu:%llu", i,
@@ -10517,72 +10499,49 @@ void RunGrowthMeasurement(Duel& duel, const Replay& yrp, const Options& opt,
 			// depth. `expansions_by_depth` was sized and incremented in four places
 			// and read nowhere, yet it is the only figure that says whether the table
 			// merges anything where the space explodes.
-			std::printf("\n  fusion par profondeur (expansions / distincts) :\n   ");
+			std::printf("\n  merges by depth (expansions / "
+									"distinct):\n");
 			for(size_t i = 0; i < s.expansions_by_depth.size() &&
 							  i < s.distinct_by_depth.size(); ++i)
 				if(s.distinct_by_depth[i])
 					std::printf(" %zu:x%.1f", i,
 								double(s.expansions_by_depth[i]) /
 									double(s.distinct_by_depth[i]));
-			std::printf("\n  terminaux : %llu   impasses : %llu\n",
+			std::printf("\n  terminals: %llu   dead ends: %llu\n",
 						(unsigned long long)s.terminals,
 						(unsigned long long)s.dead_ends);
-			// ATTRIBUTION OF THE TRANSPOSITION KEY, at the STABLE points. Each row
-			// adds one component to the previous one: the gap between two consecutive
-			// rows IS the price of the component added. Without that reading, fixing
-			// the key would be a bet.
-			if(s.d_full) {
-				std::printf("\n  attribution de la cle (valeurs distinctes aux "
-							"points idle) :\n");
-				std::printf("    board (BoardKey)                    %8zu   "
-							"x1.0\n", s.boards_idle);
-				auto rap = [&](size_t v) {
-					return s.boards_idle ? double(v) / double(s.boards_idle)
-										 : 0.0;
-				};
-				std::printf("    + etat de jeu, COLONNES CONFONDUES  %8zu   "
-							"x%.1f\n", s.d_zsort, rap(s.d_zsort));
-				std::printf("    + la COLONNE distingue              %8zu   "
-							"x%.1f   <== prix de la colonne : x%.2f\n",
-							s.d_zones, rap(s.d_zones),
-							s.d_zsort ? double(s.d_zones) / double(s.d_zsort)
-									  : 0.0);
-				std::printf("    + charge utile du prompt            %8zu   "
-							"x%.1f\n", s.d_payload, rap(s.d_payload));
-				std::printf("    + etat du processeur (= cle reelle) %8zu   "
-							"x%.1f\n", s.d_full, rap(s.d_full));
-				std::printf("    (le processeur SEUL vaut %zu valeurs "
-							"distinctes)\n", s.d_proc);
-			}
 			// GLOBAL ATTRIBUTION: the breakdown of EVERY node. Without it, one fixes
 			// the key on the strength of a count restricted to idle points, and an
 			// attribution over a subset does not carry over to the whole.
 			const uint64_t tot = s.nodes_forced + s.nodes_idle + s.nodes_multi;
 			if(tot) {
 				auto pc = [&](uint64_t v) { return 100.0 * double(v) / double(tot); };
-				std::printf("\n  repartition des noeuds developpes :\n"
-							"    FORCES (une seule reponse legale) %10llu   %5.1f %%\n"
-							"    idle   (point de decision stable) %10llu   %5.1f %%\n"
-							"    autres (selections, chaines)      %10llu   %5.1f %%\n",
+				std::printf("\n  breakdown of expanded nodes:\n"
+											"    FORCED (a single legal "
+											"answer)    %10llu   %5.1f %%\n"
+											"    idle   (stable decision "
+											"point)    %10llu   %5.1f %%\n"
+											"    other  (selections, chains)  "
+											"     %10llu   %5.1f %%\n",
 							(unsigned long long)s.nodes_forced, pc(s.nodes_forced),
 							(unsigned long long)s.nodes_idle, pc(s.nodes_idle),
 							(unsigned long long)s.nodes_multi, pc(s.nodes_multi));
 				if(s.elided)
-					std::printf("    dont JOUES EN LIGNE (--elide-forced) %7llu\n",
+					std::printf("    of which PLAYED "
+													"INLINE (--elide-forced) "
+													"%7llu\n",
 								(unsigned long long)s.elided);
 			}
 		}
 		if(s.hit_time_limit || s.hit_node_limit) {
-			std::printf("\n  Arret : le budget est atteint des la profondeur %u,\n"
-						"  tres loin des %u decisions de la ligne de reference.\n",
+			std::printf("\n  Stopped: the budget is exhausted at "
+									"depth %u already,\n"
+									"  far short of the %u decisions of the "
+									"reference line.\n",
 						depth, (unsigned)ref.responses_used);
 			break;
 		}
 	}
-	std::printf("\n  Lecture : le facteur de croissance par palier est ce qui\n"
-				"  determine la profondeur atteignable. Un facteur stable de k\n"
-				"  signifie que chaque paire de decisions supplementaire multiplie\n"
-				"  le travail par k.\n");
 }
 
 } // namespace
@@ -10603,8 +10562,9 @@ int main(int argc, char** argv) {
 	Options opt;
 	if(!ParseArgs(argc, argv, opt)) {
 		Usage();
-		return 2;
+		return opt.help ? 0 : 2;
 	}
+	g_verbose = opt.verbose;
 	// Before any thread is created: publication of the flag rides on the workers'
 	// launch.
 	if(opt.profile)
@@ -10616,25 +10576,24 @@ int main(int argc, char** argv) {
 	// to flag order) and it is STATED.
 	if(opt.probe_repeat && opt.recipes < 0) {
 		opt.recipes = 0.0;
-		std::printf("  --probe-repeat implique --recipes 0 : la sonde mesure des "
-					"distances sur le graphe de recettes\n");
+		std::printf("  --probe-repeat implies --recipes 0: the probe "
+							"measures distances over the recipe graph\n");
 	}
 	// SAME REASON for the levers that read the graph: without it they run, cost
 	// nothing and do NOTHING, giving a result indistinguishable from doing
 	// nothing and a false conclusion at the end.
 	// `--recipes 0` feeds and measures the graph WITHOUT introducing it into the
 	// finisher's `h`, so the levers stay the only factors changed.
-	// facteurs modifies.
 	if((opt.assign || opt.backward) &&
 	   opt.recipes < 0) {
 		opt.recipes = 0.0;
-		std::printf("  --assign / --recipe-w / --backward impliquent --recipes 0 : "
-					"les trois lisent le graphe de recettes\n");
+		std::printf("  --assign / --backward imply --recipes 0: both "
+							"read the recipe graph\n");
 	}
 	std::string error;
 	if(!opt.deck_file.empty() && !opt.start_replay.empty()) {
-		std::printf("!! --deck et --start sont exclusifs : l'un construit la "
-					"position de depart, l'autre la lit\n");
+		std::printf("!! --deck and --start are exclusive: one builds "
+							"the starting position, the other reads it\n");
 		return 2;
 	}
 
@@ -10647,9 +10606,9 @@ int main(int argc, char** argv) {
 	// WriteSolutions produces, so it must be accepted as input again.
 	const Replay* yrp = replay.IsStreamed() ? replay.Embedded() : &replay;
 	if(!yrp) {
-		std::printf("!! aucun yrp1 embarque dans %s : les decisions du joueur "
-					"sont irrecuperables.\n   Le solveur exige un replay "
-					"exportable.\n", opt.replay.c_str());
+		std::printf("!! no yrp1 embedded in %s: the player's "
+							"decisions cannot be recovered.\n"
+							"   The solver needs an exportable replay.\n", opt.replay.c_str());
 		return 1;
 	}
 
@@ -10660,24 +10619,24 @@ int main(int argc, char** argv) {
 	const Replay* start_yrp = nullptr;
 	if(!opt.start_replay.empty()) {
 		if(!start_replay.Load(opt.start_replay, error)) {
-			std::printf("!! replay de depart : %s\n", error.c_str());
+			std::printf("!! starting replay: %s\n", error.c_str());
 			return 1;
 		}
 		start_yrp = start_replay.IsStreamed() ? start_replay.Embedded()
 											  : &start_replay;
 		if(!start_yrp) {
-			std::printf("!! aucun yrp1 embarque dans %s : deck et graine "
-						"illisibles.\n", opt.start_replay.c_str());
+			std::printf("!! no yrp1 embedded in %s: deck and seed "
+									"unreadable.\n", opt.start_replay.c_str());
 			return 1;
 		}
 		if(start_yrp->decks.size() <= static_cast<size_t>(opt.target_player)) {
-			std::printf("!! le replay de depart ne porte pas de deck pour le "
-						"joueur %d.\n", opt.target_player);
+			std::printf("!! the starting replay carries no deck "
+									"for player %d.\n", opt.target_player);
 			return 1;
 		}
 	}
 
-	std::printf("=== chargement ===\n");
+	std::printf("loading\n");
 	auto t_db = Clock::now();
 	CardDB db;
 	if(!db.Load(opt.workdir, error)) {
@@ -10685,7 +10644,8 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	double ms_db = MsSince(t_db);
-	std::printf("  cartes            : %zu depuis %zu base(s)  (%.0f ms)\n",
+	std::printf("  cards             : %zu from %zu database(s)  (%.0f "
+					"ms)\n",
 				db.Size(), db.Sources().size(), ms_db);
 
 	// The constraints are resolved as soon as the database is there: a card that
@@ -10697,31 +10657,32 @@ int main(int argc, char** argv) {
 	// silently overwrite the first. The paper combines its own through a WEIGHTED
 	// sum (Th. 3.2), not through an implicit "and".
 	if(opt.levin_reroot && opt.reroot_h > 0) {
-		std::printf("!! --reroot et --reroot-h sont exclusifs (rerooter dur "
-					"contre rerooter doux).\n");
+		std::printf("!! --reroot and --reroot-h are exclusive (hard "
+							"rerooter against soft rerooter).\n");
 		return 2;
 	}
 	// --no-ref promises that the reference only supplies the duel's parameters.
 	// Without --target it would still supply the TARGET BOARD and the promise
 	// would be false: we refuse rather than lie in the report.
 	if(opt.no_ref && !cons.target_scratch) {
-		std::printf("!! --no-ref exige --target : sans lui le board cible vient "
-					"encore de la reference.\n");
+		std::printf("!! --no-ref needs --target: without it the "
+							"target board still comes from the reference.\n");
 		return 2;
 	}
 	if(opt.no_ref && opt.deck_file.empty() && opt.start_replay.empty()) {
-		std::printf("!! --no-ref exige --deck (ou --start) : le replay "
-					"positionnel n'est plus qu'un gabarit.\n");
+		std::printf("!! --no-ref needs --deck (or --start): the "
+							"positional replay is only a template now.\n");
 		return 2;
 	}
 
 	if(opt.mp1_only)
-		std::printf("  contrainte : combo en MAIN PHASE 1 seule — l'entree en "
-					"Battle Phase (donc la Main 2) est retiree de "
-					"l'enumeration ; -> End Phase reste.\n");
+		std::printf("  constraint: combo in MAIN PHASE 1 only - "
+							"entering the Battle Phase (hence Main 2) is "
+							"removed from the enumeration; -> End Phase "
+							"remains.\n");
 	ScriptProvider scripts;
 	scripts.Init(opt.workdir, opt.scriptdirs);
-	std::printf("  dossiers scripts  : %zu%s\n", scripts.Dirs().size(),
+	std::printf("  script dirs       : %zu%s\n", scripts.Dirs().size(),
 				opt.scriptdirs.empty() ? "" : "  (override)");
 
 	// --no-self-negate: the deck's NEGATION effects are derived HERE, the one
@@ -10751,9 +10712,9 @@ int main(int argc, char** argv) {
 		if(!snkt.Load(scripts) ||
 		   (!snkt.Lookup("CATEGORY_NEGATE", c_negate) &
 			!snkt.Lookup("CATEGORY_DISABLE", c_disable))) {
-			std::printf("!! --no-self-negate : constantes illisibles "
-						"(constant.lua absent ?) — discipline ETEINTE, dit "
-						"plutot que tue.\n");
+			std::printf("!! --no-self-negate: constants "
+									"unreadable (constant.lua missing?) - "
+									"discipline OFF, said rather than silent.\n");
 		} else if(!sn_codes.empty()) {
 			OperatorTable sntbl;
 			sntbl.Build(db, scripts, snkt, sn_codes);
@@ -10772,10 +10733,10 @@ int main(int argc, char** argv) {
 			cons.self_negate.erase(std::unique(cons.self_negate.begin(),
 											   cons.self_negate.end()),
 								   cons.self_negate.end());
-			std::printf("  discipline --no-self-negate : %zu effet(s) de "
-						"negation derive(s) : %s\n",
+			std::printf("  discipline --no-self-negate: %zu "
+									"negation effect(s) derived: %s\n",
 						cons.self_negate.size(),
-						listing.empty() ? "(aucun)" : listing.c_str());
+						listing.empty() ? "(none)" : listing.c_str());
 		}
 	}
 
@@ -10791,17 +10752,17 @@ int main(int argc, char** argv) {
 		// address.
 		constexpr std::uintptr_t kPreferredBase = 0x0000400000000000ull;
 		if(!arena.Init(opt.arena_mb << 20, kPreferredBase, error)) {
-			std::printf("!! arene : %s\n", error.c_str());
+			std::printf("!! arena: %s\n", error.c_str());
 			return 1;
 		}
 		arena_ptr = &arena;
-		std::printf("  arene             : base 0x%llx, %zu Mo reserves, "
-					"pages sales %s\n",
+		std::printf("  arena             : base 0x%llx, %zu MB "
+							"reserved, dirty pages %s\n",
 					static_cast<unsigned long long>(arena.BaseAddress()),
 					opt.arena_mb,
-					arena.DirtyTrackingAvailable() ? "suivies" : "INDISPONIBLES");
+					arena.DirtyTrackingAvailable() ? "tracked" : "UNAVAILABLE");
 		if(std::string problem = arena.SelfCheck(); !problem.empty()) {
-			std::printf("!! arene incoherente : %s\n", problem.c_str());
+			std::printf("!! arena inconsistent: %s\n", problem.c_str());
 			return 1;
 		}
 	}
@@ -10829,7 +10790,8 @@ int main(int argc, char** argv) {
 		// desynchronise the replay (the rips change).
 		const bool judge_opp_hand = !opt.solve && !cons.opp_hand.empty();
 		if(judge_opp_hand)
-			std::printf("  main adverse : +%zu carte(s) (--opp-hand)\n",
+			std::printf("  opponent hand: +%zu card(s) "
+									"(--opp-hand)\n",
 						cons.opp_hand.size());
 		if(!duel.Setup(*yrp, error,
 					   judge_opp_hand ? &cons.opp_hand : nullptr,
@@ -10839,13 +10801,14 @@ int main(int argc, char** argv) {
 		}
 		double ms_setup = MsSince(t_setup);
 
-		std::printf("\n=== rejeu de la ligne de reference ===\n");
+		std::printf("\nreference replay\n");
 		std::printf("  mode              : %s\n",
 					yrp->IsHandTest() ? "HAND TEST" : "duel normal");
-		std::printf("  ramasse-miettes   : %s\n",
-					gc_stopped ? "ARRETE (memoire recuperee par restauration)"
+		std::printf("  garbage collector : %s\n",
+					gc_stopped ? "STOPPED (memory "
+													"reclaimed by restore)"
 							   : "actif");
-		std::printf("  reponses a rejouer: %zu\n", yrp->responses.size());
+		std::printf("  answers to replay : %zu\n", yrp->responses.size());
 
 		// Resume point taken BEFORE the line: the fidelity test consists in coming
 		// back to it, replaying the 290 decisions and requiring a rigorously identical
@@ -10872,10 +10835,12 @@ int main(int argc, char** argv) {
 			ConstantTable kt;
 			const size_t nconst = kt.Load(scripts);
 			if(!nconst) {
-				std::printf("\n!! --operators : aucune constante lue. Les "
-							"fichiers `constant.lua` du jeu ne sont pas dans "
-							"les --scriptdir : la table serait vide et le "
-							"harnais rendrait un faux verdict.\n");
+				std::printf("\n!! --operators: no constant "
+											"read. The game's `constant.lua` "
+											"files are not in the "
+											"--scriptdir: the table would be "
+											"empty and the harness would "
+											"return a false verdict.\n");
 			} else {
 				// The DECK's codes, duplicates included: it is the number of
 				// COPIES that decides a "per COPY" capacity, and step 1 depends on
@@ -10928,16 +10893,15 @@ int main(int argc, char** argv) {
 				// exactly the model the search will see, with the same flags and
 				// the same compilation.
 				std::vector<std::pair<uint32_t, uint32_t>> goal_transient;
-				if(!opt.resolve_legacy)
-					for(const ResolveReq& rr : cons.resolve_min) {
-						const uint32_t cc = db.Canonical(rr.code);
-						if(std::find_if(goal_transient.begin(),
-										goal_transient.end(),
-										[&](const auto& g) {
-											return g.first == cc;
-										}) == goal_transient.end())
-							goal_transient.emplace_back(cc, 1u);
-					}
+				for(const ResolveReq& rr : cons.resolve_min) {
+					const uint32_t cc = db.Canonical(rr.code);
+					if(std::find_if(goal_transient.begin(),
+									goal_transient.end(),
+									[&](const auto& g) {
+										return g.first == cc;
+									}) == goal_transient.end())
+						goal_transient.emplace_back(cc, 1u);
+				}
 				// THE SOLVER PROVES ITSELF BEFORE SERVING. Five instances with
 				// known solutions, covering the four theorems. A wrong simplex
 				// would return plausible and NON-admissible values: it is the only
@@ -10946,10 +10910,13 @@ int main(int argc, char** argv) {
 				{
 					size_t tot = 0;
 					const size_t ok = SelfTestOperatorLP(&tot);
-					std::printf("\n  auto-test du simplexe : %zu/%zu%s\n", ok,
+					std::printf("\n  simplex self-test: "
+													"%zu/%zu%s\n", ok,
 								tot, ok == tot ? "" :
-								"   <<< SOLVEUR FAUX : toute valeur h est a "
-								"jeter");
+								"   <<< SOLVER "
+																"WRONG: every h "
+																"value is to be "
+																"discarded");
 					if(ok == tot)
 						BuildAndSolveBalance(tbl, db, kt, deck_codes,
 											 goal_counts, goal_transient);
@@ -11042,7 +11009,8 @@ int main(int argc, char** argv) {
 							{
 								uint64_t k_add = 0, k_efm = 0;
 								kt.Lookup("EFFECT_ADD_CODE", k_add);
-								kt.Lookup("EFFECT_EXTRA_FUSION_MATERIAL",
+								kt.Lookup("EFFECT_EXTRA_FUSION_"
+																		"MATERIAL",
 										  k_efm);
 								std::unordered_map<uint32_t, uint32_t> dcop;
 								for(uint32_t c : deck_codes)
@@ -11263,8 +11231,8 @@ int main(int argc, char** argv) {
 										rows += lb;
 									}
 									if(rows.empty())
-										rows = "(solveur en defaut, pas une "
-											   "preuve)";
+										rows = "(solver at fault, "
+																					"not a proof)";
 									inf_diag.emplace_back(steps, rows);
 								}
 								continue;
@@ -11283,12 +11251,15 @@ int main(int argc, char** argv) {
 							last_h = h;
 						}
 						arena.Restore();
-						std::printf("\n=== h LE LONG DE LA LIGNE REELLE "
-									"(theoreme 2) ===\n");
-						std::printf("  %zu decision(s) parcourue(s) ; h : %.0f "
-									"-> %.0f\n", steps, first_h, last_h);
-						std::printf("  descentes %zu (%.0f %%), montees %zu, "
-									"plats %zu\n", down,
+						std::printf("\n=== h ALONG THE "
+															"REAL LINE (theorem "
+															"2) ===\n");
+						std::printf("  %zu decision(s) "
+															"parcourue(s) ; h : "
+															"%.0f -> %.0f\n", steps, first_h, last_h);
+						std::printf("  descentes %zu "
+															"(%.0f %%), montees "
+															"%zu, plats %zu\n", down,
 									steps ? 100.0 * double(down) / double(steps)
 										  : 0.0,
 									up, steps - down - up - bad - infeasible);
@@ -11300,9 +11271,13 @@ int main(int argc, char** argv) {
 						// LEGITIMATE as soon as k operators fired. The first run
 						// of this bench counted it as a violation: it was the
 						// instrument, not the model.
-						std::printf("  chutes de plus de 1 sur UNE decision : "
-									"%zu  (attendu : une decision resout parfois "
-									"une chaine entiere)\n", bad);
+						std::printf("  drops of more "
+															"than 1 on ONE "
+															"decision: %zu  "
+															"(expected: one "
+															"decision sometimes "
+															"resolves a whole "
+															"chain)\n", bad);
 						// THREE CASES, AND CONFLATING THEM WOULD MAKE THE REPORT
 						// LIE. The first version printed "the model RECOGNISES
 						// the goal" on a goal PROVED IMPOSSIBLE (h = infinite
@@ -11310,35 +11285,52 @@ int main(int argc, char** argv) {
 						// instrument that congratulates the model when it
 						// declares the line dead is worse than no instrument.
 						if(infeasible == steps && steps)
-							std::printf("  h = INFINI sur TOUTE la ligne : le "
-										"modele declare ce but hors d'atteinte "
-										"(coherent avec l'impasse prouvee)\n");
+							std::printf("  h = INFINITE "
+																	"along the WHOLE "
+																	"line: the model "
+																	"declares this goal "
+																	"out of reach "
+																	"(consistent with "
+																	"the proven dead "
+																	"end)\n");
 						else if(last_h < 0)
-							std::printf("  h final : INDETERMINE (aucun etat "
-										"faisable rencontre)\n");
+							std::printf("  final h: "
+																	"UNDETERMINED (no "
+																	"feasible state met)\n");
 						else
-							std::printf("  h final = %.0f  %s\n",
+							std::printf("  h final = %.0f  "
+																	"%s\n",
 										std::fabs(last_h) < 1e-9 ? 0.0 : last_h,
 										std::fabs(last_h) < 1e-6
-											? "— le modele RECONNAIT le but"
-											: "<<< le but est atteint et h ne "
-											  "le voit pas : modele INCOMPLET");
+											? " - the model "
+																						"RECOGNISES the goal"
+											: "<<< the goal is "
+																						"reached and h does "
+																						"not see it: model "
+																						"INCOMPLETE");
 						if(infeasible) {
-							std::printf("  etats ou h = INFINI : %zu   <<< le "
-										"modele declare morte une ligne qui "
-										"ABOUTIT : sur-contrainte\n",
+							std::printf("  states where h = "
+																	"INFINITE: %zu   <<< "
+																	"the model declares "
+																	"dead a line that "
+																	"SUCCEEDS: "
+																	"over-constrained\n",
 										infeasible);
 							for(const auto& [st, rows] : inf_diag)
-								std::printf("      decision %zu : %s\n", st,
+								std::printf("      decision %zu "
+																			": %s\n", st,
 											rows.c_str());
 						}
 						// --- verdict of the walk with quotas ------------------
 						if(!qwalk_hosts.empty()) {
-							std::printf("\n  --- la meme marche AVEC QUOTAS DU "
-										"CHEMIN (--quota-h, s24) ---\n");
-							std::printf("  hotes suivis : %zu ; lignes de "
-										"quota posees (max sur la ligne) : "
-										"%u\n",
+							std::printf("\n  --- the same "
+																	"walk WITH PATH "
+																	"QUOTAS (--quota-h) "
+																	"---\n");
+							std::printf("  hosts tracked: "
+																	"%zu; quota lines "
+																	"posted (max along "
+																	"the line): %u\n",
 										qwalk_hosts.size(), qmax_applied);
 							// The reason for each ignored host: `unbounded` calls
 							// for extracting the bounds, `over budget` calls for
@@ -11354,26 +11346,33 @@ int main(int argc, char** argv) {
 								std::printf("  ignores (%s) : %s\n", tag,
 											sk.c_str());
 							};
-							qprint("effet SANS BORNE declaree — extraction",
+							qprint("effect with NO "
+															"declared bound - "
+															"extraction",
 								   qunb_union);
-							qprint("observations > budget declare — "
-								   "couverture", qover_union);
-							std::printf("  h_quota : %.0f -> %.0f ; "
-										"infaisables %zu (temoin sans quotas "
-										"%zu)\n",
+							qprint("observations > "
+															"budget declare  -  "
+															"couverture", qover_union);
+							std::printf("  h_quota: %.0f -> "
+																	"%.0f; infeasible "
+																	"%zu (control "
+																	"without quotas %zu)\n",
 										first_hq, last_hq, infeasible_q,
 										infeasible);
-							std::printf("  etats infaisables NOUVEAUX : %zu  "
-										"%s\n", infeasible_new,
+							std::printf("  NEW infeasible "
+																	"states: %zu  %s\n", infeasible_new,
 										infeasible_new
-											? "<<< SUR-CONTRAINTE red-black : "
-											  "l'agregat ment sur cette ligne, "
-											  "ne pas promouvoir"
-											: "(JUGE : 0 nouveau — l'agregat "
-											  "est sur le long de la "
-											  "reference)");
+											? "<<< red-black "
+																						"OVER-CONSTRAINT: "
+																						"the aggregate lies "
+																						"on this line, do "
+																						"not promote"
+											: "(JUDGE: 0 new - the "
+																						"aggregate is along "
+																						"the reference)");
 							for(const auto& [st, rows] : infq_diag)
-								std::printf("      decision %zu : %s\n", st,
+								std::printf("      decision %zu "
+																			": %s\n", st,
 											rows.c_str());
 						}
 						// --- the profile, and its verdict in closed form ------
@@ -11389,11 +11388,15 @@ int main(int argc, char** argv) {
 								prev_at = p;
 							}
 							std::sort(gaps.rbegin(), gaps.rend());
-							std::printf("\n=== PROFIL DES ECARTS ENTRE BARREAUX "
-										"(s21, le long de la ligne reelle) ===\n");
-							std::printf("  %zu unite(s) de sous-but servies en "
-										"%zu reponses ; %zu palier(s) distincts "
-										"de l'echelle\n", unit_at.size(), steps,
+							std::printf("\n=== GAP PROFILE "
+																	"BETWEEN RUNGS "
+																	"(along the real "
+																	"line) ===\n");
+							std::printf("  %zu subgoal "
+																	"unit(s) served in "
+																	"%zu answers; %zu "
+																	"distinct step(s) of "
+																	"the ladder\n", unit_at.size(), steps,
 										rung_vals.size());
 							// The ladder NAMED: each rung, its answer, and the gap
 							// from the previous one. The deserts are read here,
@@ -11407,7 +11410,7 @@ int main(int argc, char** argv) {
 									char nb[64];
 									if(n.zone == 5)
 										std::snprintf(nb, sizeof nb,
-													  "(depart de reserve)");
+													  "(from reserve)");
 									else if(n.code)
 										std::snprintf(nb, sizeof nb, "%s",
 													  db.Name(n.code).c_str());
@@ -11415,8 +11418,9 @@ int main(int argc, char** argv) {
 										std::snprintf(nb, sizeof nb,
 													  "archetype 0x%llx",
 													  (unsigned long long)n.arch);
-									std::printf("    barreau %2zu  reponse %3zu "
-												"(+%3zu)  %-34s @%s\n", i + 1,
+									std::printf("    rung %2zu  "
+																					"answer %3zu (+%3zu) "
+																					" %-34s @%s\n", i + 1,
 												unit_at[i], unit_at[i] - pat, nb,
 												n.zone == 2   ? "TERRAIN"
 												: n.zone == 3 ? "CIMETIERE"
@@ -11427,9 +11431,12 @@ int main(int argc, char** argv) {
 									pat = unit_at[i];
 								}
 							}
-							std::printf("  ecarts entre unites consecutives, en "
-										"REPONSES (adverses et forcees "
-										"comprises),\n  tries decroissants :");
+							std::printf("  gaps between "
+																	"consecutive units, "
+																	"in ANSWERS "
+																	"(opponent and "
+																	"forced included),\n"
+																	"  sorted descending:");
 							for(size_t i = 0; i < gaps.size() && i < 12; ++i)
 								std::printf(" %zu", gaps[i]);
 							if(gaps.size() > 12)
@@ -11442,20 +11449,19 @@ int main(int argc, char** argv) {
 							const double ratio = 0.51, b = 5.9;
 							const double lmax =
 								static_cast<double>(gaps.empty() ? 0 : gaps[0]);
-							std::printf("  l_max = %.0f reponses (~%.0f "
-										"decisions a choix) ; terme dominant "
-										"b^l : 10^%.1f a b=%.1f\n", lmax,
+							std::printf("  l_max = %.0f "
+																	"answers (~%.0f "
+																	"decisions with a "
+																	"choice); dominant "
+																	"term b^l: 10^%.1f "
+																	"at b=%.1f\n", lmax,
 										lmax * ratio,
 										lmax * ratio * std::log10(b), b);
-							std::printf("  Lecture : sous ~8 decisions a choix "
-										"par ecart, chaque bloc est a portee "
-										"de ~10^6 tirages ;\n  au-dela, c'est CE "
-										"bloc qui interdit le run nu — l'option "
-										"qui manque est ENTRE ces barreaux.\n");
 						}
 					}
 				}
-				std::printf("\n  (%zu script(s) lu(s), %zu introuvable(s))\n",
+				std::printf("\n  (%zu script(s) read, %zu not "
+											"found)\n",
 							nread, tbl.Missing());
 				HarnessVerdict hv = ConfrontPlan(tbl, db, kt, first.activations);
 				PrintVerdict(hv);
@@ -11466,10 +11472,12 @@ int main(int argc, char** argv) {
 		// also a JUDGE, so a replay produced yesterday (or played by hand) is checked
 		// by passing it as input with the same flags.
 		if(cons.Any()) {
-			std::printf("\n--- verdict des contraintes sur ce replay ---\n");
+			std::printf("\n--- verdict of the constraints on this "
+									"replay ---\n");
 			for(const auto& [n, allowed] : cons.summons) {
 				if(n > first.summon_codes.size()) {
-					std::printf("  --summon #%u : sans objet (%zu invocations)\n",
+					std::printf("  --summon #%u: not "
+													"applicable (%zu summons)\n",
 								n, first.summon_codes.size());
 					continue;
 				}
@@ -11481,19 +11489,22 @@ int main(int argc, char** argv) {
 							db.Name(canon).c_str());
 			}
 			if(!cons.guard.empty()) {
-				std::printf("  --guard : %zu fenetre(s) adverse(s) sous menace, "
-							"%zu decouverte(s)%s\n", first.guard_checks,
+				std::printf("  --guard: %zu opponent "
+											"window(s) under threat, %zu "
+											"uncovered%s\n", first.guard_checks,
 							first.guard_violations,
 							first.guard_violations ? "  <-- VIOLEE" : "");
 				if(first.guard_violations)
-					std::printf("            premiere : apres l'invocation #%zu, "
-								"main adverse %u carte(s)\n",
+					std::printf("            first: after "
+													"summon #%zu, opponent "
+													"hand %u card(s)\n",
 								first.first_guard_violation_summon,
 								first.first_guard_violation_opp_hand);
 			}
 			if(!cons.no_activate.empty())
-				std::printf("  --no-activate : %zu activation(s) interdite(s) "
-							"utilisee(s)%s\n", first.forbidden_activations,
+				std::printf("  --no-activate : %zu "
+											"activation(s) interdite(s) "
+											"utilisee(s)%s\n", first.forbidden_activations,
 							first.forbidden_activations ? "  <-- VIOLEE" : "");
 			for(size_t i = 0; i < cons.resolve_min.size(); ++i) {
 				size_t have = i < first.resolve_counts.size()
@@ -11510,74 +11521,93 @@ int main(int argc, char** argv) {
 			}
 		}
 
-		std::printf("\n--- couts d'execution ---\n");
-		std::printf("  chargement des bases       : %8.1f ms  (une fois par process)\n", ms_db);
-		std::printf("  creation du duel + scripts : %8.1f ms  <-- paye a CHAQUE duel neuf\n", ms_create);
-		std::printf("  mise en place des decks    : %8.1f ms\n", ms_setup);
-		std::printf("  deroulement de la ligne    : %8.1f ms pour %zu decisions"
-					"  (%.3f ms/decision)\n", first.ms, first.responses_used,
-					first.responses_used ? first.ms / first.responses_used : 0.0);
-		std::printf("  => re-simulation complete depuis la racine : %.1f ms\n",
-					ms_create + ms_setup + first.ms);
+		if(g_verbose) {
+			std::printf("\n--- execution cost ---\n");
+			std::printf("  database load        : %8.1f ms  (once "
+									"per process)\n",
+						ms_db);
+			std::printf("  duel + scripts       : %8.1f ms  <-- "
+									"paid for EVERY new duel\n", ms_create);
+			std::printf("  deck setup           : %8.1f ms\n", ms_setup);
+			std::printf("  line replay          : %8.1f ms for "
+									"%zu decisions  (%.3f ms/decision)\n",
+						first.ms, first.responses_used,
+						first.responses_used ? first.ms / first.responses_used : 0.0);
+			std::printf("  => full re-simulation from the root: "
+									"%.1f ms\n",
+						ms_create + ms_setup + first.ms);
+		}
 
 		if(arena_ptr) {
-			double ms_per_decision = first.responses_used
-				? (first.ms - first.ms_write_watch) / first.responses_used : 0.0;
-			ReportDirty(first, *arena_ptr, ms_per_decision);
+			if(g_verbose) {
+				const double ms_per_decision = first.responses_used
+					? (first.ms - first.ms_write_watch) / first.responses_used : 0.0;
+				ReportDirty(first, *arena_ptr, ms_per_decision);
+				const ArenaStats st = arena_ptr->Stats();
+				std::printf("\n--- arena ---\n");
+				std::printf("  committed         : %.2f MB\n", st.committed / 1048576.0);
+				std::printf("  served            : %.2f MB  "
+											"(snapshot bound)\n",
+							st.in_use / 1048576.0);
+				std::printf("  live blocks       : %.2f MB\n", st.live_bytes / 1048576.0);
+				std::printf("  allocations       : %zu, frees "
+											"%zu\n",
+							st.alloc_count, st.free_count);
+				// Scope: THIS arena (the main thread). The workers report through
+				// ReportPoison.
+				std::printf("  arena escapes     : %zu  %s\n", st.host_fallbacks,
+							st.poisoned
+								? "<-- ARENA POISONED: "
+																"state outside the "
+																"snapshot"
+								: "(none on the main "
+																"arena; workers "
+																"report separately)");
+			}
 
-			ArenaStats st = arena_ptr->Stats();
-			std::printf("\n--- arene ---\n");
-			std::printf("  engage            : %.2f Mo\n", st.committed / 1048576.0);
-			std::printf("  zone servie       : %.2f Mo  (borne de l'instantane)\n",
-						st.in_use / 1048576.0);
-			std::printf("  blocs vivants     : %.2f Mo\n", st.live_bytes / 1048576.0);
-			std::printf("  allocations       : %zu, liberations %zu\n",
-						st.alloc_count, st.free_count);
-			// Scope: THIS arena (the main thread). The counter was a `thread_local`
-			// read here, hence structurally zero whatever happened, so the word
-			// "none" was a property of the code, not a measurement. It is now a
-			// member and atomic; the WORKERS' arenas report through ReportPoison.
-			std::printf("  sorties d'arene   : %zu  %s\n", st.host_fallbacks,
-						st.poisoned
-							? "<-- ARENE CORROMPUE : etat hors instantane"
-							: "(aucune sur l'arene principale ; les workers se "
-							  "signalent separement)");
+			// FIDELITY OF THE SNAPSHOT. The verdict gates everything downstream, so it
+			// is always printed; the byte counts and the two fingerprints are detail.
+			if(g_verbose)
+				std::printf("\n--- snapshot fidelity ---\n"
+											"  initial push            : %.2f "
+											"MB, %.2f ms\n",
+							push_bytes / 1048576.0, ms_push);
 
-			std::printf("\n=== test de fidelite de la restauration ===\n");
-			std::printf("  empilement initial        : %.2f Mo, %.2f ms\n",
-						push_bytes / 1048576.0, ms_push);
-
-			// Restore and not Pop: we keep the level so we can come back to it as
-			// often as we like. It is the operation the solver will use on every
-			// sibling of a node.
+			// Restore and not Pop: we keep the level so we can come back to it as often
+			// as we like. It is the operation the solver uses on every sibling of a node.
 			auto t = Clock::now();
 			arena_ptr->Restore();
 			ms_pop = MsSince(t);
-			std::printf("  restauration              : %.2f ms  (%.2f Mo recopies)\n",
-						ms_pop, arena_ptr->LastRestore().bytes / 1048576.0);
-
 			LineResult second = RunLine(duel, *yrp, opt, false);
-			arena_ptr->Restore();   // the stress test restarts from the beginning of the line
+			arena_ptr->Restore();   // the stress test restarts from the top of the line
 
 			bool ok = second.retries == 0 &&
 					  second.responses_used == first.responses_used &&
 					  second.turns == first.turns &&
 					  second.fingerprint_final == first.fingerprint_final &&
 					  second.fingerprint_at_target == first.fingerprint_at_target;
-			std::printf("  rejeu apres restauration  : %zu reponses, %zu retries, "
-						"%d tours\n", second.responses_used, second.retries,
-						second.turns);
-			std::printf("  empreinte board cible     : %016llx vs %016llx\n",
-						(unsigned long long)first.fingerprint_at_target,
-						(unsigned long long)second.fingerprint_at_target);
-			std::printf("  empreinte etat final      : %016llx vs %016llx\n",
-						(unsigned long long)first.fingerprint_final,
-						(unsigned long long)second.fingerprint_final);
-			std::printf("  => %s\n", ok
-				? "IDENTIQUE : l'instantane capture bien tout l'etat du duel"
-				: "DIVERGENCE : l'instantane laisse de l'etat dehors");
-			if(!ok)
+			if(g_verbose) {
+				std::printf("  restore                 : %.2f "
+											"ms  (%.2f MB copied back)\n",
+							ms_pop, arena_ptr->LastRestore().bytes / 1048576.0);
+				std::printf("  replay after restore    : %zu "
+											"answers, %zu retries, %d turns\n",
+							second.responses_used, second.retries, second.turns);
+				std::printf("  target board print      : "
+											"%016llx vs %016llx\n",
+							(unsigned long long)first.fingerprint_at_target,
+							(unsigned long long)second.fingerprint_at_target);
+				std::printf("  final state print       : "
+											"%016llx vs %016llx\n",
+							(unsigned long long)first.fingerprint_final,
+							(unsigned long long)second.fingerprint_final);
+			}
+			if(!ok) {
+				std::printf("!! snapshot fidelity: DIVERGENCE "
+											"- the snapshot leaves state "
+											"outside it\n");
 				exit_code = 1;
+			}
 
 			if(ok)
 				exit_code |= RunStressTest(duel, *yrp, opt, *arena_ptr,
@@ -11592,6 +11622,17 @@ int main(int argc, char** argv) {
 			uint32_t patience = 0;
 			if(ok && (opt.width || opt.solve))
 				patience = MeasureWidth(duel, *yrp, opt, *arena_ptr, first);
+
+			// THE SELF-CHECK LINE. One line at the default level carrying every number
+			// the health gate is read on; --verbose opens the blocks they came from.
+			// A failing check has already said so on its own, above.
+			if(!g_verbose) {
+				std::string sc = ok ? "pass" : "FAILED";
+				for(const std::string* s : { &g_enum_line, &g_stress_line, &g_width_line })
+					if(!s->empty())
+						sc += ", " + *s;
+				std::printf("  self-checks  : %s\n", sc.c_str());
+			}
 			if(ok && opt.growth)
 				RunGrowthMeasurement(duel, *yrp, opt, *arena_ptr, first);
 			if(ok && !opt.fire_spec.empty()) {
@@ -11654,33 +11695,40 @@ int main(int argc, char** argv) {
 						}
 					}
 					if(ok_input && hand.empty()) {
-						std::printf("!! --deck : aucune main de depart\n");
+						std::printf("!! --deck: no "
+															"opening hand\n");
 						ok_input = false;
 					}
 					if(ok_input) {
-						std::printf("\n=== depart synthetique ===\n");
-						std::printf("  decklist : %s (%zu main, %zu extra)\n",
+						std::printf("\n=== synthetic "
+															"start ===\n");
+						std::printf("  decklist: %s (%zu "
+															"main, %zu extra)\n",
 									opt.deck_file.c_str(), ydk.main.size(),
 									ydk.extra.size());
 						// What the TEMPLATE contributes, and nothing else: without this
 						// record, "without a reference" is not verifiable.
-						std::printf("  gabarit  : %s\n"
-									"             drapeaux 0x%llx, %u LP, main %u,"
-									" pioche %u, adversaire %zu+%zu cartes\n",
+						std::printf("  template : %s\n"
+															"             flags "
+															"0x%llx, %u LP, hand "
+															"%u, draw %u, "
+															"opponent %zu+%zu "
+															"cards\n",
 									opt.replay.c_str(),
 									(unsigned long long)yrp->duel_flags,
 									yrp->start_lp, yrp->start_hand,
 									yrp->draw_count,
 									yrp->decks.size() > 1 ? yrp->decks[1].main.size() : 0,
 									yrp->decks.size() > 1 ? yrp->decks[1].extra.size() : 0);
-						std::printf("  main de depart :");
+						std::printf("  opening hand:");
 						for(uint32_t c : hand)
 							std::printf(" %s;", db.Name(db.Canonical(c)).c_str());
 						std::printf("\n");
 						if(BuildSyntheticStart(*yrp, ydk, hand, db, scripts,
 											   opt.arena_mb, synth, derr)) {
-							std::printf("  main forcee et VERIFIEE sur un duel "
-										"jetable.\n");
+							std::printf("  hand forced and "
+																	"VERIFIED on a "
+																	"throwaway duel.\n");
 							synth_ok = true;
 						} else {
 							std::printf("!! %s\n", derr.c_str());
@@ -11689,11 +11737,14 @@ int main(int argc, char** argv) {
 				}
 
 				if(cons.AnyBoardEdit() && !synth_ok && !start_yrp) {
-					std::printf("\n!! --board-add/--board-remove editent la "
-								"CIBLE : exige --deck ou --start\n   (en "
-								"reparation, la reference ne peut plus servir "
-								"de controle sur une cible\n   qu'elle "
-								"n'atteint pas).\n");
+					std::printf("\n!! --board-add/--board-"
+													"remove edit the TARGET: "
+													"they need --deck or "
+													"--start\n   (in repair "
+													"mode the reference can "
+													"no longer act as a "
+													"control on a target\n"
+													"   it does not reach).\n");
 					exit_code = 1;
 				} else if(synth_ok) {
 					// THE INTERNAL LOOP (Go-Explore / Expert Iteration shape). One
@@ -11719,16 +11770,20 @@ int main(int argc, char** argv) {
 							char carried[64] = "";
 							if(opt.carry && !rcarry.archive.empty())
 								std::snprintf(carried, sizeof(carried),
-											  ", archive portee %zu cellule(s)",
+											  ", archive portee "
+																						"%zu cellule(s)",
 											  rcarry.archive.size());
-							std::printf("\n===== ROUND %llu/%llu — budget "
-										"%.0f s%s%s =====\n",
+							std::printf("\n===== ROUND "
+																	"%llu/%llu  -  "
+																	"budget %.0f s%s%s "
+																	"=====\n",
 										(unsigned long long)(round + 1),
 										(unsigned long long)nrounds,
 										ropt.solve_ms / 1000.0,
 										ropt.approach_files.size() >
 												opt.approach_files.size()
-											? ", ligne jointe reinjectee"
+											? ", joint line "
+																						"re-injected"
 											: "", carried);
 						}
 						TransplantOutcome tout;
@@ -11737,9 +11792,10 @@ int main(int argc, char** argv) {
 										   &tout, &rcarry);
 						if(tout.solutions) {
 							if(nrounds > 1)
-								std::printf("\n===== ROUND %llu/%llu : %zu "
-											"solution(s) — la boucle "
-											"s'arrete =====\n",
+								std::printf("\n===== ROUND "
+																			"%llu/%llu: %zu "
+																			"solution(s) - the "
+																			"loop stops =====\n",
 											(unsigned long long)(round + 1),
 											(unsigned long long)nrounds,
 											tout.solutions);
@@ -11753,9 +11809,10 @@ int main(int argc, char** argv) {
 						// loop continues with no line.
 						if(tout.joint_file.empty() &&
 						   !(opt.carry && !rcarry.archive.empty())) {
-							std::printf("\n===== ROUND %llu/%llu : aucune "
-										"ligne jointe ecrite — la boucle "
-										"s'arrete =====\n",
+							std::printf("\n===== ROUND "
+																	"%llu/%llu: no joint "
+																	"line written - the "
+																	"loop stops =====\n",
 										(unsigned long long)(round + 1),
 										(unsigned long long)nrounds);
 							break;
@@ -11778,10 +11835,16 @@ int main(int argc, char** argv) {
 					// neighbourhood, and the constraints force the deviations in the
 					// right place there. NRPA, which rebuilds from scratch, only comes
 					// as a backup, with the rest of the budget.
-					std::printf("\n  La reference viole une contrainte de ligne."
-								"\n  1) reparation a ecarts bornes SOUS "
-								"contraintes (40%% du budget) ;\n  2) sinon, "
-								"repertoire + NRPA sur le meme deck.\n");
+					std::printf("\n  The reference "
+													"violates a line "
+													"constraint.\n"
+													"  1) bounded-discrepancy "
+													"repair UNDER the "
+													"constraints (40%% of the "
+													"budget);\n"
+													"  2) otherwise, "
+													"repertoire + NRPA on the "
+													"same deck.\n");
 					Options ropt = opt;
 					ropt.solve_ms = opt.solve_ms * 0.4;
 					size_t found = RunSolve(duel, *yrp, ropt, *arena_ptr, first,
@@ -11800,10 +11863,15 @@ int main(int argc, char** argv) {
 					// forecast goes unseen: its script runs in repair mode, where
 					// the table is never printed.
 					if(!opt.adapt_files.empty())
-						std::printf("\n!! --adapt est IGNORE en mode reparation "
-									"(sans --start/--fire) : le corpus\n   "
-									"n'entre que par le rejeu d'adaptation de la "
-									"transplantation.\n");
+						std::printf("\n!! --adapt is "
+															"IGNORED in repair "
+															"mode (without "
+															"--start/--fire): "
+															"the corpus\n"
+															"   only enters "
+															"through the "
+															"transplantation's "
+															"adaptation replay.\n");
 					RunSolve(duel, *yrp, opt, *arena_ptr, first, db, scripts,
 							 patience, cons);
 				}
@@ -11813,7 +11881,7 @@ int main(int argc, char** argv) {
 		if(first.retries)
 			exit_code = 1;
 		if(!scripts.Misses().empty()) {
-			std::printf("\n  scripts introuvables (%zu) :", scripts.Misses().size());
+			std::printf("\n  !! scripts not found (%zu):", scripts.Misses().size());
 			int shown = 0;
 			for(const auto& m : scripts.Misses()) {
 				if(shown++ >= 6) { std::printf(" ..."); break; }
@@ -11825,42 +11893,45 @@ int main(int argc, char** argv) {
 		// have paid without it. A high figure names the "script loaded after the
 		// root Push, undone by every Restore" traffic, invisible until now
 		// because nothing counted it.
-		if(scripts.CacheHits())
-			std::printf("\n  cache de scripts : %llu relecture(s) disque "
-						"evitee(s) (%zu script(s) en memoire)\n",
+		if(scripts.CacheHits() && g_verbose)
+			std::printf("\n  script cache: %llu disk re-read(s) "
+									"avoided (%zu script(s) in memory)\n",
 						(unsigned long long)scripts.CacheHits(),
 						scripts.CacheEntries());
 		if(g_depth_fallbacks.load(std::memory_order_relaxed))
-			std::printf("\n  !! %llu recherche(s) de finisseur ont recu le "
-						"plafond de profondeur de REPLI (%u decisions) :\n"
-						"     leur prefixe atteignait deja le plafond global. "
-						"Deux bras compares\n     « a budget egal » n'ont alors "
-						"pas le meme budget de PROFONDEUR.\n",
-						(unsigned long long)g_depth_fallbacks.load(
-							std::memory_order_relaxed),
+			std::printf("\n  !! %llu finisher search(es) received "
+									"the FALLBACK depth ceiling (%u "
+									"decisions):\n     their prefix already "
+									"reached the global ceiling. Two arms "
+									"compared \"at equal budget\" then do not "
+									"have the same DEPTH budget.\n",
+									(unsigned long long)g_depth_fallbacks.load(
+											std::memory_order_relaxed),
 						kFinisherFallbackDepth);
 		if(duel.EmptyProcessorStates())
-			std::printf("\n  !! %zu requete(s) d'etat de processeur VIDES : le "
-						"digest perd sa composante\n     de chaine, deux "
-						"instants d'une meme resolution se confondent, et la "
-						"branche\n     du combo est elaguee des le debut (patch "
-						"C1 defait).\n",
+			std::printf("\n  !! %zu EMPTY processor-state "
+									"query(ies): the digest loses its chain "
+									"component,\n     two instants of the "
+									"same resolution merge, and the combo "
+									"branch is pruned\n     from the start.\n",
 						duel.EmptyProcessorStates());
 		if(!scripts.Unreadable().empty()) {
-			std::printf("\n  !! scripts PRESENTS mais illisibles (%zu) :",
+			std::printf("\n  !! scripts PRESENTS mais illisibles "
+									"(%zu) :",
 						scripts.Unreadable().size());
 			int shown = 0;
 			for(const auto& u : scripts.Unreadable()) {
 				if(shown++ >= 4) { std::printf(" ..."); break; }
 				std::printf(" %s", u.c_str());
 			}
-			std::printf("\n     Le chargeur ne se rabat PAS sur un depot de rang "
-						"inferieur (ce serait\n     une autre version du script) "
-						"— ces cartes sont absentes de l'espace.\n");
+			std::printf("\n     The loader does NOT fall back to "
+									"a lower-priority repository (that would\n"
+									"     be another version of the script) - "
+									"these cards are absent from the space.\n");
 			exit_code = 1;
 		}
 		if(!duel.Errors().empty()) {
-			std::printf("\n  erreurs du core (%zu) :\n", duel.Errors().size());
+			std::printf("\n  !! core errors (%zu):\n", duel.Errors().size());
 			for(size_t i = 0; i < duel.Errors().size() && i < 6; ++i)
 				std::printf("      %s\n", duel.Errors()[i].c_str());
 		}
@@ -11869,23 +11940,27 @@ int main(int argc, char** argv) {
 		// no effect, the deck loads, the duel starts, the line diverges, and
 		// nothing would report it.
 		if(!db.UnknownCodes().empty()) {
-			std::printf("\n  !! codes absents de cards.cdb (%zu) : ",
+			std::printf("\n  !! codes missing from cards.cdb "
+									"(%zu):",
 						db.UnknownCodes().size());
 			int shown = 0;
 			for(uint32_t c : db.UnknownCodes()) {
 				if(shown++ >= 8) { std::printf("..."); break; }
 				std::printf("%u ", c);
 			}
-			std::printf("\n     Ces cartes sont des VANILLES SANS EFFET pour le "
-						"core : toute ligne qui\n     les traverse est fausse. "
-						"cards.cdb est perime ou incomplet.\n");
+			std::printf("\n     These cards are EFFECTLESS "
+									"VANILLAS to the core: any line that goes\n"
+									"     through them is wrong. cards.cdb is "
+									"stale or incomplete.\n");
 		}
 		// Answers the filter decoder could not read.
 		if(UndecodableResponses()) {
-			std::printf("\n  !! %llu reponse(s) INDECODABLES par le filtre "
-						"--no-activate/--no-chain.\n     La disposition des "
-						"messages du core a derive : les filtres ne veulent "
-						"plus rien\n     dire, et ce run est a jeter.\n",
+			std::printf("\n  !! %llu answer(s) UNDECODABLE by the "
+									"--no-activate/--no-chain filter.\n"
+									"     The core message layout has "
+									"drifted: the filters no longer mean "
+									"anything,\n     and this run is to be "
+									"discarded.\n",
 						(unsigned long long)UndecodableResponses());
 			exit_code = 1;
 		}

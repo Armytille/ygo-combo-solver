@@ -119,7 +119,7 @@ bool Duel::Create(const uint64_t seed[4], uint64_t flags, uint32_t lp,
 	}
 	for(const char* boot : { "constant.lua", "utility.lua" }) {
 		if(!LoadScript(boot)) {
-			error = std::string("impossible de charger ") + boot +
+			error = std::string("cannot load ") + boot +
 					" : verifier --workdir / --scriptdir";
 			return false;
 		}
@@ -131,7 +131,7 @@ bool Duel::Setup(const Replay& yrp, std::string& error,
 				 const std::vector<uint32_t>* extra_hand,
 				 uint8_t extra_hand_team) {
 	if(yrp.decks.size() < 2) {
-		error = "le yrp1 ne contient pas deux decks";
+		error = "the yrp1 does not contain two decks";
 		return false;
 	}
 	ArenaScope scope(arena);
