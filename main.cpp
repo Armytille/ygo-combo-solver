@@ -1349,6 +1349,10 @@ struct Options {
 	// A FLAG ONLY FOR AS LONG AS IT TAKES TO MEASURE IT: once it passes on both
 	// benchmarks it becomes the default and the flag becomes negative.
 	bool op_recipes = false;
+	// --zone-serial: the zone demands met enter the novelty partition and the
+	// archive cell key. OFF until an A/B says otherwise (see
+	// SearchConfig::zone_serialize).
+	bool zone_serial = false;
 	// SERIALISATION BY THE MATERIAL BALANCE. A mechanism is a flag ONLY WHILE IT
 	// IS BEING MEASURED, then becomes the default: this one is therefore born on
 	// and is turned off by `--no-serial`, like `--adapt-to-peak` after its
@@ -1545,15 +1549,76 @@ struct Options {
 	// to open opponent response windows.
 	std::vector<std::string> opp_hand_specs;
 	// Editing of the target board, and material constraints.
-	std::vector<std::string> board_add_specs;    // "Naturia Beast[@ATK|DEF]"
+	std::vector<std::string> board_add_specs;    // "Naturia Beast[@atk|def]"
 	std::vector<std::string> board_remove_specs; // "Hot Red Dragon..."
 	// Target board built FROM SCRATCH (--target, same grammar as --board-add).
 	std::vector<std::string> target_specs;
 	std::vector<std::string> material_specs;     // "Chaos Angel:light"
 };
 
+// INCLUSION OR EQUALITY, decided in ONE place.
+//
+// A POSTED target (--target) means "I want these cards", not "these cards and
+// an empty field around them"; a CAPTURED target carries its own spell/trap
+// zone and keeps exact equality. The search computed this rule while the
+// write-time validator read `target_subset` ALONE, so with --target and no
+// explicit --target-subset the search accepted by inclusion and the writer
+// demanded equality: every solution was thrown away as a non-conforming board,
+// and the only conversion ever written had the flag typed out by hand. Three
+// copies of one rule is three chances to disagree; here there is one.
+inline bool GoalBySubset(const Options& opt) {
+	return opt.target_subset ||
+		   (!opt.target_specs.empty() && !opt.target_exact);
+}
+
 // n-th summon (1-based) -> admissible canonical codes.
 using SummonConstraints = std::map<uint32_t, std::vector<uint32_t>>;
+
+// One card DEMANDED by the target, and WHERE. The zone is a LOCATION_ mask, the
+// vocabulary ZoneMaskOf already speaks and the only one in the repository that
+// separates the monster zone (LOCATION_MZONE) from the spell/trap zone
+// (LOCATION_SZONE) -- `field` merges the two, so it cannot express "a trap SET".
+//
+// Two families, and the split runs through the whole pipeline:
+//   ON THE FIELD (MZONE, SZONE) -- enters the BoardKey through the normal route,
+//     where LooseEntryOf already encodes (zone, code, face);
+//   OFF THE FIELD (GRAVE, REMOVED, HAND) -- the BoardKey does not read those
+//     zones at all, so the demand is judged separately, at the FINAL state, by
+//     ZoneGoalHolds.
+struct BoardWant {
+	uint32_t code = 0;        // canonical
+	uint32_t position = 0;    // POS_*; meaningless off the field
+	uint32_t zone = 0;        // LOCATION_ mask, exactly one zone
+	bool OnField() const {
+		return (zone & (LOCATION_MZONE | LOCATION_SZONE)) != 0;
+	}
+};
+
+// The off-field demands, AGGREGATED by (code, zone). Two `--target "X@grave"`
+// are not two demands for one copy each: they are ONE demand for two, and
+// checking "at least one" twice would pass on a single copy. One builder,
+// called wherever the demands are handed to a judge, so the search and the
+// write-time validator cannot aggregate differently.
+inline std::vector<ZoneReq> ZoneReqsFrom(const std::vector<BoardWant>& wants,
+										 const CardDB& db) {
+	std::vector<ZoneReq> out;
+	for(const BoardWant& w : wants) {
+		const uint32_t cc = db.Canonical(w.code);
+		auto it = std::find_if(out.begin(), out.end(), [&](const ZoneReq& r) {
+			return r.code == cc && r.zones == w.zone;
+		});
+		if(it == out.end()) {
+			ZoneReq r;
+			r.code = cc;
+			r.zones = w.zone;
+			r.count = 1;
+			out.push_back(r);
+		} else {
+			++it->count;
+		}
+	}
+	return out;
+}
 
 // The full set of line constraints, resolved into codes.
 struct LineConstraints {
@@ -1587,17 +1652,22 @@ struct LineConstraints {
 	// Material constraint: (canonical card, attribute mask). At least one material
 	// of the summon must carry one of those attributes.
 	std::vector<std::pair<uint32_t, uint32_t>> material_req;
-	// Editing of the TARGET board (this is not a line constraint): cards added
-	// (canonical code, position) and removed. Requires transplantation (--deck or
+	// Editing of the TARGET board (this is not a line constraint): cards demanded
+	// (code, position, ZONE) and removed. Requires transplantation (--deck or
 	// --start): in repair mode the reference can no longer act as a control over a
 	// target it does not reach.
-	std::vector<std::pair<uint32_t, uint32_t>> board_add;
+	std::vector<BoardWant> board_add;
 	std::vector<uint32_t> board_remove;
+	// The OFF-FIELD half of board_add, kept apart because it is judged elsewhere:
+	// the BoardKey reads MZONE and SZONE only. Filled by the same parser, so the
+	// two halves can never disagree on what was asked.
+	std::vector<BoardWant> zone_want;
 	// --target: the target board does NOT start from the reference's capture but
 	// from an empty table. `board_add` then carries the whole target.
 	bool target_scratch = false;
 	bool AnyBoardEdit() const {
-		return !board_add.empty() || !board_remove.empty() || target_scratch;
+		return !board_add.empty() || !zone_want.empty() || !board_remove.empty() ||
+			   target_scratch;
 	}
 	// Every CHOSEN discipline counts, `self_negate` and `guard_keep` included:
 	// leaving one out makes the whole constraint report vanish when it is the
@@ -1710,13 +1780,28 @@ void Usage() {
 				"needed for the core\n                     to open opponent "
 				"response windows. The replays produced\n"
 				"                     only replay with the same --opp-hand.\n"
-				"  --target <c>       BUILD the target board from scratch, "
-				"<c> = card[@ATK|DEF]\n                     (default ATK). "
-				"The reference's capture does not enter.\n"
-				"                     Repeatable.\n"
+				"  --target <c>       BUILD the goal from scratch, <c> = "
+				"card[@zone[:fd]]\n                     (default atk). The "
+				"reference's capture does not enter.\n"
+				"                     Repeatable, and repeats COUNT: two identical "
+				"entries\n                     demand two copies.\n"
+				"                     zone = atk def (monster zone, face up), "
+				"mzone, szone,\n                     hand, grave, banished. "
+				"Add :fd for a card SET\n                     face down "
+				"(mzone:fd a monster, szone:fd a spell or a trap).\n"
+				"                     field is REFUSED here: it means mzone OR "
+				"szone, and\n                     choosing in silence makes "
+				"a demand unsatisfiable unseen.\n"
+				"                     Off the field the demand is checked AT THE "
+				"GOAL, like\n                     --resolve: the board is "
+				"not enough, the card must BE there.\n"
+				"                     Example: --target \"Abominable Chamber of the "
+				"Unchained@szone:fd\"\n                              --target "
+				"\"Unchained Soul of Rage@grave\"\n"
 				"  --board-add <c>    EDIT the captured target board: also "
 				"require this card.\n                     Same grammar as "
-				"--target. Requires --deck or --start.\n"
+				"--target, FIELD zones only (it edits a\n                     "
+				"board). Requires --deck or --start.\n"
 				"  --board-remove <c> EDIT the captured target board: stop "
 				"requiring this card.\n  --target-subset    the final board "
 				"must CONTAIN the target instead of being\n"
@@ -1728,6 +1813,12 @@ void Usage() {
 				"empty spell/trap\n                     zone, which is "
 				"unsatisfiable as soon as the hand holds a\n"
 				"                     continuous spell.\n"
+				"  --zone-serial      let the off-field demands met enter the "
+				"novelty\n                     partition and the archive cell "
+				"key, so something GUIDES\n                     towards them "
+				"instead of only judging them. Off by default,\n"
+				"                     and inert without the ladder (see "
+				"MECANISMES).\n"
 				"  --no-plan          discard the reference's REPERTOIRE: the "
 				"NRPA policy\n                     starts uniform. Measures "
 				"what the reference was worth.\n"
@@ -2221,6 +2312,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 				{ "--carry",            &Options::carry },
 				{ "--no-self-negate",   &Options::no_self_negate },
 				{ "--mp1-only",         &Options::mp1_only },
+				{ "--zone-serial",      &Options::zone_serial },
 			};
 			bool matched = false;
 			for(const auto& f : kBoolFlags)
@@ -2685,6 +2777,15 @@ std::string Trimmed(std::string s) {
 	return s;
 }
 
+// Lowercased copy. The zone grammar is written in lower case everywhere in the
+// repository; a `@GRAVE` typed in capitals used to be rejected as an unknown
+// zone instead of being understood.
+std::string Lowered(std::string s) {
+	for(char& c : s)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	return s;
+}
+
 std::vector<std::string> SplitOn(const std::string& s, char sep) {
 	std::vector<std::string> out;
 	size_t pos = 0;
@@ -2698,12 +2799,23 @@ std::vector<std::string> SplitOn(const std::string& s, char sep) {
 }
 
 // Zone names of the constraint grammar. The French spellings used by the
-// earlier command lines are still accepted, so recorded scripts keep working.
-bool ZoneMaskOf(const std::string& z, uint32_t& mask) {
+// earlier command lines are still accepted, so recorded scripts keep working,
+// and the comparison is case-insensitive.
+//
+// `mzone` and `szone` SPLIT what `field` merges. They exist because a target has
+// to be able to say "a trap SET in the spell/trap zone", which `field`
+// (MZONE|SZONE) cannot express. The constraint flags that predate them keep
+// using `field` and are unchanged.
+bool ZoneMaskOf(const std::string& raw, uint32_t& mask) {
+	const std::string z = Lowered(raw);
 	if(z == "hand" || z == "main")
 		mask = LOCATION_HAND;
 	else if(z == "field" || z == "terrain")
 		mask = LOCATION_MZONE | LOCATION_SZONE;
+	else if(z == "mzone" || z == "monstre")
+		mask = LOCATION_MZONE;
+	else if(z == "szone" || z == "st")
+		mask = LOCATION_SZONE;
 	else if(z == "grave" || z == "graveyard" || z == "cimetiere")
 		mask = LOCATION_GRAVE;
 	else if(z == "banished" || z == "banni")
@@ -2717,15 +2829,22 @@ bool ZoneMaskOf(const std::string& z, uint32_t& mask) {
 // Readable name of a zone mask (the inverse of ZoneMaskOf, for display).
 std::string ZoneMaskName(uint32_t mask) {
 	std::string s;
+	// EXACT match, and the matched bits are consumed: `field` is MZONE|SZONE, so
+	// testing it with `mask & m` printed "field" for a mask carrying only one of
+	// the two. The order is the historical one, so every mask that existed before
+	// `mzone`/`szone` prints exactly as it did.
 	auto add = [&](uint32_t m, const char* n) {
-		if(mask & m) {
+		if((mask & m) == m) {
 			if(!s.empty())
 				s += "+";
 			s += n;
+			mask &= ~m;
 		}
 	};
 	add(LOCATION_HAND, "hand");
 	add(LOCATION_MZONE | LOCATION_SZONE, "field");
+	add(LOCATION_MZONE, "mzone");
+	add(LOCATION_SZONE, "szone");
 	add(LOCATION_GRAVE, "grave");
 	add(LOCATION_REMOVED, "banished");
 	add(LOCATION_EXTRA, "extra");
@@ -2739,8 +2858,8 @@ bool ResolveCardZone(const std::string& item, const CardDB& db, const char* flag
 	std::string card = (at == std::string::npos) ? item : item.substr(0, at);
 	std::string zone = (at == std::string::npos) ? "field" : item.substr(at + 1);
 	if(!ZoneMaskOf(Trimmed(zone), zones)) {
-		std::printf("!! %s : unknown zone \"%s\" (hand field grave "
-							"banished extra)\n", flag, zone.c_str());
+		std::printf("!! %s : unknown zone \"%s\" (hand field mzone "
+							"szone grave banished extra)\n", flag, zone.c_str());
 		return false;
 	}
 	return ResolveCard(Trimmed(card), db, flag, code);
@@ -2879,8 +2998,8 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		if(at != std::string::npos) {
 			if(!ZoneMaskOf(Trimmed(card.substr(at + 1)), req.zones)) {
 				std::printf("!! --resolve: unknown zone "
-											"\"%s\" (hand field grave "
-											"banished extra)\n",
+											"\"%s\" (hand field mzone "
+											"szone grave banished extra)\n",
 							card.substr(at + 1).c_str());
 				return false;
 			}
@@ -2942,36 +3061,99 @@ bool ResolveConstraints(const Options& opt, const CardDB& db,
 		}
 	}
 
-	// --board-add and --target share the "card[@ATK|DEF]" grammar: the first ADDS
-	// to the reference's capture, the second BUILDS the target from scratch. One
-	// parser, so they never diverge.
-	auto parse_board_card = [&](const std::string& spec, const char* flag) -> bool {
+	// --board-add and --target share the "card[@zone[:fd]]" grammar: the first
+	// ADDS to the reference's capture, the second BUILDS the target from scratch.
+	// One parser, so they never diverge -- but the two flags do not admit the same
+	// zones, and `off_field_ok` is what says so, instead of two copies drifting
+	// apart. --board-add EDITS a captured board; a graveyard has no place in it.
+	//
+	// The zone names are ZoneMaskOf's, the ones --resolve/--guard/--no-activate
+	// already use, so the command line has ONE zone vocabulary and not a second
+	// dialect. `atk`/`def` keep their historical meaning, which is simply the
+	// monster zone face up.
+	auto parse_board_card = [&](const std::string& spec, const char* flag,
+								bool off_field_ok) -> bool {
 		size_t at = spec.rfind('@');
 		std::string card = (at == std::string::npos) ? spec : spec.substr(0, at);
-		std::string pos = (at == std::string::npos)
-			? "ATK" : Trimmed(spec.substr(at + 1));
-		uint32_t position = 0;
-		if(pos == "ATK")      position = POS_FACEUP_ATTACK;
-		else if(pos == "DEF") position = POS_FACEUP_DEFENSE;
-		else {
-			std::printf("!! %s: unknown position \"%s\" (ATK or "
-									"DEF)\n",
-						flag, pos.c_str());
+		std::string tail = (at == std::string::npos)
+			? "atk" : Lowered(Trimmed(spec.substr(at + 1)));
+		// The face suffix is OPTIONAL and applies to the field zones only: a card
+		// in the graveyard has no face.
+		bool face_down = false;
+		size_t colon = tail.rfind(':');
+		if(colon != std::string::npos) {
+			const std::string face = Trimmed(tail.substr(colon + 1));
+			if(face != "fd" && face != "set") {
+				std::printf("!! %s: unknown face \"%s\" after \":\" "
+									"(fd)\n", flag, face.c_str());
+				return false;
+			}
+			face_down = true;
+			tail = Trimmed(tail.substr(0, colon));
+		}
+		uint32_t zone = 0, position = 0;
+		if(tail == "atk" || tail == "def") {
+			zone = LOCATION_MZONE;
+			position = (tail == "atk") ? POS_FACEUP_ATTACK : POS_FACEUP_DEFENSE;
+		} else if(!ZoneMaskOf(tail, zone)) {
+			std::printf("!! %s: unknown zone \"%s\" (atk def mzone "
+								"szone hand grave banished)\n", flag, tail.c_str());
 			return false;
+		}
+		// `field`/`terrain` is MZONE|SZONE everywhere else, and that is precisely
+		// what a target cannot afford: picking one of the two in silence is how a
+		// demand becomes unsatisfiable without anyone being told. Same for `extra`,
+		// which is not among the zones this flag covers.
+		if(zone == (LOCATION_MZONE | LOCATION_SZONE)) {
+			std::printf("!! %s: \"field\" is ambiguous here (monster zone "
+								"OR spell/trap zone): write mzone or szone\n", flag);
+			return false;
+		}
+		if(zone == LOCATION_EXTRA) {
+			std::printf("!! %s: the extra deck is not a target zone\n",
+						flag);
+			return false;
+		}
+		const bool on_field = (zone & (LOCATION_MZONE | LOCATION_SZONE)) != 0;
+		if(!on_field) {
+			if(!off_field_ok) {
+				std::printf("!! %s edits a captured BOARD: it takes the "
+									"field zones only (atk def mzone szone)\n", flag);
+				return false;
+			}
+			if(face_down) {
+				std::printf("!! %s: a card off the field has no face, "
+									"drop the \":fd\"\n", flag);
+				return false;
+			}
+		} else if(zone == LOCATION_SZONE) {
+			// A spell/trap SET is face down; activated (or a field spell) it is face
+			// up. Only the FACE is read downstream -- LooseEntryOf normalises to
+			// POS_FACEUP / POS_FACEDOWN -- so the exact battle position is moot here.
+			position = face_down ? POS_FACEDOWN : POS_FACEUP;
+		} else if(face_down) {
+			// A monster SET is face-down DEFENCE, there is no other set position.
+			position = POS_FACEDOWN_DEFENSE;
+		} else if(!position) {
+			position = POS_FACEUP_ATTACK;
 		}
 		uint32_t code = 0;
 		if(!ResolveCard(Trimmed(card), db, flag, code))
 			return false;
-		out.board_add.emplace_back(code, position);
+		BoardWant w;
+		w.code = code;
+		w.position = position;
+		w.zone = zone;
+		(on_field ? out.board_add : out.zone_want).push_back(w);
 		return true;
 	};
 	for(const std::string& spec : opt.board_add_specs)
-		if(!parse_board_card(spec, "--board-add"))
+		if(!parse_board_card(spec, "--board-add", /*off_field_ok=*/false))
 			return false;
 	if(!opt.target_specs.empty()) {
 		out.target_scratch = true;
 		for(const std::string& spec : opt.target_specs)
-			if(!parse_board_card(spec, "--target"))
+			if(!parse_board_card(spec, "--target", /*off_field_ok=*/true))
 				return false;
 	}
 	for(const std::string& spec : opt.board_remove_specs) {
@@ -3938,6 +4120,17 @@ void ReportMechanisms(const SearchConfig& cfg, const char* mode) {
 	// measurement.
 	if(cfg.reenter > 0.0f)
 		dep(!cfg.serial_reqs.empty(), "reenter %.2f", cfg.reenter);
+	// The zone gate reports itself. --zone-serial needs TWO things and says so:
+	// a zone demand to serialise, and the LADDER, for the same reason as
+	// `reenter` -- without a cell structure the archive is a cache, nothing is
+	// re-entered, and a refined cell key changes nothing. Measured: with the
+	// ladder armed, same seed and same budget, 892 rejections over 1118 boards
+	// against 326 over 552 -- a different set of states. Without it, the two
+	// arms returned bit-identical counters.
+	if(!cfg.goal_zone.empty())
+		add(on, "zone-gate %zu", cfg.goal_zone.size());
+	if(cfg.zone_serialize)
+		dep(!cfg.goal_zone.empty() && !cfg.serial_reqs.empty(), "zone-serial");
 	// The refinement requires the ladder AND the balance model to be lent.
 	if(cfg.refine_after)
 		dep(!cfg.serial_reqs.empty() && cfg.balance != nullptr,
@@ -4578,14 +4771,18 @@ size_t RunSolve(Duel& duel, const Replay& yrp, const Options& opt, Arena& arena,
 	// Canonical zones: off unless asked, and wired identically in every mode.
 	cfg.enumeration.canonical_zones = opt.canonical_zones;
 	// POSTED target -> inclusion by default; CAPTURED target -> exact equality.
-	cfg.goal_subset = opt.target_subset ||
-					  (!opt.target_specs.empty() && !opt.target_exact);
+	cfg.goal_subset = GoalBySubset(opt);
 	cfg.summon_constraints = cons.summons;
 	cfg.guard_after = cons.guard_after;
 	cfg.guard_clauses = cons.guard;
 	cfg.guard_keep = cons.guard_keep.empty() ? nullptr : &cons.guard_keep;
 	cfg.guard_opp_hand_release = cons.guard_opp_hand_release;
 	cfg.resolve_min = cons.resolve_min;
+	// The ZONE half of the goal. Wired at every site that builds a SearchConfig
+	// from scratch: a field set in one of them and forgotten in another is how a
+	// mechanism ends up measured on nothing.
+	cfg.goal_zone = ZoneReqsFrom(cons.zone_want, db);
+	cfg.zone_serialize = opt.zone_serial;
 	CheckSaturations(target.codes.size(), cons.resolve_min);
 	cfg.material_req = cons.material_req;
 	cfg.hint_cards = cons.hints;
@@ -5221,6 +5418,8 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 	// the point the experiment aims at.
 	size_t rej_never = 0;
 	const auto con = static_cast<uint8_t>(opt.target_player);
+	// Built ONCE, from the same builder the search used.
+	const std::vector<ZoneReq> zone_reqs = ZoneReqsFrom(cons.zone_want, db);
 	// Summon sequence of the first solution written: the visible proof that a
 	// --summon constraint is met.
 	std::vector<uint32_t> first_summons;
@@ -5365,22 +5564,33 @@ size_t WriteSolutions(const std::vector<Solution>& sols, const Replay& start_yrp
 				for(size_t k = 0; k < cons.resolve_min.size(); ++k)
 					if(resolves[k] < cons.resolve_min[k].min_count)
 						cons_ok = false;
+				// The ZONE demands, re-read on the replayed duel. The search already
+				// imposed them; we check again because "verify before writing" admits
+				// no exception, and a writer that disagrees with the search judge is
+				// exactly the failure this section exists to prevent.
+				if(!ZoneGoalHolds(d, con, zone_reqs))
+					cons_ok = false;
 				// Main goal, or one of the ALTERNATIVE goals (--fire: the board
 				// without the cards sacrificed to answer the threat).
 				const BoardKey fin = ComputeBoardKey(d, con);
-				// Under --target-subset, INCLUSION also governs at WRITE time: the
-				// search judge was already using inclusion for a posted target, but
-				// this validator required strict equality, so the flag changed
-				// NOTHING here and the 6 lines at the goal would be rejected
-				// identically. `entries` is sorted (ComputeBoardKeyInto), so
-				// inclusion is std::includes. Without the flag: strict equality, the
-				// historical behaviour byte for byte.
-				// stricte, comportement historique a l'octet.
+				// THE SAME JUDGE AS THE SEARCH, on both counts.
+				//
+				// GoalBySubset, not `opt.target_subset`: a posted target judges by
+				// INCLUSION on the search side whether or not --target-subset was
+				// typed, and this validator demanding equality is what threw the
+				// solutions away.
+				//
+				// `loose`, not `entries`: a posted target carries neither materials
+				// nor counters -- that is what LooseEntryOf exists for -- so a posted
+				// Xyz could never equal a real one, which always carries some. Both
+				// lists are sorted (ComputeBoardKeyInto), so inclusion is
+				// std::includes. Without inclusion: strict equality, the historical
+				// behaviour byte for byte.
 				const bool full_board =
-					opt.target_subset
-						? std::includes(fin.entries.begin(), fin.entries.end(),
-										target.entries.begin(),
-										target.entries.end())
+					GoalBySubset(opt)
+						? std::includes(fin.loose.begin(), fin.loose.end(),
+										target.loose.begin(),
+										target.loose.end())
 						: fin == target;
 				bool alt_board = false;
 				if(!full_board && target_alts)
@@ -5885,6 +6095,8 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 		SearchConfig probe;
 		ApplyMechanisms(opt, probe);
 		probe.resolve_min = cons.resolve_min;
+		probe.goal_zone = ZoneReqsFrom(cons.zone_want, db);
+		probe.zone_serialize = opt.zone_serial;
 		ReportMechanisms(probe, "fire");
 	}
 	if(!ref.have_target) {
@@ -6485,6 +6697,14 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						if(!fire_no_chain.empty())
 							fcfg.enumeration.no_chain = &fire_no_chain;
 						fcfg.resolve_min = cons.resolve_min;
+						// --fire builds its target from the REFERENCE and ignores
+						// --target, so an off-field demand posted with --target would
+						// apply to a board the operator never described. Wired all the
+						// same, and only because the two must be posted together or not
+						// at all: a goal judged one way here and another way in the
+						// search is worse than either.
+						fcfg.goal_zone = ZoneReqsFrom(cons.zone_want, db);
+						fcfg.zone_serialize = opt.zone_serial;
 						// GUARD ABSENT: the threat has just been spent.
 						fcfg.initial_summons = W.summons;
 						fcfg.initial_turns = W.turns;
@@ -6505,8 +6725,7 @@ void RunFireTest(Duel& duel, Arena& arena, const Replay& yrp,
 						}
 						fcfg.enumeration.canonical_zones = opt.canonical_zones;
 						fcfg.goal_subset =
-							opt.target_subset ||
-							(!opt.target_specs.empty() && !opt.target_exact);
+							GoalBySubset(opt);
 						Search fs(fd, fa, *fyrp, fcfg);
 						fs.RunNrpa(target, plan,
 								   base_seed + w * 0x9E3779B97F4A7C15ull + 1);
@@ -6792,6 +7011,17 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	// zone.
 	std::vector<QueriedCard> posed_mz, posed_sz;
 	bool posed = false;
+	// THE MONSTER-ZONE HALF OF THE TARGET, kept apart from `target.codes`, which
+	// flattens the two field zones into one sorted list with no way back.
+	// The material balance reads its FIELD zone from LOCATION_MZONE alone (see
+	// RefineLadderHere), and the only producers of a `code @FIELD` place are the
+	// summon transitions. A spell or a trap demanded @FIELD is therefore a row
+	// with a positive right-hand side and NO producer: the program turns
+	// infeasible and the WHOLE serialisation chain disarms itself (subgoals,
+	// re-entry, refinement, quotas, cell key) for a modelling gap, not a fact.
+	// This bit us as soon as a CAPTURED target carried an S/T, long before any
+	// target could be posted in one.
+	std::vector<uint32_t> target_mzone;
 	if(cons.AnyBoardEdit()) {
 		// --target: a CLEAN slate. The reference's board does not enter, and that is
 		// the difference between "editing the reference's target" and "posting a
@@ -6827,16 +7057,26 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				edit_ok = false;
 			}
 		}
-		for(const auto& [code, pos] : cons.board_add) {
+		// The demanded card goes to the zone it NAMES. It used to go to the MZONE
+		// whatever was written, which is why no target could ever ask for a spell
+		// or a trap on the field. The off-field demands are not here at all: the
+		// BoardKey reads MZONE and SZONE only, so they are judged by ZoneGoalHolds.
+		for(const BoardWant& w : cons.board_add) {
 			QueriedCard c;
 			c.present = true;
-			c.code = code;
-			c.position = pos;
-			mz.push_back(c);   // the additions are monsters, in the MZONE
+			c.code = w.code;
+			c.position = w.position;
+			(w.zone == LOCATION_SZONE ? sz : mz).push_back(c);
 		}
 		if(!edit_ok)
 			return;
-		if(cons.target_scratch && mz.empty() && sz.empty()) {
+		// A target made of off-field demands ALONE is legal, and it is a degraded
+		// mode we say out loud rather than let it be discovered: with no card on
+		// the field the board goal is empty, so it is reached everywhere and the
+		// zone gate becomes the only judge. The material balance, which needs a
+		// field goal, stays disarmed.
+		if(cons.target_scratch && mz.empty() && sz.empty() &&
+		   cons.zone_want.empty()) {
 			std::printf("!! --target: empty target, nothing to "
 									"reach\n");
 			return;
@@ -6845,6 +7085,9 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		posed_mz = mz;
 		posed_sz = sz;
 		posed = true;
+		for(const auto& c : mz)
+			if(c.present)
+				target_mzone.push_back(c.Code());
 		std::printf("\n--- target board %s ---\n",
 					cons.target_scratch ? "POSTED (--target, "
 															"no reference)"
@@ -6857,12 +7100,27 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(c.present)
 				std::printf("      SZONE %9u  %-36.36s %s\n", c.Code(),
 							db.Name(c.Code()).c_str(), PosName(c.position));
+		// The OFF-FIELD half, printed under the same heading: it is part of the
+		// goal and it must be as visible as the board, or a demand nobody sees is a
+		// demand nobody debugs.
+		for(const BoardWant& w : cons.zone_want)
+			std::printf("      %-5s %9u  %-36.36s\n",
+						ZoneMaskName(w.zone).c_str(), w.code,
+						db.Name(w.code).c_str());
 		if(target.mzone_count > 6)
 			std::printf("  !! %u monsters required: MORE than the "
 									"6 usable zones, target unreachable\n", target.mzone_count);
 	}
+	// A CAPTURED target: same split, read off the reference's own capture.
+	if(!posed)
+		for(const auto& c : ref.target_self.mzone)
+			if(c.present)
+				target_mzone.push_back(c.Code());
 
 	std::printf("  target         : %zu cards\n", target.entries.size());
+	if(!cons.zone_want.empty())
+		std::printf("                   + %zu off-field demand(s)\n",
+					cons.zone_want.size());
 	std::printf("  reference      : %u actions, %zu decisions, %u cards "
 					"burned\n",
 				ref_actions, ref_decisions, ref_burned);
@@ -6880,6 +7138,12 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		std::map<uint32_t, uint32_t> need;
 		for(uint32_t c : target.codes)
 			++need[c];
+		// The off-field demands come under the same rule: a card demanded in the
+		// graveyard still has to come from the deck or the extra deck, there is no
+		// other source, and leaving them out of the count would let the search run
+		// for a goal already known to be out of reach.
+		for(const BoardWant& w : cons.zone_want)
+			++need[db.Canonical(w.code)];
 
 		std::vector<std::pair<uint32_t, uint32_t>> missing;
 		for(const auto& [code, n] : need) {
@@ -6887,11 +7151,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			if(have < n)
 				missing.emplace_back(code, n - have);
 		}
-		std::printf("\n--- feasibility: are the board's cards in this "
+		std::printf("\n--- feasibility: are the goal's cards in this "
 							"deck? ---\n");
 		if(missing.empty()) {
-			std::printf("  all %zu target board cards are "
-									"present.\n",
+			std::printf("  all %zu target cards are present.\n",
 						need.size());
 		} else {
 			for(const auto& [code, n] : missing)
@@ -7188,8 +7451,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 				// material balance's subgoals, on the other hand, exist from the
 				// first brick, and they are COMPUTED (theorems), not guessed.
 				// devines.
+				// MZONE ONLY (see `target_mzone`): a spell or a trap demanded @FIELD
+				// has no producer, and the infeasible program that follows disarms the
+				// whole chain instead of proving anything.
 				std::vector<std::pair<uint32_t, uint32_t>> gc2;
-				for(uint32_t c : target.codes) {
+				for(uint32_t c : target_mzone) {
 					auto it = std::find_if(gc2.begin(), gc2.end(),
 										   [&](const auto& g) {
 											   return g.first == c;
@@ -7571,8 +7837,7 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.enumeration.db = &db;
 	cfg.enumeration.canonical_zones = opt.canonical_zones;
 	// POSTED target -> inclusion by default; CAPTURED target -> exact equality.
-	cfg.goal_subset = opt.target_subset ||
-					  (!opt.target_specs.empty() && !opt.target_exact);
+	cfg.goal_subset = GoalBySubset(opt);
 	cfg.plan_window = 32;
 	cfg.summon_constraints = cons.summons;
 	cfg.guard_after = cons.guard_after;
@@ -7580,6 +7845,11 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 	cfg.guard_keep = cons.guard_keep.empty() ? nullptr : &cons.guard_keep;
 	cfg.guard_opp_hand_release = cons.guard_opp_hand_release;
 	cfg.resolve_min = cons.resolve_min;
+	// The ZONE half of the goal. Wired at every site that builds a SearchConfig
+	// from scratch: a field set in one of them and forgotten in another is how a
+	// mechanism ends up measured on nothing.
+	cfg.goal_zone = ZoneReqsFrom(cons.zone_want, db);
+	cfg.zone_serialize = opt.zone_serial;
 	CheckSaturations(target.codes.size(), cons.resolve_min);
 	// COUNTING DERIVED FROM THE TARGET BOARD. Free, and it answers before the
 	// search a question the search took minutes not to answer: how many summon
@@ -8080,6 +8350,10 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 			uint64_t peak_trunc = 0, tt_reexplored = 0;
 			uint64_t rr[4] = { 0, 0, 0, 0 };
 			uint64_t burn_cuts = 0, goal_hits = 0;
+			// THE ZONE GATE AND ITS DENOMINATOR (--target "card@grave"): states
+			// whose BOARD matched, and those the zone demands then turned away.
+			// Read as a pair, never alone.
+			uint64_t board_reached = 0, zone_rejects = 0;
 			// THE CONSTRAINTS CUT HERE, in the rollouts, not in the LDS passes
 			// where `PrintCuts` already displayed them at zero. Wiring them into
 			// the rollout phase line is the only way to answer the open question:
@@ -8415,6 +8689,8 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						m.rr[k] += s.Stats().resolve_reached[k];
 					m.burn_cuts += s.Stats().burn_cuts;
 					m.goal_hits += s.Stats().goal_hits;
+					m.board_reached += s.Stats().board_reached;
+					m.zone_rejects += s.Stats().zone_gate_reject;
 					m.overlap_ripped = (std::max)(m.overlap_ripped,
 												  s.Stats().best_overlap_ripped);
 					m.overlap = (std::max)(m.overlap, s.Stats().best_overlap);
@@ -8976,6 +9252,20 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 						(unsigned long long)(nrpa.goal_hits + greedy.goal_hits),
 						(unsigned long long)(nrpa.burn_cuts + greedy.burn_cuts),
 						bstr, opt.burn_share ? "" : "  [partage OFF]");
+		}
+		// LIVENESS OF THE ZONE GATE. Printed only when a demand was posted, and
+		// always with its denominator: `0 rejection(s)` over `0 board(s)` says the
+		// board was never reached, over a positive count it says the gate never
+		// bit. Two different verdicts that one number cannot tell apart.
+		if(!cfg.goal_zone.empty()) {
+			const unsigned long long br =
+				(unsigned long long)(nrpa.board_reached + greedy.board_reached);
+			const unsigned long long zr =
+				(unsigned long long)(nrpa.zone_rejects + greedy.zone_rejects);
+			std::printf("  zone gate: %llu rejection(s) over %llu board(s) "
+									"reached%s\n", zr, br,
+						br == 0 ? "   <<< the board itself was never reached"
+								: (zr == 0 ? "   <<< the gate never bit" : ""));
 		}
 		if(!sols.empty())
 			std::printf("  %zu line(s) reaching the board.\n", sols.size());
@@ -10276,9 +10566,15 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 
 	if(sols.empty()) {
 		std::printf("\n  NO line found up to %u discrepancy(ies).\n", reached);
+		// "%u of the %zu BOARD cards": the wording carries the scope, because the
+		// denominator is target.codes.size(), which does not count the off-field
+		// demands. Naming them keeps a full board from reading as a full goal.
 		std::printf("  Best approach: %u of the %zu board cards "
 							"assembled, %u monster(s) placed.\n", best_overlap, target.codes.size(),
 					best_monsters);
+		if(!cons.zone_want.empty())
+			std::printf("                 (+ %zu off-field demand(s), "
+									"outside this count)\n", cons.zone_want.size());
 		if(best_monsters < 2)
 			std::printf("  This hand places almost nothing: the "
 									"blockage is at the opening, not\n"
@@ -10288,8 +10584,19 @@ void RunTransplantSolve(Duel& duel, const Replay& ref_yrp, const Replay& start_y
 		// All the codes are there but the goal does not fire: the difference is a
 		// DETAIL, i.e. position, materials or counters. We display it next to the
 		// target, since it is the only information one can act on.
-		// laquelle on puisse agir.
-		if(best_overlap == target.codes.size() && !best_mzone.empty()) {
+		//
+		// `best_overlap` counts BOARD codes and nothing else, so with an off-field
+		// demand posted (--target "card@grave") "every code is there" would be a
+		// lie: what is missing may be a whole card in the graveyard, not a
+		// position. The claim is withheld and the reason is named -- the peak has
+		// no instrument for the off-field half.
+		if(best_overlap == target.codes.size() && !cons.zone_want.empty())
+			std::printf("\n  every BOARD code is there. The %zu off-field "
+									"demand(s) are not measured\n  by this peak, so this "
+									"says nothing about them.\n",
+						cons.zone_want.size());
+		if(best_overlap == target.codes.size() && !best_mzone.empty() &&
+		   cons.zone_want.empty()) {
 			auto dump = [&](const char* label,
 							const std::vector<QueriedCard>& zone) {
 				for(const auto& c : zone) {
@@ -10858,8 +11165,10 @@ int main(int argc, char** argv) {
 				// mode): read those too, otherwise an activation of the line would
 				// fall into "card outside the table" for a reason that has nothing
 				// to do with the extraction.
-				for(const auto& [c, pos] : cons.board_add)
-					codes.push_back(c);
+				for(const BoardWant& w : cons.board_add)
+					codes.push_back(w.code);
+				for(const BoardWant& w : cons.zone_want)
+					codes.push_back(w.code);
 				for(const ResolveReq& rq : cons.resolve_min)
 					codes.push_back(rq.code);
 				OperatorTable tbl;
@@ -10877,9 +11186,15 @@ int main(int argc, char** argv) {
 				// goal with THREE copies, and that is the whole difference.
 				// Multiplicity is what `RecipeDistance` does not carry and what
 				// the operator bias cannot designate.
+				// MZONE ONLY, the same filter as `gc2` in the search: the balance
+				// model reads its FIELD zone from the monster zone alone, and a card
+				// demanded there that no transition can summon is a row with no
+				// producer, i.e. an infeasible program and a disarmed serialisation.
 				std::vector<std::pair<uint32_t, uint32_t>> goal_counts;
-				for(const auto& [gc, gpos] : cons.board_add) {
-					(void)gpos;
+				for(const BoardWant& w : cons.board_add) {
+					if(w.zone != LOCATION_MZONE)
+						continue;
+					const uint32_t gc = w.code;
 					auto git = std::find_if(
 						goal_counts.begin(), goal_counts.end(),
 						[&](const auto& g) { return g.first == gc; });

@@ -129,6 +129,35 @@ struct ResolveReq {
 	bool on_summon = false;
 };
 
+// PRESENCE of a card in a zone, demanded at the FINAL state (--target
+// "card@grave"). The BoardKey reads the monster and spell/trap zones and
+// NOTHING else, so a demand about the graveyard, the banished pile or the hand
+// cannot be expressed in it and is judged on the side, by ZoneGoalHolds.
+//
+// `zones` is a LOCATION_ mask, the same vocabulary as ResolveReq::zones and
+// GuardAtom::zones; `count` carries the multiplicity, since two --target
+// "X@grave" demand two copies. Like --resolve, this is a MINIMUM: it never
+// prunes mid-line, because a line that has not put the card there yet may
+// still do so.
+struct ZoneReq {
+	uint32_t code = 0;        // canonical
+	uint32_t zones = 0;       // LOCATION_ mask
+	uint32_t count = 1;
+};
+
+// How many of the zone demands are met in the CURRENT state? Empty list -> 0,
+// and it costs not one query. Same cache discipline as GuardHolds; the
+// difference is MULTIPLICITY, which a membership test cannot see.
+//
+// A COUNT rather than a boolean, because the gate needs the boolean but the
+// gradient needs the count, and deriving one from the other beats two walks
+// that could disagree about what "met" means.
+uint32_t ZoneServed(Duel& duel, uint8_t con, const std::vector<ZoneReq>& reqs);
+inline bool ZoneGoalHolds(Duel& duel, uint8_t con,
+						  const std::vector<ZoneReq>& reqs) {
+	return ZoneServed(duel, con, reqs) == reqs.size();
+}
+
 // ACTIVATION zone of a MSG_CHAINING: triggering_location. Payload
 // (processor.cpp:3700): code u32, loc_info (controler u8, location u8,
 // sequence u32, position u32), triggering_controler u8, triggering_location u8
@@ -2589,6 +2618,28 @@ struct SearchConfig {
 	// solution, and the search goes on. At most 4 cards (counters packed as 4 x 16
 	// bits in a path uint64).
 	std::vector<ResolveReq> resolve_min;
+	// ZONE PRESENCE demanded at the goal (--target "card@grave|@banished|@hand").
+	// Same discipline as resolve_min: checked AT THE GOAL, never a mid-line cut.
+	// Empty in every run that does not ask for it, and the check then costs
+	// nothing, not even a query.
+	std::vector<ZoneReq> goal_zone;
+	// --zone-serial: let the zone demands met enter the NOVELTY PARTITION and the
+	// archive cell key, the way the resolutions and the balance rungs already do.
+	// The gate alone is a terminal judge: it says no without saying which way to
+	// go, and a demand nothing guides towards is reached by luck or not at all.
+	//
+	// OFF by default, and it must stay that way until it is measured: refining a
+	// cell key cuts both ways (a finer partition separates states that were
+	// sharing a representative, and dilutes the archive over more cells), and
+	// which way it cuts is a question for an A/B, not for taste.
+	//
+	// It needs the LADDER (serial_reqs) to do anything at all: without a cell
+	// structure nothing is re-entered and a refined key changes no decision.
+	// Measured, same seed and budget: with the ladder, 892 gate rejections over
+	// 1118 boards against 326 over 552 without the flag; with no ladder, the two
+	// arms returned bit-identical counters. ReportMechanisms declares it inert in
+	// that case rather than let a run measure nothing.
+	bool zone_serialize = false;
 	// MATERIAL constraint: when this (canonical) card is summoned, its materials,
 	// the MSG_MOVE entries marked REASON_SYNCHRO|REASON_MATERIAL in the same
 	// resolution, must include at least one card whose attribute intersects the
@@ -3005,6 +3056,15 @@ struct SearchStats {
 	uint64_t replay_chain = 0;
 	uint64_t dive_misses = 0;
 	uint64_t goal_hits = 0;         // goal reached (re-reaches included)
+	// THE ZONE GATE, AND ITS DENOMINATOR. `board_reached` counts the states whose
+	// BOARD matches the target -- unconditionally, gate or no gate;
+	// `zone_gate_reject` counts those the zone demands (--target "card@grave")
+	// then turned away. The pair is what makes the verdict readable: alone,
+	// `zone_gate_reject == 0` cannot tell "the gate is inert" from "the board was
+	// never reached", and a mechanism that cannot report its own liveness turns
+	// every measurement of it into a measurement of nothing.
+	uint64_t board_reached = 0;
+	uint64_t zone_gate_reject = 0;
 	// --- repair ---
 	// Semantic resynchronisations: states whose digest found a point FURTHER ALONG
 	// the reference, making the recorded suffix readable again after a deviation.
@@ -3445,12 +3505,26 @@ private:
 	// REOPENS after each required resolution (--resolve), i.e. serialisation of the
 	// goal on both dimensions, cards placed AND rips done.
 	// posees ET rips faits.
+	// `zone_served`: how many --target zone demands this state meets, computed
+	// ONCE per node by ZoneServedHere and handed to both consumers. It is a
+	// parameter and not a cached member on purpose: the two callers read it for
+	// the same state, and a member would have to be invalidated on every duel
+	// advance AND every arena rewind to stay honest.
 	bool NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
-					uint32_t& stale);
+					uint32_t& stale, uint32_t zone_served);
 	// Go-Explore archive: offers the current state (path = `path`). To be called
 	// AFTER the guard and turn checks: a state that violates the guard or overflows
 	// turn 1 is a starting point condemned in advance.
-	void ArchiveObserve(const BoardKey& here, uint32_t depth, uint64_t resolved);
+	void ArchiveObserve(const BoardKey& here, uint32_t depth, uint64_t resolved,
+						uint32_t zone_served);
+	// Zone demands met in the CURRENT state, or 0 when --zone-serial is off or
+	// nothing was demanded: in that case not one zone is queried.
+	uint32_t ZoneServedHere() {
+		return (zone_serialize_live)
+				   ? ZoneServed(duel, static_cast<uint8_t>(cfg.target_player),
+								cfg.goal_zone)
+				   : 0u;
+	}
 	bool BudgetExhausted() const;
 
 	Duel& duel;
@@ -3628,6 +3702,10 @@ private:
 	// departure rungs (zone 5). Set by InitSerialBase() on entry to each Run*,
 	// never lazily, since the first SerialProgress arrives mid-line.
 	uint32_t serial_res0 = 0;
+	// --zone-serial AND something to serialise. Read on two hot paths per node,
+	// so the conjunction is settled once in the constructor rather than at every
+	// test.
+	bool zone_serialize_live = false;
 	void InitSerialBase();
 	// Uses of the quota hosts along the CURRENT path (cfg.quota_hosts, same index).
 	// Exact in the rollouts (reset per rollout, re-entry prefix included); in the

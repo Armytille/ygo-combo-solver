@@ -261,6 +261,7 @@ Search::Search(Duel& d, Arena& a, const Replay& y, const SearchConfig& c)
 	}
 	for(const ResolveReq& req : cfg.resolve_min)
 		resolve_total += req.min_count;
+	zone_serialize_live = cfg.zone_serialize && !cfg.goal_zone.empty();
 	// Seed of the burned bound: the best burned counts of the previous phases bound
 	// it from the start (anytime only, slack included).
 	if(cfg.anytime && cfg.burn_limit && cfg.burn_slack < 255)
@@ -1655,6 +1656,20 @@ bool Search::GoalCheck(const BoardKey& here, uint32_t depth, uint32_t actions,
 		if(!alt_hit)
 			return false;
 	}
+	// THE BOARD IS THERE. Counted before any further gate, so that a gate
+	// reporting zero rejections can be told apart from a board never reached.
+	++stats.board_reached;
+	// Zone demands (--target "card@grave|@banished|@hand"): the half of the goal
+	// the BoardKey cannot carry, since it reads the monster and spell/trap zones
+	// and nothing else. Same discipline as the resolutions below -- a MINIMUM,
+	// checked at the goal, never a mid-line cut: the line can still put the card
+	// where it is wanted further on.
+	if(!cfg.goal_zone.empty() &&
+	   !ZoneGoalHolds(duel, static_cast<uint8_t>(cfg.target_player),
+					  cfg.goal_zone)) {
+		++stats.zone_gate_reject;
+		return false;
+	}
 	// Resolution minimums (--resolve): a conforming board that has not resolved
 	// what it must is NOT a solution, and the line can still fulfil it further on,
 	// so we do not prune: we continue.
@@ -1787,6 +1802,52 @@ bool GuardHolds(Duel& duel, uint8_t con, const std::vector<GuardClause>& clauses
 	return clauses.empty();
 }
 
+// THE ZONE DEMANDS OF THE GOAL, read on the state.
+//
+// Shaped on GuardHolds just above, and for the same reason: this runs at every
+// state that already reaches the board, so each zone is queried AT MOST ONCE
+// per call and only when a demand names it. Two differences:
+//   - MULTIPLICITY. Two `--target "X@grave"` demand two copies, and a
+//     membership test cannot tell one from two. The demands are aggregated by
+//     (code, zone) upstream, so one entry carries the whole count.
+//   - the field zones never arrive here. MZONE and SZONE demands go into the
+//     BoardKey, where LooseEntryOf already carries (zone, code, face); routing
+//     them here as well would judge the same fact twice, out of step.
+uint32_t ZoneServed(Duel& duel, uint8_t con, const std::vector<ZoneReq>& reqs) {
+	if(reqs.empty())
+		return 0;
+	struct ZoneCache {
+		std::vector<uint32_t> codes;
+		bool loaded = false;
+	};
+	static thread_local ZoneCache hand, grave, removed;
+	hand.loaded = grave.loaded = removed.loaded = false;
+	const CardDB& db = duel.Db();
+	auto count_in = [&](uint32_t loc, ZoneCache& z, uint32_t code) -> uint32_t {
+		if(!z.loaded) {
+			duel.QueryCodes(con, loc, z.codes);
+			for(uint32_t& c : z.codes)
+				c = db.Canonical(c);
+			z.loaded = true;
+		}
+		return static_cast<uint32_t>(
+			std::count(z.codes.begin(), z.codes.end(), code));
+	};
+	uint32_t served = 0;
+	for(const ZoneReq& r : reqs) {
+		uint32_t have = 0;
+		if(r.zones & LOCATION_HAND)
+			have += count_in(LOCATION_HAND, hand, r.code);
+		if(r.zones & LOCATION_GRAVE)
+			have += count_in(LOCATION_GRAVE, grave, r.code);
+		if(r.zones & LOCATION_REMOVED)
+			have += count_in(LOCATION_REMOVED, removed, r.code);
+		if(have >= r.count)
+			++served;
+	}
+	return served;
+}
+
 bool Search::GuardCut(const BoardKey& here, uint32_t summons) {
 	if(cfg.guard_clauses.empty() || summons < cfg.guard_after)
 		return false;
@@ -1829,7 +1890,7 @@ bool Search::SummonsOk(uint32_t before) const {
 }
 
 void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
-							uint64_t resolved) {
+							uint64_t resolved, uint32_t zone_served) {
 	if(!cfg.archive_k)
 		return;
 	const uint32_t overlap = CommonCodes(here.codes, target.codes);
@@ -1959,12 +2020,20 @@ void Search::ArchiveObserve(const BoardKey& here, uint32_t depth,
 	// states with the same vector but different quotas stop sharing a
 	// representative. That was the invisible member of the conjunction, and the
 	// "short path" representative was systematically the state that had not paid.
-	const uint64_t cell =
+	uint64_t cell =
 		cfg.serial_reqs.empty()
 			? here.hash
 			: (0x5E21A1000000000ull ^ sp_vec ^ (QuotaKey() << 52) ^
 			   (sp2_vec * 0x9E3779B97F4A7C15ull) ^
 			   (rvec * 0xA24BAED4963EE407ull));
+	// The zone demands met join the key for the same reason the quotas did: two
+	// states alike in every other respect but not in what they have put in the
+	// graveyard are not interchangeable, and sharing a representative hands the
+	// slot to whichever of the two has not paid. Guarded by --zone-serial, so
+	// with the flag off the key is the previous one byte for byte.
+	if(zone_serialize_live)
+		cell ^= (static_cast<uint64_t>(zone_served) + 1ull) *
+				0xD6E8FEB86659FD93ull;
 	auto it = archive_cells.find(cell);
 	if(it != archive_cells.end()) {
 		ArchiveEntry& e = archive[it->second];
@@ -2051,7 +2120,7 @@ size_t Search::SeedArchive(const std::vector<ArchiveEntry>& seed) {
 }
 
 bool Search::NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
-						uint32_t& stale) {
+						uint32_t& stale, uint32_t zone_served) {
 	if(!cfg.novelty_patience)
 		return false;
 	// Partition on BOTH dimensions of the goal: target cards placed AND required
@@ -2069,6 +2138,13 @@ bool Search::NoveltyCut(const BoardKey& here, uint32_t depth, uint64_t resolved,
 					(SerialProgress(duel, static_cast<uint8_t>(cfg.target_player),
 									cfg.serial_reqs, duel.Db(), serial_res0) &
 					 127u);
+	// THE ZONE DEMANDS MET (--zone-serial, off by default). Same role as the
+	// resolutions above: a demand the table cannot see is a demand nothing
+	// guides towards. The radix is the demand count + 1, so nothing aliases.
+	if(zone_serialize_live)
+		partition = partition *
+						static_cast<uint32_t>(cfg.goal_zone.size() + 1) +
+					zone_served;
 	CollectAtoms(duel, static_cast<uint8_t>(cfg.target_player), here, partition,
 				 atoms_scratch);
 	if(novelty.Observe(atoms_scratch, depth, cfg.novelty_strict)) {
@@ -2136,7 +2212,8 @@ bool Search::DescendGuided(uint32_t depth, uint32_t actions, uint32_t turns,
 	}
 	if(GuardCut(here, total_summons))
 		return false;
-	ArchiveObserve(here, depth, total_resolved);
+	const uint32_t zserved = ZoneServedHere();
+	ArchiveObserve(here, depth, total_resolved, zserved);
 
 	if(depth >= cfg.max_decisions) {
 		++stats.edges_skipped;
@@ -2252,7 +2329,8 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	}
 	if(GuardCut(here, total_summons))
 		return false;
-	ArchiveObserve(here, depth, total_resolved);
+	const uint32_t zserved = ZoneServedHere();
+	ArchiveObserve(here, depth, total_resolved, zserved);
 
 	if(depth >= cfg.max_decisions) {
 		++stats.edges_skipped;
@@ -2266,7 +2344,8 @@ bool Search::DescendRepair(uint32_t depth, uint32_t actions, size_t ref_index,
 	// Novelty pruning, never on the pure prefix (no deviation taken): that is what
 	// guarantees that at zero deviations the reference is found again, and hence
 	// that "no solution" stays a defect signal.
-	if(disc < cfg_discrepancies && NoveltyCut(here, depth, total_resolved, stale))
+	if(disc < cfg_discrepancies &&
+	   NoveltyCut(here, depth, total_resolved, stale, zserved))
 		return false;
 
 	// The deviation budget is the binding constraint: that is what we memoise.
@@ -2459,7 +2538,8 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	}
 	if(GuardCut(here, total_summons))
 		return false;
-	ArchiveObserve(here, depth, total_resolved);
+	const uint32_t zserved = ZoneServedHere();
+	ArchiveObserve(here, depth, total_resolved, zserved);
 
 	if(depth >= cfg.max_decisions) {
 		++stats.edges_skipped;
@@ -2474,7 +2554,8 @@ bool Search::DescendTransplant(uint32_t depth, uint32_t actions, uint32_t disc,
 	// only caught 15 % of the states at one deviation, because it merges only
 	// IDENTICAL states. The pure repertoire prefix (no deviation taken) stays
 	// exempt: the repertoire is the guide, not the explored part.
-	if(disc < cfg_discrepancies && NoveltyCut(here, depth, total_resolved, stale))
+	if(disc < cfg_discrepancies &&
+	   NoveltyCut(here, depth, total_resolved, stale, zserved))
 		return false;
 
 	uint64_t key = Digest();
@@ -2665,7 +2746,7 @@ bool Search::Rollout(uint64_t& rng) {
 			++stats.burn_cuts;
 			return hit;
 		}
-		ArchiveObserve(here, depth, resolved);
+		ArchiveObserve(here, depth, resolved, ZoneServedHere());
 		// Rollout-IW without a tree (a rollout that stops producing anything new is
 		// cut) must NOT cut here. The table is shared between rollouts, so re-walking
 		// the same beginning kills the rollout before it could deviate (2/8 instead
@@ -3185,7 +3266,7 @@ void Search::PolicyRollout(uint64_t& rng, const Policy& pol, NrpaRun& run) {
 			++stats.burn_cuts;
 			return;
 		}
-		ArchiveObserve(here, depth, resolved);
+		ArchiveObserve(here, depth, resolved, ZoneServedHere());
 
 		// --- THE RECIPE GRAPH ON THE HOT PATH -------------------------------
 		// One evaluation for both the distance and the backward progress: the cost IS

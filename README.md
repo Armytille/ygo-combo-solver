@@ -202,13 +202,18 @@ combosolver.exe ref.yrpX --scriptdir <card-scripts> `
 <summary><b>5. Edit the captured board</b> — <code>--board-add --board-remove</code></summary>
 
 `--board-add` and `--board-remove` modify the board captured from the reference
-instead of describing one from scratch. Both require `--deck` or `--start`, and
-take the same grammar as `--target`.
+instead of describing one from scratch. Both require `--deck` or `--start`.
+
+`--board-add` takes the grammar of `--target` restricted to the field zones:
+`atk`, `def`, `mzone`, `szone`, and `:fd` for a card set face down. A board can
+therefore demand a spell or a trap, and not monsters alone. The off-field zones
+are refused here, since this flag edits a board; they belong to `--target`.
 
 ```powershell
 combosolver.exe ref.yrpX --scriptdir <card-scripts> `
     --start other.yrpX `
     --board-add "Crystal Wing" `
+    --board-add "Duel Evolution - Assault Zone@szone" `
     --board-remove 27204311 `
     --solve-ms 600000 `
     --outdir solutions
@@ -227,7 +232,8 @@ combosolver.exe template.yrpX --scriptdir <card-scripts> `
     --deck "C:\Games\ProjectIgnis\deck\Lunalight.ydk" `
     --hand "57103969|57103969|57103969" `
     --target 54701958 --target 54701958 --target 54701958 `
-    --target "90590304@DEF" `
+    --target "90590304@def" `
+    --target "11317977@grave" `
     --max-decisions 700 `
     --solve-ms 900000 `
     --outdir solutions
@@ -236,7 +242,7 @@ combosolver.exe template.yrpX --scriptdir <card-scripts> `
 | Flag | Effect |
 |---|---|
 | `--no-ref` | goal-only mode: the replay supplies flags, life points and opponent only. Implies `--no-plan`, requires `--target` and `--deck` |
-| `--target <card[@ATK\|DEF]>` | describe the board. Repeatable, and repeats count: three identical entries require three copies. Default position ATK |
+| `--target <card[@zone[:fd]]>` | describe the goal. Repeatable, and repeats count: three identical entries require three copies. Default `atk` |
 | `--max-decisions 700` | depth ceiling. In this mode there is no reference line to derive the default from, so set it generously |
 
 The described board is a minimum: a line that also produces something else
@@ -244,6 +250,33 @@ satisfies it. This is `--target-subset`, already the default as soon as a target
 is posted with `--target`. `--target-exact` restores equality and is kept for
 A/B comparisons: it requires an empty spell/trap zone, which is unsatisfiable as
 soon as the hand holds a continuous spell.
+
+A goal is not only a board. `@zone` says WHERE each card is wanted:
+
+```
+--target "Abominable Chamber of the Unchained@szone:fd"   set in the S/T zone
+--target "Unchained Soul of Rage@grave"                   in the graveyard
+```
+
+The field zones (`atk`, `def`, `mzone`, `szone`, with `:fd` for a card set face
+down) are part of the board and are judged with it. The off-field zones
+(`hand`, `grave`, `banished`) are judged at the goal, like `--resolve`: a
+conforming board whose graveyard lacks the demanded card is not a solution, and
+the search carries on. Repeats count there too, so two `@grave` on one card
+demand two copies, which the feasibility check verifies against the decklist
+before any search starts.
+
+`@field` is refused on `--target`: everywhere else it means `mzone` OR `szone`,
+and choosing one of the two in silence is how a demand becomes unsatisfiable
+without anyone being told. Pendulum zones are slots of the spell/trap zone in
+the core, so `@szone` is satisfied by a card in one of them.
+
+The gate reports its own liveness, with a denominator, because `0 rejections`
+alone cannot tell "the demand never bit" from "the board was never reached":
+
+```
+  zone gate: 383 rejection(s) over 608 board(s) reached
+```
 
 </details>
 
@@ -505,13 +538,13 @@ enumeration.
 | Term | Values |
 |---|---|
 | `card` | a passcode, or a name fragment that resolves uniquely |
-| `zone` | `hand`, `field`, `grave`, `banished`, `extra`. Default `field` |
+| `zone` | `hand`, `field`, `mzone`, `szone`, `grave`, `banished`, `extra`. Default `field`. Case-insensitive, and the French spellings (`main`, `terrain`, `cimetiere`, `banni`) are accepted |
 | `attr` | `light`, `dark`, `earth`, `water`, `fire`, `wind`, `divine` |
-| position | `ATK`, `DEF`. Default `ATK` |
+| position | `atk`, `def`. Default `atk`. Suffix `:fd` for a card set face down |
 
 | Flag | Grammar | Meaning |
 |---|---|---|
-| `--target` | `card[@ATK\|DEF]` | require this card on the final board |
+| `--target` | `card[@zone[:fd]]` | require this card, in that zone, at the goal. `@field` refused as ambiguous; `@extra` is not a target zone |
 | `--summon` | `n:card[\|card…]` | the n-th summon, normal or special, must be one of these |
 | `--guard` | `n:clause[\|clause…]`, clause = `card[@zone][+…]` | from the n-th summon on, one clause holds at every opponent window. Predicate atom: `oppbanished>=N` |
 | `--guard-off` | `opphand<=N` | the guard is not required where the opponent holds at most N cards |
@@ -550,7 +583,7 @@ Points of detail:
 
 ## Flag reference
 
-`combosolver.exe --help` prints the same list. All 123 flags follow, grouped as
+`combosolver.exe --help` prints the same list. All 124 flags follow, grouped as
 they are there.
 
 <details>
@@ -577,11 +610,12 @@ they are there.
 | `--deck <f.ydk>` | — | rebuild the reference board from that decklist, with no starting replay. Implies `--solve` |
 | `--hand <cards>` | the reference's | opening hand, cards separated by `\|`. Used with `--deck` |
 | `--opp-hand <c>` | — | add these cards to the opponent's hand, separated by `\|`. Repeatable. Playable cards are needed for the core to open opponent response windows. The replays produced only replay with the same `--opp-hand` |
-| `--target <c>` | — | build the target board from scratch; the reference's capture does not enter. Repeatable, repeats count |
-| `--board-add <c>` | — | edit the captured board: also require this card. Requires `--deck` or `--start` |
+| `--target <c>` | — | build the goal from scratch; the reference's capture does not enter. Repeatable, repeats count. `card[@zone[:fd]]` |
+| `--board-add <c>` | — | edit the captured board: also require this card. Same grammar, FIELD zones only. Requires `--deck` or `--start` |
 | `--board-remove <c>` | — | edit the captured board: stop requiring this card |
 | `--target-subset` | on with `--target` | the final board must contain the target rather than equal it |
 | `--target-exact` | off | restore exact equality, for A/B comparisons. Requires an empty spell/trap zone, unsatisfiable as soon as the hand holds a continuous spell |
+| `--zone-serial` | off | the off-field demands met enter the novelty partition and the archive cell key, so something guides towards them instead of only judging them. Inert without the ladder, and it says so under `MECANISMES` |
 | `--no-plan` | off | discard the reference's repertoire; the policy starts uniform |
 | `--no-ref` | off | goal-only mode: the replay is demoted to a duel template. Implies `--no-plan`, requires `--target` and `--deck` |
 | `--approach <f.yrp>` | — | an approach written by an earlier run, served to the finisher as an extra root, full path plus backtracks. Repeatable. Must come from the same starting duel and `--opp-hand` |
@@ -787,7 +821,8 @@ The report has two levels. **By default** it carries the answer and nothing else
 | Replay result | answers consumed, `MSG_RETRY` | all consumed, `MSG_RETRY` 0 |
 | Possible lines | the raw branching product along this line, and after dedup by code | the size of the problem posed |
 | Cost of the line | cards consumed, burned, actions, decisions | the baseline for task 2 |
-| Target board | the board captured, card by card | the board expected |
+| Target board | the board captured or posted, card by card, off-field demands included | the goal expected |
+| Zone gate | with an off-field `--target`: rejections, over the boards reached | boards reached above zero, or the gate judged nothing |
 | `self-checks` | one line: enumerator coverage, snapshot stress, novelty patience | `pass` |
 | Pruning | per rung: what the search cut (constraint, guard, turn, bound, partition, subsets) and its health (dead ends, terminals, novelty, atoms) | `dead ends` near zero |
 | Solutions | the ranking of the lines found, and the replays written | |
